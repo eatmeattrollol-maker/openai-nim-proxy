@@ -19,10 +19,6 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = true; 
 const ENABLE_THINKING_MODE = true; 
 const DEEPSEEK_REASONING_MODE = "high";
-const payload = {
-    ...req.body,
-    reasoning_effort: req.body.reasoning_effort || "low"
-};
 // ============================================================================
 
 function filterReasoning(text) {
@@ -34,7 +30,7 @@ function filterReasoning(text) {
   const garbagePhrases = [
     "\\*Okay, let me analyze", "\\*The scene:", "\\*The user wants me to",
     "\\*Current situation:", "\\*Key elements to include:", "\\*I need to describe:",
-    "\\*Evelyn's psychology:", "\\*How would Evelyn react\\?", "\\*Physical details to describe:",
+    "\\*Physical details to describe:",
     "\\*I need to avoid:", "\\*I should focus on:", "\\*The act of sliding", "\\*Sound integration:"
   ];
 
@@ -55,7 +51,7 @@ const MODEL_MAPPING = {
   'gemini-pro': 'z-ai/glm-5.1',
   'gemma-romance': 'minimaxai/minimax-m3',
   'claude-3-haiku-20240307': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'gpt-4o-latest': 'mnvidia/nemotron-3-super-120b-a12b',
+  'gpt-4o-latest': 'nvidia/nemotron-3-super-120b-a12b',
   'claude-3-opus-20240229': 'deepseek-ai/deepseek-v4-flash',
   'gpt-4-0613': 'deepseek-ai/deepseek-v4-pro' 
 };
