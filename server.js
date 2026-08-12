@@ -16,7 +16,7 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 // ============================================================================
 // 🔥 MAIN CONTROLS
 // ============================================================================
-const SHOW_REASONING = true; 
+const SHOW_REASONING = false; 
 const ENABLE_THINKING_MODE = true; 
 const DEEPSEEK_REASONING_MODE = "high";
 // ============================================================================
