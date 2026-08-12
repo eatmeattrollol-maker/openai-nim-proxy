@@ -106,7 +106,7 @@ function addModelSpecificSettings(body, model) {
         enable_thinking: false
       };
     } else {
-      body.reasoning_effort = "max";
+      body.reasoning_effort = "high";
     }
 
     return;
