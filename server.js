@@ -206,8 +206,7 @@ function addModelSpecificSettings(body, model) {
   //
 
   if (lower === "nvidia/nemotron-3-ultra-550b-a55b") {
-    body.reasoning_effort = {
-      REASONING_MODE === "off" ? "none" : "high"; {
+    if (REASONING_MODE === "off") {
       body.chat_template_kwargs = {
         ...(body.chat_template_kwargs || {}),
         enable_thinking: false
