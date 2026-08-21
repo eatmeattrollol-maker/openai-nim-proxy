@@ -18,12 +18,12 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 // Your default model.
 // You can change this in Render without touching this file.
 const DEFAULT_MODEL =
-  process.env.DEFAULT_MODEL || "z-ai/glm-5.2";
+  process.env.DEFAULT_MODEL || "deepseek-ai/deepseek-v4-flash-0731";
 
 // Default generation settings.
 // JanitorAI can override these when it sends them.
 const DEFAULT_TEMPERATURE = Number(
-  process.env.DEFAULT_TEMPERATURE || 1.0
+  process.env.DEFAULT_TEMPERATURE || .95
 );
 
 const DEFAULT_TOP_P = Number(
@@ -31,7 +31,7 @@ const DEFAULT_TOP_P = Number(
 );
 
 const DEFAULT_MAX_TOKENS = Number(
-  process.env.DEFAULT_MAX_TOKENS || 16384
+  process.env.DEFAULT_MAX_TOKENS || 384000
 );
 
 // Reasoning behavior:
@@ -99,14 +99,14 @@ function addModelSpecificSettings(body, model) {
   // We use max by default because your goal is maximum
   // narrative/world reasoning rather than minimum latency.
   //
-  if (lower === "z-ai/glm-5.2") {
+  if (lower === "deepseek-ai/deepseek-v4-flash-0731") {
     if (REASONING_MODE === "off") {
       body.chat_template_kwargs = {
         ...(body.chat_template_kwargs || {}),
         enable_thinking: false
       };
     } else {
-      body.reasoning_effort = "low";
+      body.reasoning_effort = "high";
     }
 
     return;
