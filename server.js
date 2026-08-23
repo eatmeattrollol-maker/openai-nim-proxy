@@ -41,7 +41,7 @@ const DEFAULT_MAX_TOKENS = Number(
 //
 // For your use case, keep this ON.
 const REASONING_MODE =
-  process.env.REASONING_MODE || "on";
+  process.env.REASONING_MODE || "off";
 
 // ============================================================
 // EXPRESS
