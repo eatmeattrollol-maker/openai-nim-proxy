@@ -41,7 +41,7 @@ const DEFAULT_MAX_TOKENS = Number(
 //
 // For your use case, keep this ON.
 const REASONING_MODE =
-  process.env.REASONING_MODE || "off";
+  process.env.REASONING_MODE || "on";
 
 // ============================================================
 // EXPRESS
@@ -106,7 +106,7 @@ function addModelSpecificSettings(body, model) {
         enable_thinking: false
       };
     } else {
-      body.reasoning_effort = "high";
+      body.reasoning_effort = "max";
     }
 
     return;
@@ -212,7 +212,7 @@ function addModelSpecificSettings(body, model) {
         enable_thinking: false
       };
     } else {
-      body.reasoning_effort = "medium";
+      body.reasoning_effort = "max";
     }
 
     return;
