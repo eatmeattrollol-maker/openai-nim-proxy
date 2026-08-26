@@ -4,7 +4,11 @@ const axios = require("axios");
 
 const app = express();
 
-const PORT = process.env.PORT || 3000;
+/* ============================================================
+   CONFIG
+============================================================ */
+
+const PORT = Number(process.env.PORT) || 3000;
 
 const NIM_API_BASE =
   process.env.NIM_API_BASE ||
@@ -12,115 +16,57 @@ const NIM_API_BASE =
 
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// ============================================================
-// DEFAULT SETTINGS
-// ============================================================
-//
-// These are ONLY fallbacks.
-//
-// If JanitorAI sends a parameter, we preserve it.
-// This means you can control temperature, top_p, penalties,
-// max tokens, etc. directly from JanitorAI.
-//
-// ============================================================
-
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
   "nvidia/nemotron-3-ultra-550b-a55b";
 
-// ------------------------------------------------------------
-// Sampling
-// ------------------------------------------------------------
-
-const DEFAULT_TEMPERATURE = Number(
-  process.env.DEFAULT_TEMPERATURE || 0.9
-);
-
-const DEFAULT_TOP_P = Number(
-  process.env.DEFAULT_TOP_P || 0.95
-);
-
-// ------------------------------------------------------------
-// Output length
-// ------------------------------------------------------------
-//
-// 32768 is a much more sensible ceiling than 384k.
-//
-// This is maximum GENERATED tokens, not context size.
-//
-// NVIDIA's own Ultra configurations use 16384 and 32768
-// for long-form generation.
-//
-// ------------------------------------------------------------
-
-const DEFAULT_MAX_TOKENS = Number(
-  process.env.DEFAULT_MAX_TOKENS || 32768
-);
-
-// ------------------------------------------------------------
-// Penalties
-// ------------------------------------------------------------
-//
-// These are defaults only.
-//
-// JanitorAI's values override them if supplied.
-//
-// repetition_penalty:
-//   1.0 = neutral
-//
-// frequency_penalty:
-//   0.0 = neutral
-//
-// presence_penalty:
-//   0.0 = neutral
-//
-// For RP, I recommend starting neutral and tuning from
-// JanitorAI rather than forcing aggressive penalties.
-//
-// ------------------------------------------------------------
-
-const DEFAULT_REPETITION_PENALTY = Number(
-  process.env.DEFAULT_REPETITION_PENALTY || 1.0
-);
-
-const DEFAULT_FREQUENCY_PENALTY = Number(
-  process.env.DEFAULT_FREQUENCY_PENALTY || 0.0
-);
-
-const DEFAULT_PRESENCE_PENALTY = Number(
-  process.env.DEFAULT_PRESENCE_PENALTY || 0.0
-);
-
-// ============================================================
-// REASONING
-// ============================================================
-
 const REASONING_MODE =
-  process.env.REASONING_MODE || "on";
+  String(process.env.REASONING_MODE || "on").toLowerCase();
 
-// ------------------------------------------------------------
-// Nemotron Ultra thinking budget
-// ------------------------------------------------------------
-//
-// This controls the maximum thinking tokens separately from
-// the final response.
-//
-// 8192 is a good starting point for RP.
-//
-// Increase this if you want more difficult reasoning,
-// continuity checking, planning, etc.
-//
-// Decrease it if responses become unnecessarily slow.
-//
-// ------------------------------------------------------------
+const DEFAULT_TEMPERATURE =
+  Number.isFinite(Number(process.env.DEFAULT_TEMPERATURE))
+    ? Number(process.env.DEFAULT_TEMPERATURE)
+    : 0.9;
 
-const DEFAULT_THINKING_TOKENS = Number(
-  process.env.DEFAULT_THINKING_TOKENS || 8192
-);
+const DEFAULT_TOP_P =
+  Number.isFinite(Number(process.env.DEFAULT_TOP_P))
+    ? Number(process.env.DEFAULT_TOP_P)
+    : 0.95;
 
-// ============================================================
-// EXPRESS
-// ============================================================
+const DEFAULT_MAX_TOKENS =
+  Number.isFinite(Number(process.env.DEFAULT_MAX_TOKENS))
+    ? Number(process.env.DEFAULT_MAX_TOKENS)
+    : 32768;
+
+const DEFAULT_REPETITION_PENALTY =
+  Number.isFinite(Number(process.env.DEFAULT_REPETITION_PENALTY))
+    ? Number(process.env.DEFAULT_REPETITION_PENALTY)
+    : 1.0;
+
+const DEFAULT_FREQUENCY_PENALTY =
+  Number.isFinite(Number(process.env.DEFAULT_FREQUENCY_PENALTY))
+    ? Number(process.env.DEFAULT_FREQUENCY_PENALTY)
+    : 0.0;
+
+const DEFAULT_PRESENCE_PENALTY =
+  Number.isFinite(Number(process.env.DEFAULT_PRESENCE_PENALTY))
+    ? Number(process.env.DEFAULT_PRESENCE_PENALTY)
+    : 0.0;
+
+const DEFAULT_THINKING_TOKENS =
+  Number.isFinite(Number(process.env.DEFAULT_THINKING_TOKENS))
+    ? Number(process.env.DEFAULT_THINKING_TOKENS)
+    : 8192;
+
+const NIM_TIMEOUT =
+  Number.isFinite(Number(process.env.NIM_TIMEOUT_MS))
+    ? Number(process.env.NIM_TIMEOUT_MS)
+    : 900000;
+
+
+/* ============================================================
+   EXPRESS
+============================================================ */
 
 app.use(cors());
 
@@ -130,198 +76,99 @@ app.use(
   })
 );
 
-// ============================================================
-// HEALTH CHECK
-// ============================================================
 
-app.get("/", (req, res) => {
-  res.json({
-    status: "online",
-    service: "JanitorAI → NVIDIA NIM Proxy",
+/* ============================================================
+   HELPERS
+============================================================ */
 
-    default_model: DEFAULT_MODEL,
-
-    reasoning: REASONING_MODE,
-
-    defaults: {
-      temperature: DEFAULT_TEMPERATURE,
-      top_p: DEFAULT_TOP_P,
-      max_tokens: DEFAULT_MAX_TOKENS,
-      repetition_penalty: DEFAULT_REPETITION_PENALTY,
-      frequency_penalty: DEFAULT_FREQUENCY_PENALTY,
-      presence_penalty: DEFAULT_PRESENCE_PENALTY,
-      thinking_tokens: DEFAULT_THINKING_TOKENS
-    }
-  });
-});
-
-// ============================================================
-// MODEL-SPECIFIC SETTINGS
-// ============================================================
-
-function addModelSpecificSettings(body, model) {
-  const lower = String(model).toLowerCase();
-
-  // ==========================================================
-  // NEMOTRON 3 ULTRA
-  // ==========================================================
-
-  if (
-    lower === "nvidia/nemotron-3-ultra-550b-a55b"
-  ) {
-    body.chat_template_kwargs = {
-      ...(body.chat_template_kwargs || {}),
-
-      enable_thinking:
-        REASONING_MODE !== "off"
-    };
-
-    // --------------------------------------------------------
-    // Thinking budget
-    // --------------------------------------------------------
-    //
-    // NVIDIA's current Ultra documentation uses:
-    //
-    // nvext.max_thinking_tokens
-    //
-    // rather than relying on reasoning_effort.
-    //
-    // --------------------------------------------------------
-
-    if (REASONING_MODE !== "off") {
-      body.nvext = {
-        ...(body.nvext || {}),
-
-        max_thinking_tokens:
-          DEFAULT_THINKING_TOKENS
-      };
-    }
-
-    return;
-  }
-
-  // ==========================================================
-  // GLM / OTHER THINKING MODELS
-  // ==========================================================
-
-  if (
-    lower === "z-ai/glm-5.1" ||
-    lower === "z-ai/glm4.7" ||
-    lower === "google/gemma-4-31b-it" ||
-    lower === "qwen/qwen3.5-122b-a10b" ||
-    lower === "qwen/qwen3.5-397b-a17b" ||
-    lower === "qwen/qwen3-next-80b-a3b-thinking" ||
-    lower === "nvidia/nemotron-3-nano-30b-a3b"
-  ) {
-    body.chat_template_kwargs = {
-      ...(body.chat_template_kwargs || {}),
-
-      enable_thinking:
-        REASONING_MODE !== "off"
-    };
-
-    return;
-  }
-
-  // ==========================================================
-  // DEEPSEEK
-  // ==========================================================
-
-  if (
-    lower ===
-    "deepseek-ai/deepseek-v4-flash-0731"
-  ) {
-    if (REASONING_MODE === "off") {
-      body.chat_template_kwargs = {
-        ...(body.chat_template_kwargs || {}),
-        enable_thinking: false
-      };
-    } else {
-      body.reasoning_effort = "max";
-    }
-
-    return;
-  }
-
-  // ==========================================================
-  // NEMOTRON 3 SUPER
-  // ==========================================================
-
-  if (
-    lower ===
-    "nvidia/nemotron-3-super-120b-a12b"
-  ) {
-    body.reasoning_effort =
-      REASONING_MODE === "off"
-        ? "none"
-        : "high";
-
-    return;
-  }
-
-  // ==========================================================
-  // UNKNOWN MODEL
-  // ==========================================================
-  //
-  // Do nothing.
-  //
-  // This prevents us from guessing how an unknown model
-  // handles reasoning.
-  //
+/**
+ * Returns true only for finite JavaScript numbers.
+ */
+function isNumber(value) {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value)
+  );
 }
 
-// ============================================================
-// NORMALIZE / PRESERVE MESSAGES
-// ============================================================
-//
-// IMPORTANT:
-//
-// We no longer rebuild messages from scratch.
-//
-// This preserves additional message fields JanitorAI may send.
-//
-// The previous version could silently discard useful fields.
-//
-// ============================================================
 
-function normalizeMessages(messages) {
-  if (!Array.isArray(messages)) {
-    return [];
+/**
+ * Converts a value to a number if possible.
+ * Otherwise returns the supplied fallback.
+ */
+function numberOrDefault(value, fallback) {
+  if (isNumber(value)) {
+    return value;
   }
 
-  return messages.filter((message) => {
-    if (!message) return false;
-    if (!message.role) return false;
+  if (
+    typeof value === "string" &&
+    value.trim() !== ""
+  ) {
+    const parsed = Number(value);
+
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return fallback;
+}
+
+
+/**
+ * Parses booleans safely.
+ *
+ * Handles:
+ * true
+ * false
+ * "true"
+ * "false"
+ * 1
+ * 0
+ */
+function parseBoolean(value, fallback) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value
+      .trim()
+      .toLowerCase();
 
     if (
-      message.content === undefined ||
-      message.content === null
+      normalized === "true" ||
+      normalized === "1" ||
+      normalized === "yes"
+    ) {
+      return true;
+    }
+
+    if (
+      normalized === "false" ||
+      normalized === "0" ||
+      normalized === "no"
     ) {
       return false;
     }
+  }
 
-    return true;
-  });
+  return fallback;
 }
 
-// ============================================================
-// NUMERIC PARAMETER HELPER
-// ============================================================
 
-function getNumberOrDefault(
-  value,
-  fallback
-) {
-  return typeof value === "number" &&
-    Number.isFinite(value)
-    ? value
-    : fallback;
-}
-
-// ============================================================
-// ERROR HELPER
-// ============================================================
-
+/**
+ * Sends a consistent JSON error.
+ */
 function sendError(
   res,
   status,
@@ -336,92 +183,355 @@ function sendError(
     return;
   }
 
-  res.status(status).json({
+  const payload = {
     error: {
-      message,
-
-      ...(details
-        ? { details }
-        : {})
+      message: String(message)
     }
+  };
+
+  if (
+    details !== null &&
+    details !== undefined
+  ) {
+    payload.error.details = details;
+  }
+
+  return res
+    .status(status)
+    .json(payload);
+}
+
+
+/* ============================================================
+   MESSAGE NORMALIZATION
+============================================================ */
+
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  return messages.filter((message) => {
+    if (
+      !message ||
+      typeof message !== "object"
+    ) {
+      return false;
+    }
+
+    if (
+      typeof message.role !== "string" ||
+      message.role.trim() === ""
+    ) {
+      return false;
+    }
+
+    if (
+      message.content === undefined ||
+      message.content === null
+    ) {
+      return false;
+    }
+
+    return true;
   });
 }
 
-// ============================================================
-// STRIP REASONING FROM A STREAMING CHUNK
-// ============================================================
-//
-// The model can think internally.
-//
-// JanitorAI should only receive the actual response.
-//
-// We modify JSON deltas rather than regex-filtering raw text.
-//
-// ============================================================
+
+/* ============================================================
+   MODEL-SPECIFIC SETTINGS
+============================================================ */
+
+function addModelSpecificSettings(
+  body,
+  model
+) {
+  const lowerModel =
+    String(model || "").toLowerCase();
+
+  const thinkingEnabled =
+    REASONING_MODE !== "off" &&
+    REASONING_MODE !== "false" &&
+    REASONING_MODE !== "0";
+
+
+  /* ----------------------------------------------------------
+     NEMOTRON 3 ULTRA
+  ---------------------------------------------------------- */
+
+  if (
+    lowerModel ===
+    "nvidia/nemotron-3-ultra-550b-a55b"
+  ) {
+    body.chat_template_kwargs = {
+      ...(body.chat_template_kwargs || {}),
+      enable_thinking: thinkingEnabled
+    };
+
+    if (thinkingEnabled) {
+      body.nvext = {
+        ...(body.nvext || {}),
+        max_thinking_tokens:
+          DEFAULT_THINKING_TOKENS
+      };
+    }
+
+    return;
+  }
+
+
+  /* ----------------------------------------------------------
+     OTHER THINKING MODELS
+  ---------------------------------------------------------- */
+
+  const thinkingModels = new Set([
+    "z-ai/glm-5.1",
+    "z-ai/glm4.7",
+    "google/gemma-4-31b-it",
+    "qwen/qwen3.5-122b-a10b",
+    "qwen/qwen3.5-397b-a17b",
+    "qwen/qwen3-next-80b-a3b-thinking",
+    "nvidia/nemotron-3-nano-30b-a3b"
+  ]);
+
+  if (thinkingModels.has(lowerModel)) {
+    body.chat_template_kwargs = {
+      ...(body.chat_template_kwargs || {}),
+      enable_thinking: thinkingEnabled
+    };
+
+    return;
+  }
+
+
+  /* ----------------------------------------------------------
+     DEEPSEEK
+  ---------------------------------------------------------- */
+
+  if (
+    lowerModel ===
+    "deepseek-ai/deepseek-v4-flash-0731"
+  ) {
+    if (!thinkingEnabled) {
+      body.chat_template_kwargs = {
+        ...(body.chat_template_kwargs || {}),
+        enable_thinking: false
+      };
+    } else {
+      body.reasoning_effort = "max";
+    }
+
+    return;
+  }
+
+
+  /* ----------------------------------------------------------
+     NEMOTRON 3 SUPER
+  ---------------------------------------------------------- */
+
+  if (
+    lowerModel ===
+    "nvidia/nemotron-3-super-120b-a12b"
+  ) {
+    body.reasoning_effort =
+      thinkingEnabled
+        ? "high"
+        : "none";
+
+    return;
+  }
+}
+
+
+/* ============================================================
+   REMOVE REASONING FROM STREAM
+============================================================ */
 
 function stripReasoning(parsed) {
   if (
     !parsed ||
+    typeof parsed !== "object" ||
     !Array.isArray(parsed.choices)
   ) {
     return parsed;
   }
 
   for (const choice of parsed.choices) {
-    if (!choice || !choice.delta) {
+    if (
+      !choice ||
+      typeof choice !== "object" ||
+      !choice.delta ||
+      typeof choice.delta !== "object"
+    ) {
       continue;
     }
 
-    const delta = choice.delta;
-
-    // Common reasoning field.
-    delete delta.reasoning_content;
-
-    // Alternate reasoning field.
-    delete delta.reasoning;
-
-    // Some implementations can expose thinking
-    // under additional fields.
-    delete delta.thinking;
+    delete choice.delta.reasoning_content;
+    delete choice.delta.reasoning;
+    delete choice.delta.thinking;
   }
 
   return parsed;
 }
 
-// ============================================================
-// MAIN CHAT COMPLETIONS ROUTE
-// ============================================================
+
+/* ============================================================
+   SSE EVENT PROCESSOR
+============================================================ */
+
+function processSSEEvent(event) {
+  if (!event || !event.trim()) {
+    return "";
+  }
+
+  const lines =
+    event.split(/\r?\n/);
+
+  const outputLines = [];
+
+  for (const line of lines) {
+    if (!line.startsWith("data:")) {
+      outputLines.push(line);
+      continue;
+    }
+
+    const data =
+      line.slice(5).trim();
+
+    if (!data) {
+      outputLines.push(line);
+      continue;
+    }
+
+    if (data === "[DONE]") {
+      outputLines.push(
+        "data: [DONE]"
+      );
+
+      continue;
+    }
+
+    try {
+      const parsed =
+        JSON.parse(data);
+
+      stripReasoning(parsed);
+
+      outputLines.push(
+        `data: ${JSON.stringify(parsed)}`
+      );
+    } catch (_) {
+      /*
+       * If NVIDIA sends something that isn't JSON,
+       * preserve it instead of destroying the stream.
+       */
+
+      outputLines.push(line);
+    }
+  }
+
+  if (outputLines.length === 0) {
+    return "";
+  }
+
+  return (
+    outputLines.join("\n") +
+    "\n\n"
+  );
+}
+
+
+/* ============================================================
+   HEALTH CHECK
+============================================================ */
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "online",
+    service: "JanitorAI → NVIDIA NIM Proxy",
+
+    default_model:
+      DEFAULT_MODEL,
+
+    reasoning:
+      REASONING_MODE,
+
+    defaults: {
+      temperature:
+        DEFAULT_TEMPERATURE,
+
+      top_p:
+        DEFAULT_TOP_P,
+
+      max_tokens:
+        DEFAULT_MAX_TOKENS,
+
+      repetition_penalty:
+        DEFAULT_REPETITION_PENALTY,
+
+      frequency_penalty:
+        DEFAULT_FREQUENCY_PENALTY,
+
+      presence_penalty:
+        DEFAULT_PRESENCE_PENALTY,
+
+      thinking_tokens:
+        DEFAULT_THINKING_TOKENS
+    }
+  });
+});
+
+
+/* ============================================================
+   CHAT COMPLETIONS
+============================================================ */
 
 app.post(
   "/v1/chat/completions",
   async (req, res) => {
     try {
-      // ======================================================
-      // API KEY
-      // ======================================================
 
-      if (!NIM_API_KEY) {
+      /* --------------------------------------------------------
+         API KEY
+      -------------------------------------------------------- */
+
+      if (
+        !NIM_API_KEY ||
+        typeof NIM_API_KEY !== "string"
+      ) {
         return sendError(
           res,
           500,
-          "NIM_API_KEY is not configured on Render."
+          "NIM_API_KEY is not configured."
         );
       }
 
-      const incoming =
-        req.body || {};
 
-      // ======================================================
-      // MODEL
-      // ======================================================
+      /* --------------------------------------------------------
+         REQUEST BODY
+      -------------------------------------------------------- */
+
+      const incoming =
+        req.body &&
+        typeof req.body === "object"
+          ? req.body
+          : {};
+
+
+      /* --------------------------------------------------------
+         MODEL
+      -------------------------------------------------------- */
 
       const model =
-        incoming.model ||
-        DEFAULT_MODEL;
+        typeof incoming.model === "string" &&
+        incoming.model.trim() !== ""
+          ? incoming.model
+          : DEFAULT_MODEL;
 
-      // ======================================================
-      // MESSAGES
-      // ======================================================
+
+      /* --------------------------------------------------------
+         MESSAGES
+      -------------------------------------------------------- */
 
       const messages =
         normalizeMessages(
@@ -436,215 +546,165 @@ app.post(
         );
       }
 
-      // ======================================================
-      // STREAM
-      // ======================================================
-      //
-      // Don't use Boolean(value).
-      //
-      // Boolean("false") === true in JavaScript.
-      //
-      // ======================================================
+
+      /* --------------------------------------------------------
+         STREAM
+      -------------------------------------------------------- */
 
       const stream =
-        incoming.stream === undefined
-          ? true
-          : incoming.stream === true;
+        parseBoolean(
+          incoming.stream,
+          true
+        );
 
-      // ======================================================
-      // GENERATION PARAMETERS
-      // ======================================================
+
+      /* --------------------------------------------------------
+         BASE NIM REQUEST
+      -------------------------------------------------------- */
 
       const nimRequest = {
         model,
         messages,
 
         temperature:
-          getNumberOrDefault(
+          numberOrDefault(
             incoming.temperature,
             DEFAULT_TEMPERATURE
           ),
 
         top_p:
-          getNumberOrDefault(
+          numberOrDefault(
             incoming.top_p,
             DEFAULT_TOP_P
           ),
 
         max_tokens:
-          getNumberOrDefault(
+          numberOrDefault(
             incoming.max_tokens,
             DEFAULT_MAX_TOKENS
           ),
 
-        // ----------------------------------------------------
-        // IMPORTANT:
-        //
-        // JanitorAI's values are forwarded if supplied.
-        //
-        // ----------------------------------------------------
-
-       // Only forward penalties if JanitorAI actually supplied them.
-
-if (typeof incoming.repetition_penalty === "number") {
-  nimRequest.repetition_penalty =
-    incoming.repetition_penalty;
-}
-
-if (typeof incoming.frequency_penalty === "number") {
-  nimRequest.frequency_penalty =
-    incoming.frequency_penalty;
-}
-
-if (typeof incoming.presence_penalty === "number") {
-  nimRequest.presence_penalty =
-    incoming.presence_penalty;
-}
-
         stream
       };
 
-      // ======================================================
-      // OPTIONAL PARAMETERS
-      // ======================================================
+
+      /* --------------------------------------------------------
+         PENALTIES
+      -------------------------------------------------------- */
 
       if (
-        incoming.stop !== undefined
+        incoming.repetition_penalty !==
+        undefined
       ) {
-        nimRequest.stop =
-          incoming.stop;
+        nimRequest.repetition_penalty =
+          numberOrDefault(
+            incoming.repetition_penalty,
+            DEFAULT_REPETITION_PENALTY
+          );
       }
 
       if (
-        incoming.seed !== undefined
+        incoming.frequency_penalty !==
+        undefined
       ) {
-        nimRequest.seed =
-          incoming.seed;
+        nimRequest.frequency_penalty =
+          numberOrDefault(
+            incoming.frequency_penalty,
+            DEFAULT_FREQUENCY_PENALTY
+          );
       }
 
       if (
-        incoming.tools !== undefined
+        incoming.presence_penalty !==
+        undefined
       ) {
-        nimRequest.tools =
-          incoming.tools;
+        nimRequest.presence_penalty =
+          numberOrDefault(
+            incoming.presence_penalty,
+            DEFAULT_PRESENCE_PENALTY
+          );
       }
 
-      if (
-        incoming.tool_choice !== undefined
+
+      /* --------------------------------------------------------
+         OPTIONAL PARAMETERS
+      -------------------------------------------------------- */
+
+      const optionalParameters = [
+        "stop",
+        "seed",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "logprobs",
+        "top_k",
+        "min_tokens",
+        "ignore_eos",
+        "logit_bias",
+        "user",
+        "parallel_tool_calls"
+      ];
+
+      for (
+        const parameter
+        of optionalParameters
       ) {
-        nimRequest.tool_choice =
-          incoming.tool_choice;
+        if (
+          incoming[parameter] !==
+          undefined
+        ) {
+          nimRequest[parameter] =
+            incoming[parameter];
+        }
       }
 
-      if (
-        incoming.response_format !== undefined
-      ) {
-        nimRequest.response_format =
-          incoming.response_format;
-      }
 
-      if (
-        incoming.logprobs !== undefined
-      ) {
-        nimRequest.logprobs =
-          incoming.logprobs;
-      }
-
-      if (
-        incoming.top_k !== undefined
-      ) {
-        nimRequest.top_k =
-          incoming.top_k;
-      }
-
-      if (
-        incoming.min_tokens !== undefined
-      ) {
-        nimRequest.min_tokens =
-          incoming.min_tokens;
-      }
-
-      if (
-        incoming.ignore_eos !== undefined
-      ) {
-        nimRequest.ignore_eos =
-          incoming.ignore_eos;
-      }
-
-      if (
-        incoming.logit_bias !== undefined
-      ) {
-        nimRequest.logit_bias =
-          incoming.logit_bias;
-      }
-
-      if (
-        incoming.user !== undefined
-      ) {
-        nimRequest.user =
-          incoming.user;
-      }
-
-      if (
-        incoming.parallel_tool_calls !== undefined
-      ) {
-        nimRequest.parallel_tool_calls =
-          incoming.parallel_tool_calls;
-      }
-
-      // ======================================================
-      // CLIENT CHAT TEMPLATE SETTINGS
-      // ======================================================
+      /* --------------------------------------------------------
+         CHAT TEMPLATE KWARGS
+      -------------------------------------------------------- */
 
       if (
         incoming.chat_template_kwargs &&
         typeof incoming.chat_template_kwargs ===
-          "object"
+          "object" &&
+        !Array.isArray(
+          incoming.chat_template_kwargs
+        )
       ) {
         nimRequest.chat_template_kwargs = {
           ...incoming.chat_template_kwargs
         };
       }
 
-      // ======================================================
-      // CLIENT nvext SETTINGS
-      // ======================================================
-      //
-      // Preserve any Janitor/client-supplied nvext values.
-      //
-      // Our Ultra thinking budget is applied below.
-      //
-      // ======================================================
+
+      /* --------------------------------------------------------
+         NVEXT
+      -------------------------------------------------------- */
 
       if (
         incoming.nvext &&
-        typeof incoming.nvext === "object"
+        typeof incoming.nvext === "object" &&
+        !Array.isArray(incoming.nvext)
       ) {
         nimRequest.nvext = {
           ...incoming.nvext
         };
       }
 
-      // ======================================================
-      // MODEL-SPECIFIC SETTINGS
-      // ======================================================
+
+      /* --------------------------------------------------------
+         MODEL-SPECIFIC SETTINGS
+      -------------------------------------------------------- */
 
       addModelSpecificSettings(
         nimRequest,
         model
       );
 
-      // ======================================================
-      // OPTIONAL DEBUG LOGGING
-      // ======================================================
-      //
-      // Set DEBUG_PROXY=true on Render if you want to see
-      // exactly what is being sent to NVIDIA.
-      //
-      // We intentionally DO NOT log messages because your
-      // Janitor conversation may contain private content.
-      //
-      // ======================================================
+
+      /* --------------------------------------------------------
+         DEBUG
+      -------------------------------------------------------- */
 
       if (
         process.env.DEBUG_PROXY === "true"
@@ -652,32 +712,43 @@ if (typeof incoming.presence_penalty === "number") {
         console.log(
           "NIM request settings:",
           {
-            model: nimRequest.model,
+            model:
+              nimRequest.model,
+
             temperature:
               nimRequest.temperature,
+
             top_p:
               nimRequest.top_p,
+
             max_tokens:
               nimRequest.max_tokens,
+
             repetition_penalty:
               nimRequest.repetition_penalty,
+
             frequency_penalty:
               nimRequest.frequency_penalty,
+
             presence_penalty:
               nimRequest.presence_penalty,
+
             stream:
               nimRequest.stream,
+
             chat_template_kwargs:
               nimRequest.chat_template_kwargs,
+
             nvext:
               nimRequest.nvext
           }
         );
       }
 
-      // ======================================================
-      // NVIDIA REQUEST CONFIG
-      // ======================================================
+
+      /* --------------------------------------------------------
+         AXIOS CONFIG
+      -------------------------------------------------------- */
 
       const axiosConfig = {
         headers: {
@@ -693,31 +764,22 @@ if (typeof incoming.presence_penalty === "number") {
               : "application/json"
         },
 
-        // ----------------------------------------------------
-        // Long RP generations can legitimately take a while.
-        //
-        // 15 minutes is safer than infinite.
-        // ----------------------------------------------------
-
         timeout:
-          Number(
-            process.env.NIM_TIMEOUT_MS ||
-            900000
-          ),
+          NIM_TIMEOUT,
 
         validateStatus:
           () => true
       };
 
-      // ======================================================
-      // SEND TO NVIDIA
-      // ======================================================
+
+      /* --------------------------------------------------------
+         SEND REQUEST TO NVIDIA
+      -------------------------------------------------------- */
 
       const response =
         await axios.post(
           `${NIM_API_BASE}/chat/completions`,
           nimRequest,
-
           stream
             ? {
                 ...axiosConfig,
@@ -726,41 +788,26 @@ if (typeof incoming.presence_penalty === "number") {
             : axiosConfig
         );
 
-      // ======================================================
-      // NVIDIA ERROR
-      // ======================================================
+
+      /* --------------------------------------------------------
+         NVIDIA ERROR
+      -------------------------------------------------------- */
 
       if (
         response.status < 200 ||
         response.status >= 300
       ) {
+
         let errorBody = "";
 
         if (
           stream &&
           response.data
         ) {
-          await new Promise(
-            (resolve) => {
-              response.data.on(
-                "data",
-                (chunk) => {
-                  errorBody +=
-                    chunk.toString();
-                }
-              );
-
-              response.data.on(
-                "end",
-                resolve
-              );
-
-              response.data.on(
-                "error",
-                resolve
-              );
-            }
-          );
+          errorBody =
+            await readStream(
+              response.data
+            );
         } else {
           errorBody =
             typeof response.data ===
@@ -784,9 +831,10 @@ if (typeof incoming.presence_penalty === "number") {
         );
       }
 
-      // ======================================================
-      // NON-STREAMING
-      // ======================================================
+
+      /* --------------------------------------------------------
+         NON-STREAMING RESPONSE
+      -------------------------------------------------------- */
 
       if (!stream) {
         return res
@@ -794,9 +842,10 @@ if (typeof incoming.presence_penalty === "number") {
           .json(response.data);
       }
 
-      // ======================================================
-      // STREAMING HEADERS
-      // ======================================================
+
+      /* --------------------------------------------------------
+         STREAM HEADERS
+      -------------------------------------------------------- */
 
       res.status(200);
 
@@ -827,21 +876,21 @@ if (typeof incoming.presence_penalty === "number") {
         res.flushHeaders();
       }
 
-      // ======================================================
-      // UPSTREAM STREAM
-      // ======================================================
+
+      /* --------------------------------------------------------
+         UPSTREAM STREAM
+      -------------------------------------------------------- */
 
       const upstream =
         response.data;
 
-      let clientDisconnected =
-        false;
+      let buffer = "";
+      let clientDisconnected = false;
 
       req.on(
         "close",
         () => {
-          clientDisconnected =
-            true;
+          clientDisconnected = true;
 
           try {
             upstream.destroy();
@@ -849,25 +898,15 @@ if (typeof incoming.presence_penalty === "number") {
         }
       );
 
-      // ======================================================
-      // SSE PARSER
-      // ======================================================
-      //
-      // NVIDIA uses SSE.
-      //
-      // We process complete events and preserve normal
-      // content while removing reasoning fields.
-      //
-      // ======================================================
 
-      let buffer = "";
+      /* --------------------------------------------------------
+         STREAM DATA
+      -------------------------------------------------------- */
 
       upstream.on(
         "data",
         (chunk) => {
-          if (
-            clientDisconnected
-          ) {
+          if (clientDisconnected) {
             return;
           }
 
@@ -883,223 +922,76 @@ if (typeof incoming.presence_penalty === "number") {
             events.pop() || "";
 
           for (
-            const event of events
+            const event
+            of events
           ) {
-            if (
-              !event.trim()
-            ) {
+            const output =
+              processSSEEvent(event);
+
+            if (!output) {
               continue;
             }
 
-            const lines =
-              event.split(
-                /\r?\n/
-              );
+            const canContinue =
+              res.write(output);
 
-            const outputLines = [];
+            if (!canContinue) {
+              upstream.pause();
 
-            for (
-              const line of lines
-            ) {
-              if (
-                !line.startsWith(
-                  "data:"
-                )
-              ) {
-                // Preserve other SSE fields.
-                outputLines.push(
-                  line
-                );
-
-                continue;
-              }
-
-              const data =
-                line
-                  .slice(5)
-                  .trim();
-
-              if (!data) {
-                outputLines.push(
-                  line
-                );
-
-                continue;
-              }
-
-              // ------------------------------------------------
-              // DONE
-              // ------------------------------------------------
-
-              if (
-                data === "[DONE]"
-              ) {
-                outputLines.push(
-                  "data: [DONE]"
-                );
-
-                continue;
-              }
-
-              // ------------------------------------------------
-              // JSON DATA
-              // ------------------------------------------------
-
-              try {
-                const parsed =
-                  JSON.parse(data);
-
-                stripReasoning(
-                  parsed
-                );
-
-                outputLines.push(
-                  `data: ${JSON.stringify(parsed)}`
-                );
-              } catch (_) {
-                // Preserve unexpected non-JSON data.
-                outputLines.push(
-                  line
-                );
-              }
-            }
-
-            if (
-              outputLines.length > 0
-            ) {
-              const output =
-                outputLines.join(
-                  "\n"
-                ) +
-                "\n\n";
-
-              // ------------------------------------------------
-              // Backpressure handling
-              // ------------------------------------------------
-
-              const canContinue =
-                res.write(output);
-
-              if (
-                !canContinue
-              ) {
-                upstream.pause();
-
-                res.once(
-                  "drain",
-                  () => {
-                    if (
-                      !clientDisconnected
-                    ) {
-                      upstream.resume();
-                    }
+              res.once(
+                "drain",
+                () => {
+                  if (
+                    !clientDisconnected
+                  ) {
+                    upstream.resume();
                   }
-                );
-              }
+                }
+              );
             }
           }
         }
       );
 
-      // ======================================================
-      // UPSTREAM END
-      // ======================================================
+
+      /* --------------------------------------------------------
+         STREAM END
+      -------------------------------------------------------- */
 
       upstream.on(
         "end",
         () => {
-          if (
-            clientDisconnected
-          ) {
+          if (clientDisconnected) {
             return;
           }
 
-          // --------------------------------------------------
-          // Process any remaining buffered SSE data.
-          // --------------------------------------------------
+          /*
+           * NVIDIA normally terminates SSE events with
+           * a blank line, but process anything remaining
+           * just in case.
+           */
 
-          if (
-            buffer.trim()
-          ) {
-            const lines =
-              buffer.split(
-                /\r?\n/
-              );
+          if (buffer.trim()) {
+            const output =
+              processSSEEvent(buffer);
 
-            const outputLines =
-              [];
-
-            for (
-              const line of lines
-            ) {
-              if (
-                !line.startsWith(
-                  "data:"
-                )
-              ) {
-                outputLines.push(
-                  line
-                );
-
-                continue;
-              }
-
-              const data =
-                line
-                  .slice(5)
-                  .trim();
-
-              if (!data) {
-                continue;
-              }
-
-              if (
-                data === "[DONE]"
-              ) {
-                outputLines.push(
-                  "data: [DONE]"
-                );
-
-                continue;
-              }
-
+            if (output) {
               try {
-                const parsed =
-                  JSON.parse(data);
-
-                stripReasoning(
-                  parsed
-                );
-
-                outputLines.push(
-                  `data: ${JSON.stringify(parsed)}`
-                );
-              } catch (_) {
-                outputLines.push(
-                  line
-                );
-              }
-            }
-
-            if (
-              outputLines.length > 0
-            ) {
-              res.write(
-                outputLines.join(
-                  "\n"
-                ) +
-                  "\n\n"
-              );
+                res.write(output);
+              } catch (_) {}
             }
           }
 
-          res.end();
+          try {
+            res.end();
+          } catch (_) {}
         }
       );
 
-      // ======================================================
-      // UPSTREAM ERROR
-      // ======================================================
+
+      /* --------------------------------------------------------
+         STREAM ERROR
+      -------------------------------------------------------- */
 
       upstream.on(
         "error",
@@ -1109,32 +1001,31 @@ if (typeof incoming.presence_penalty === "number") {
             error.message
           );
 
-          if (
-            !res.headersSent
-          ) {
-            sendError(
+          if (!res.headersSent) {
+            return sendError(
               res,
               502,
               "NVIDIA streaming connection failed.",
               error.message
             );
-          } else {
-            try {
-              res.end();
-            } catch (_) {}
           }
+
+          try {
+            res.end();
+          } catch (_) {}
         }
       );
+
     } catch (error) {
+
       console.error(
         "Proxy error:",
         error.response?.data ||
-          error.message
+          error.message ||
+          error
       );
 
-      if (
-        res.headersSent
-      ) {
+      if (res.headersSent) {
         try {
           res.end();
         } catch (_) {}
@@ -1142,35 +1033,75 @@ if (typeof incoming.presence_penalty === "number") {
         return;
       }
 
-      sendError(
+      return sendError(
         res,
-        error.response?.status ||
-          500,
-
+        error.response?.status || 500,
         error.message ||
           "Proxy request failed.",
-
-        error.response?.data ||
-          null
+        error.response?.data || null
       );
     }
   }
 );
 
-// ============================================================
-// START SERVER
-// ============================================================
+
+/* ============================================================
+   READ STREAM HELPER
+============================================================ */
+
+function readStream(stream) {
+  return new Promise(
+    (resolve) => {
+      let output = "";
+
+      stream.on(
+        "data",
+        (chunk) => {
+          output +=
+            chunk.toString();
+        }
+      );
+
+      stream.on(
+        "end",
+        () => {
+          resolve(output);
+        }
+      );
+
+      stream.on(
+        "error",
+        () => {
+          resolve(output);
+        }
+      );
+    }
+  );
+}
+
+
+/* ============================================================
+   START SERVER
+============================================================ */
 
 app.listen(
   PORT,
   "0.0.0.0",
   () => {
     console.log(
-      `🚀 JanitorAI → NVIDIA NIM proxy running on port ${PORT}`
+      "=========================================="
     );
 
     console.log(
-      `🤖 Default model: ${DEFAULT_MODEL}`
+      "🚀 JanitorAI → NVIDIA NIM Proxy"
+    );
+
+    console.log(
+      `🌐 Port: ${PORT}`
+    );
+
+    console.log(
+      `🤖 Model: ${DEFAULT_MODEL}`
     );
 
     console.log(
@@ -1183,6 +1114,14 @@ app.listen(
 
     console.log(
       `📝 Max output tokens: ${DEFAULT_MAX_TOKENS}`
+    );
+
+    console.log(
+      `⏱️ Timeout: ${NIM_TIMEOUT}ms`
+    );
+
+    console.log(
+      "=========================================="
     );
   }
 );
