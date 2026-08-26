@@ -31,7 +31,7 @@ const DEFAULT_TOP_P = Number(
 );
 
 const DEFAULT_MAX_TOKENS = Number(
-  process.env.DEFAULT_MAX_TOKENS || 384000
+  process.env.DEFAULT_MAX_TOKENS || 32786
 );
 
 // Reasoning behavior:
@@ -205,18 +205,21 @@ function addModelSpecificSettings(body, model) {
   // We want maximum reasoning.
   //
 
-  if (lower === "nvidia/nemotron-3-ultra-550b-a55b") {
-    if (REASONING_MODE === "off") {
-      body.chat_template_kwargs = {
-        ...(body.chat_template_kwargs || {}),
-        enable_thinking: false
-      };
-    } else {
-      body.reasoning_effort = "max";
-    }
+ if (lower === "nvidia/nemotron-3-ultra-550b-a55b") {
+  body.chat_template_kwargs = {
+    ...(body.chat_template_kwargs || {}),
+    enable_thinking: REASONING_MODE !== "off"
+  };
 
-    return;
+  if (REASONING_MODE !== "off") {
+    body.nvext = {
+      ...(body.nvext || {}),
+      max_thinking_tokens: 8192
+    };
   }
+
+  return;
+}
 
   // ----------------------------------------------------------
   // NEMOTRON 3 SUPER
