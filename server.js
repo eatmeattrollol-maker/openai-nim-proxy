@@ -46,7 +46,7 @@ const REASONING_MODE =
  * NVIDIA currently documents:
  *   max_tokens: 1 - 32768
  */
-const DEFAULT_MAX_TOKENS = 32768;
+const DEFAULT_MAX_TOKENS = 65536;
 
 const DEFAULT_TEMPERATURE =
   Number.isFinite(
