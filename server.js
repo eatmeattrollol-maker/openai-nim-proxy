@@ -51,7 +51,7 @@ const MODELS = {
       "max"
     ],
 
-    defaultReasoningEffort: "high",
+    defaultReasoningEffort: "low",
 
     /*
      * NVIDIA's current NIM endpoint documents max_tokens
@@ -75,11 +75,12 @@ const MODELS = {
      */
     reasoningLevels: [
       "none",
+      "low",
       "high",
       "max"
     ],
 
-    defaultReasoningEffort: "high",
+    defaultReasoningEffort: "low",
 
     maxOutputTokens: 16384,
 
