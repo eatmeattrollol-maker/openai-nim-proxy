@@ -1,71 +1,17 @@
 ```js
 "use strict";
 
-/*
- * ============================================================
- * JanitorAI -> NVIDIA NIM OpenAI-Compatible Proxy
- * ============================================================
- *
- * Supported NVIDIA NIM models:
- *
- *   1. nvidia/nemotron-3-ultra-550b-a55b
- *   2. deepseek-ai/deepseek-v4-flash-0731
- *   3. deepseek-ai/deepseek-v4-pro-0813
- *   4. moonshotai/kimi-k3
- *
- * IMPORTANT:
- *
- * Reasoning configuration is centralized in MODEL_CONFIG below.
- *
- * You can change:
- *
- *   reasoningBudget
- *   reasoningEffort
- *   maxTokens
- *   temperature
- *   topP
- *
- * independently for each model.
- *
- * Example:
- *
- *   reasoningBudget: 16384
- *
- * The exact meaning of the budget depends on the model:
- *
- * - Nemotron Ultra:
- *     sends reasoning_budget directly.
- *
- * - DeepSeek V4 Flash:
- *     uses thinking + reasoning_effort.
- *
- * - DeepSeek V4 Pro:
- *     uses thinking + reasoning_effort.
- *
- * - Kimi K3:
- *     always thinks and uses reasoning_effort.
- *
- * DeepSeek/Kimi do NOT currently document a universal
- * token-level reasoning_budget parameter on their NIM
- * endpoints, so this proxy does NOT blindly send an
- * unsupported reasoning_budget to them.
- *
- * ============================================================
- */
-
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 
 const app = express();
 
-
 /* ============================================================
-   ENVIRONMENT
+   CONFIGURATION
    ============================================================ */
 
-const PORT =
-  Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 const NIM_API_BASE = (
   process.env.NIM_API_BASE ||
@@ -82,173 +28,56 @@ const DEFAULT_MODEL =
   "deepseek-ai/deepseek-v4-flash-0731";
 
 const NIM_TIMEOUT =
-  Number.isFinite(
-    Number(process.env.NIM_TIMEOUT_MS)
-  )
+  Number.isFinite(Number(process.env.NIM_TIMEOUT_MS))
     ? Number(process.env.NIM_TIMEOUT_MS)
     : 900000;
 
 const DEBUG_PROXY =
-  String(
-    process.env.DEBUG_PROXY || "false"
-  )
+  String(process.env.DEBUG_PROXY || "false")
     .trim()
     .toLowerCase() === "true";
 
 
 /* ============================================================
-   GLOBAL DEFAULTS
-   ============================================================ */
-
-const DEFAULT_MAX_TOKENS =
-  Number.isFinite(
-    Number(process.env.DEFAULT_MAX_TOKENS)
-  )
-    ? Number(process.env.DEFAULT_MAX_TOKENS)
-    : 32768;
-
-const DEFAULT_TEMPERATURE =
-  Number.isFinite(
-    Number(process.env.DEFAULT_TEMPERATURE)
-  )
-    ? Number(process.env.DEFAULT_TEMPERATURE)
-    : 1.0;
-
-const DEFAULT_TOP_P =
-  Number.isFinite(
-    Number(process.env.DEFAULT_TOP_P)
-  )
-    ? Number(process.env.DEFAULT_TOP_P)
-    : 0.95;
-
-const DEFAULT_REASONING_BUDGET =
-  Number.isFinite(
-    Number(process.env.DEFAULT_REASONING_BUDGET)
-  )
-    ? Number(process.env.DEFAULT_REASONING_BUDGET)
-    : 16384;
-
-const DEFAULT_REASONING_EFFORT =
-  String(
-    process.env.DEFAULT_REASONING_EFFORT || "high"
-  )
-    .trim()
-    .toLowerCase();
-
-const DEFAULT_REPETITION_PENALTY =
-  Number.isFinite(
-    Number(process.env.DEFAULT_REPETITION_PENALTY)
-  )
-    ? Number(process.env.DEFAULT_REPETITION_PENALTY)
-    : 1.0;
-
-const DEFAULT_FREQUENCY_PENALTY =
-  Number.isFinite(
-    Number(process.env.DEFAULT_FREQUENCY_PENALTY)
-  )
-    ? Number(process.env.DEFAULT_FREQUENCY_PENALTY)
-    : 0.0;
-
-const DEFAULT_PRESENCE_PENALTY =
-  Number.isFinite(
-    Number(process.env.DEFAULT_PRESENCE_PENALTY)
-  )
-    ? Number(process.env.DEFAULT_PRESENCE_PENALTY)
-    : 0.0;
-
-
-/* ============================================================
    MODEL CONFIGURATION
    ============================================================
- *
- * THIS IS THE MAIN SECTION YOU WILL EDIT.
- *
- * Change reasoningBudget for each model here.
- *
- * Examples:
- *
- *   reasoningBudget: 8192
- *   reasoningBudget: 16384
- *   reasoningBudget: 32768
- *
- * For models using effort levels, the proxy converts
- * the numeric budget into:
- *
- *   low
- *   high
- *   max
- *
- * You can also directly force an effort level with:
- *
- *   reasoningEffort: "low"
- *   reasoningEffort: "high"
- *   reasoningEffort: "max"
- *
- * Set reasoningEffort to null if you want the proxy to
- * automatically derive it from reasoningBudget.
- *
- * ============================================================
- */
+   
+   THIS IS THE MAIN SECTION YOU EDIT.
+   
+   reasoningBudget:
+     Your preferred numeric "budget" for your own configuration.
+   
+   reasoningEffort:
+     The actual setting sent to NVIDIA:
+   
+       low
+       high
+       max
+   
+   IMPORTANT:
+   
+   DeepSeek V4 and Kimi K3 do NOT use a universal numeric
+   reasoning_budget parameter in the current NVIDIA examples.
+   
+   Therefore:
+   
+     reasoningBudget = YOUR CONFIGURATION VALUE
+   
+     reasoningEffort = ACTUAL NIM VALUE
+   
+   You can adjust both independently.
+   
+   ============================================================ */
 
 const MODEL_CONFIG = {
 
-  /*
-   * ----------------------------------------------------------
-   * NVIDIA NEMOTRON ULTRA
-   * ----------------------------------------------------------
-   *
-   * This model supports an actual reasoning_budget parameter.
-   */
-
-  "nvidia/nemotron-3-ultra-550b-a55b": {
-
-    displayName:
-      "NVIDIA Nemotron 3 Ultra 550B",
-
-    type:
-      "nemotron",
-
-    reasoning:
-      true,
-
-    reasoningBudget:
-      16384,
-
-    reasoningEffort:
-      "high",
-
-    maxTokens:
-      32768,
-
-    temperature:
-      1.0,
-
-    topP:
-      0.95
-  },
-
-
-  /*
-   * ----------------------------------------------------------
-   * DEEPSEEK V4 FLASH 0731
-   * ----------------------------------------------------------
-   *
-   * NVIDIA currently exposes:
-   *
-   *   thinking: true/false
-   *   reasoning_effort: low/high/max
-   *
-   * We therefore use reasoningBudget as YOUR convenient
-   * configuration dial and translate it into effort.
-   */
-
   "deepseek-ai/deepseek-v4-flash-0731": {
 
-    displayName:
+    name:
       "DeepSeek V4 Flash 0731",
 
-    type:
-      "deepseek",
+    provider:
+      "deepseek-ai",
 
     reasoning:
       true,
@@ -260,7 +89,7 @@ const MODEL_CONFIG = {
       "high",
 
     maxTokens:
-      32768,
+      16384,
 
     temperature:
       1.0,
@@ -269,20 +98,14 @@ const MODEL_CONFIG = {
       0.95
   },
 
-
-  /*
-   * ----------------------------------------------------------
-   * DEEPSEEK V4 PRO 0813
-   * ----------------------------------------------------------
-   */
 
   "deepseek-ai/deepseek-v4-pro-0813": {
 
-    displayName:
+    name:
       "DeepSeek V4 Pro 0813",
 
-    type:
-      "deepseek",
+    provider:
+      "deepseek-ai",
 
     reasoning:
       true,
@@ -294,7 +117,7 @@ const MODEL_CONFIG = {
       "max",
 
     maxTokens:
-      32768,
+      16384,
 
     temperature:
       1.0,
@@ -304,29 +127,13 @@ const MODEL_CONFIG = {
   },
 
 
-  /*
-   * ----------------------------------------------------------
-   * KIMI K3
-   * ----------------------------------------------------------
-   *
-   * Kimi K3 ALWAYS reasons.
-   *
-   * Supported effort:
-   *
-   *   low
-   *   high
-   *   max
-   *
-   * There is no "off" setting.
-   */
-
   "moonshotai/kimi-k3": {
 
-    displayName:
+    name:
       "Kimi K3",
 
-    type:
-      "kimi",
+    provider:
+      "moonshotai",
 
     reasoning:
       true,
@@ -336,6 +143,34 @@ const MODEL_CONFIG = {
 
     reasoningEffort:
       "max",
+
+    maxTokens:
+      16384,
+
+    temperature:
+      1.0,
+
+    topP:
+      0.95
+  },
+
+
+  "nvidia/nemotron-3-ultra-550b-a55b": {
+
+    name:
+      "NVIDIA Nemotron 3 Ultra 550B",
+
+    provider:
+      "nvidia",
+
+    reasoning:
+      true,
+
+    reasoningBudget:
+      16384,
+
+    reasoningEffort:
+      "high",
 
     maxTokens:
       32768,
@@ -350,29 +185,13 @@ const MODEL_CONFIG = {
 
 
 /* ============================================================
-   MODEL ALIASES
-   ============================================================
- *
- * These let clients use shorter model names if desired.
- *
- * Example:
- *
- *   "kimi-k3"
- *
- * instead of:
- *
- *   "moonshotai/kimi-k3"
- *
- * ============================================================
- */
+   OPTIONAL MODEL ALIASES
+   ============================================================ */
 
 const MODEL_ALIASES = {
 
-  "nemotron":
-    "nvidia/nemotron-3-ultra-550b-a55b",
-
-  "ultra":
-    "nvidia/nemotron-3-ultra-550b-a55b",
+  "flash":
+    "deepseek-ai/deepseek-v4-flash-0731",
 
   "deepseek-flash":
     "deepseek-ai/deepseek-v4-flash-0731",
@@ -380,8 +199,8 @@ const MODEL_ALIASES = {
   "deepseek-v4-flash":
     "deepseek-ai/deepseek-v4-flash-0731",
 
-  "flash":
-    "deepseek-ai/deepseek-v4-flash-0731",
+  "pro":
+    "deepseek-ai/deepseek-v4-pro-0813",
 
   "deepseek-pro":
     "deepseek-ai/deepseek-v4-pro-0813",
@@ -389,19 +208,22 @@ const MODEL_ALIASES = {
   "deepseek-v4-pro":
     "deepseek-ai/deepseek-v4-pro-0813",
 
-  "pro":
-    "deepseek-ai/deepseek-v4-pro-0813",
-
   "kimi":
     "moonshotai/kimi-k3",
 
   "kimi-k3":
-    "moonshotai/kimi-k3"
+    "moonshotai/kimi-k3",
+
+  "nemotron":
+    "nvidia/nemotron-3-ultra-550b-a55b",
+
+  "ultra":
+    "nvidia/nemotron-3-ultra-550b-a55b"
 };
 
 
 /* ============================================================
-   EXPRESS CONFIGURATION
+   EXPRESS
    ============================================================ */
 
 app.disable("x-powered-by");
@@ -416,7 +238,7 @@ app.use(
 
 
 /* ============================================================
-   HELPER FUNCTIONS
+   HELPERS
    ============================================================ */
 
 function isPlainObject(value) {
@@ -430,9 +252,7 @@ function isPlainObject(value) {
 
 function isFiniteNumber(value) {
 
-  if (
-    typeof value === "number"
-  ) {
+  if (typeof value === "number") {
     return Number.isFinite(value);
   }
 
@@ -440,23 +260,16 @@ function isFiniteNumber(value) {
     typeof value === "string" &&
     value.trim() !== ""
   ) {
-    return Number.isFinite(
-      Number(value)
-    );
+    return Number.isFinite(Number(value));
   }
 
   return false;
 }
 
 
-function numberOrDefault(
-  value,
-  fallback
-) {
+function numberOrDefault(value, fallback) {
 
-  if (
-    isFiniteNumber(value)
-  ) {
+  if (isFiniteNumber(value)) {
     return Number(value);
   }
 
@@ -464,10 +277,7 @@ function numberOrDefault(
 }
 
 
-function parseBoolean(
-  value,
-  fallback
-) {
+function parseBoolean(value, fallback) {
 
   if (
     value === undefined ||
@@ -476,26 +286,18 @@ function parseBoolean(
     return fallback;
   }
 
-  if (
-    typeof value === "boolean"
-  ) {
+  if (typeof value === "boolean") {
     return value;
   }
 
-  if (
-    typeof value === "number"
-  ) {
+  if (typeof value === "number") {
     return value !== 0;
   }
 
-  if (
-    typeof value === "string"
-  ) {
+  if (typeof value === "string") {
 
     const normalized =
-      value
-        .trim()
-        .toLowerCase();
+      value.trim().toLowerCase();
 
     if (
       normalized === "true" ||
@@ -522,178 +324,35 @@ function parseBoolean(
 
 function normalizeModel(model) {
 
-  return String(
-    model || ""
-  )
+  return String(model || "")
     .trim()
     .toLowerCase();
 }
 
-
-/* ============================================================
-   MODEL RESOLUTION
-   ============================================================ */
 
 function resolveModel(model) {
 
   const normalized =
     normalizeModel(model);
 
-  if (
-    MODEL_ALIASES[normalized]
-  ) {
-    return MODEL_ALIASES[normalized];
-  }
-
   return (
-    model ||
-    DEFAULT_MODEL
-  )
-    .trim();
+    MODEL_ALIASES[normalized] ||
+    String(model || "").trim()
+  );
 }
 
 
 function getModelConfig(model) {
 
-  const resolved =
-    resolveModel(model);
-
-  return (
-    MODEL_CONFIG[resolved] ||
-    null
-  );
+  return MODEL_CONFIG[
+    resolveModel(model)
+  ] || null;
 }
 
 
-/* ============================================================
-   REASONING HELPERS
-   ============================================================ */
+function clampMaxTokens(value, fallback) {
 
-function normalizeReasoningEffort(
-  value,
-  fallback = "high"
-) {
-
-  if (
-    typeof value !== "string"
-  ) {
-    return fallback;
-  }
-
-  const effort =
-    value
-      .trim()
-      .toLowerCase();
-
-  if (
-    effort === "low"
-  ) {
-    return "low";
-  }
-
-  if (
-    effort === "high"
-  ) {
-    return "high";
-  }
-
-  if (
-    effort === "max"
-  ) {
-    return "max";
-  }
-
-  /*
-   * Accept a few convenient aliases.
-   */
-
-  if (
-    effort === "medium" ||
-    effort === "med"
-  ) {
-    return "high";
-  }
-
-  if (
-    effort === "maximum"
-  ) {
-    return "max";
-  }
-
-  return fallback;
-}
-
-
-/*
- * Converts your numeric reasoning budget into the
- * effort levels supported by DeepSeek/Kimi.
- *
- * You can change these thresholds if you want.
- */
-
-function budgetToEffort(
-  budget
-) {
-
-  const numeric =
-    Math.max(
-      0,
-      Math.floor(
-        numberOrDefault(
-          budget,
-          DEFAULT_REASONING_BUDGET
-        )
-      )
-    );
-
-  if (
-    numeric <= 8192
-  ) {
-    return "low";
-  }
-
-  if (
-    numeric <= 16384
-  ) {
-    return "high";
-  }
-
-  return "max";
-}
-
-
-function clampReasoningBudget(
-  value,
-  fallback
-) {
-
-  const budget =
-    numberOrDefault(
-      value,
-      fallback
-    );
-
-  /*
-   * NVIDIA documents -1 as disabling budget
-   * enforcement on APIs that support reasoning_budget.
-   */
-
-  return Math.min(
-    32768,
-    Math.max(
-      -1,
-      Math.floor(budget)
-    )
-  );
-}
-
-
-function clampMaxTokens(
-  value,
-  fallback
-) {
-
-  const tokens =
+  const number =
     numberOrDefault(
       value,
       fallback
@@ -703,18 +362,15 @@ function clampMaxTokens(
     32768,
     Math.max(
       1,
-      Math.floor(tokens)
+      Math.floor(number)
     )
   );
 }
 
 
-function clampTemperature(
-  value,
-  fallback
-) {
+function clampTemperature(value, fallback) {
 
-  const temperature =
+  const number =
     numberOrDefault(
       value,
       fallback
@@ -724,18 +380,15 @@ function clampTemperature(
     2,
     Math.max(
       0,
-      temperature
+      number
     )
   );
 }
 
 
-function clampTopP(
-  value,
-  fallback
-) {
+function clampTopP(value, fallback) {
 
-  const topP =
+  const number =
     numberOrDefault(
       value,
       fallback
@@ -745,9 +398,42 @@ function clampTopP(
     1,
     Math.max(
       0,
-      topP
+      number
     )
   );
+}
+
+
+function normalizeReasoningEffort(
+  value,
+  fallback = "high"
+) {
+
+  const normalized =
+    String(value || "")
+      .trim()
+      .toLowerCase();
+
+  if (
+    normalized === "low"
+  ) {
+    return "low";
+  }
+
+  if (
+    normalized === "high"
+  ) {
+    return "high";
+  }
+
+  if (
+    normalized === "max" ||
+    normalized === "maximum"
+  ) {
+    return "max";
+  }
+
+  return fallback;
 }
 
 
@@ -755,38 +441,29 @@ function clampTopP(
    MESSAGE NORMALIZATION
    ============================================================ */
 
-function normalizeMessages(
-  messages
-) {
+function normalizeMessages(messages) {
 
-  if (
-    !Array.isArray(messages)
-  ) {
+  if (!Array.isArray(messages)) {
     return [];
   }
 
   return messages
     .filter((message) => {
 
-      if (
-        !isPlainObject(message)
-      ) {
+      if (!isPlainObject(message)) {
         return false;
       }
 
       if (
-        typeof message.role !==
-          "string" ||
+        typeof message.role !== "string" ||
         message.role.trim() === ""
       ) {
         return false;
       }
 
       if (
-        message.content ===
-          undefined ||
-        message.content ===
-          null
+        message.content === undefined ||
+        message.content === null
       ) {
         return false;
       }
@@ -795,15 +472,13 @@ function normalizeMessages(
     })
     .map((message) => ({
       ...message,
-
-      role:
-        message.role.trim()
+      role: message.role.trim()
     }));
 }
 
 
 /* ============================================================
-   BUILD NIM REQUEST
+   BUILD NVIDIA REQUEST
    ============================================================ */
 
 function buildNimRequest(
@@ -817,112 +492,75 @@ function buildNimRequest(
     getModelConfig(model);
 
   /*
-   * Unknown models are still allowed.
-   *
-   * This keeps the proxy compatible with additional
-   * NVIDIA NIM models without requiring a code change.
+   * If somebody requests a model not listed above,
+   * still allow it through as a generic NIM model.
    */
 
   const modelConfig =
     config || {
 
-      type:
-        "generic",
+      name:
+        model,
+
+      provider:
+        "unknown",
 
       reasoning:
         false,
 
       reasoningBudget:
-        DEFAULT_REASONING_BUDGET,
+        0,
 
       reasoningEffort:
-        DEFAULT_REASONING_EFFORT,
+        "high",
 
       maxTokens:
-        DEFAULT_MAX_TOKENS,
+        16384,
 
       temperature:
-        DEFAULT_TEMPERATURE,
+        1.0,
 
       topP:
-        DEFAULT_TOP_P
+        0.95
     };
 
 
-  /*
-   * ----------------------------------------------------------
-   * USER OVERRIDES
-   * ----------------------------------------------------------
-   *
-   * Incoming request parameters override the model defaults.
-   */
-
-  const requestedMaxTokens =
-    incoming.max_tokens !== undefined
-      ? incoming.max_tokens
-      : modelConfig.maxTokens;
-
-  const requestedTemperature =
-    incoming.temperature !== undefined
-      ? incoming.temperature
-      : modelConfig.temperature;
-
-  const requestedTopP =
-    incoming.top_p !== undefined
-      ? incoming.top_p
-      : modelConfig.topP;
-
-  const requestedBudget =
-    incoming.reasoning_budget !== undefined
-      ? incoming.reasoning_budget
-      : modelConfig.reasoningBudget;
+  const maxTokens =
+    clampMaxTokens(
+      incoming.max_tokens,
+      modelConfig.maxTokens
+    );
 
 
-  const reasoningBudget =
-    clampReasoningBudget(
-      requestedBudget,
-      modelConfig.reasoningBudget
+  const temperature =
+    clampTemperature(
+      incoming.temperature,
+      modelConfig.temperature
+    );
+
+
+  const topP =
+    clampTopP(
+      incoming.top_p,
+      modelConfig.topP
     );
 
 
   /*
-   * Explicit effort wins.
+   * User can override reasoning_effort directly.
    *
-   * Otherwise derive effort from the numeric budget.
+   * Example:
+   *
+   * {
+   *   "reasoning_effort": "low"
+   * }
    */
 
-  let reasoningEffort;
-
-  if (
-    incoming.reasoning_effort !==
-    undefined
-  ) {
-
-    reasoningEffort =
-      normalizeReasoningEffort(
-        incoming.reasoning_effort,
-        modelConfig.reasoningEffort
-      );
-
-  } else if (
-    modelConfig.reasoningEffort
-  ) {
-
-    reasoningEffort =
-      normalizeReasoningEffort(
-        modelConfig.reasoningEffort,
-        budgetToEffort(
-          reasoningBudget
-        )
-      );
-
-  } else {
-
-    reasoningEffort =
-      budgetToEffort(
-        reasoningBudget
-      );
-  }
+  const reasoningEffort =
+    normalizeReasoningEffort(
+      incoming.reasoning_effort,
+      modelConfig.reasoningEffort
+    );
 
 
   const request = {
@@ -931,73 +569,18 @@ function buildNimRequest(
 
     messages,
 
-    temperature:
-      clampTemperature(
-        requestedTemperature,
-        DEFAULT_TEMPERATURE
-      ),
+    temperature,
 
-    top_p:
-      clampTopP(
-        requestedTopP,
-        DEFAULT_TOP_P
-      ),
+    top_p: topP,
 
-    max_tokens:
-      clampMaxTokens(
-        requestedMaxTokens,
-        DEFAULT_MAX_TOKENS
-      ),
+    max_tokens: maxTokens,
 
     stream
   };
 
 
   /* ==========================================================
-     STANDARD PARAMETERS
-     ========================================================== */
-
-  if (
-    incoming.repetition_penalty !==
-    undefined
-  ) {
-
-    request.repetition_penalty =
-      numberOrDefault(
-        incoming.repetition_penalty,
-        DEFAULT_REPETITION_PENALTY
-      );
-  }
-
-
-  if (
-    incoming.frequency_penalty !==
-    undefined
-  ) {
-
-    request.frequency_penalty =
-      numberOrDefault(
-        incoming.frequency_penalty,
-        DEFAULT_FREQUENCY_PENALTY
-      );
-  }
-
-
-  if (
-    incoming.presence_penalty !==
-    undefined
-  ) {
-
-    request.presence_penalty =
-      numberOrDefault(
-        incoming.presence_penalty,
-        DEFAULT_PRESENCE_PENALTY
-      );
-  }
-
-
-  /* ==========================================================
-     OPTIONAL OPENAI-COMPATIBLE PARAMETERS
+     STANDARD OPTIONAL PARAMETERS
      ========================================================== */
 
   const optionalParameters = [
@@ -1014,23 +597,16 @@ function buildNimRequest(
     "logit_bias",
     "user",
     "parallel_tool_calls",
-
-    /*
-     * Useful for long-context models.
-     */
-
     "stream_options"
   ];
 
 
   for (
-    const parameter of
-      optionalParameters
+    const parameter of optionalParameters
   ) {
 
     if (
-      incoming[parameter] !==
-      undefined
+      incoming[parameter] !== undefined
     ) {
 
       request[parameter] =
@@ -1056,110 +632,24 @@ function buildNimRequest(
 
 
   /* ==========================================================
-     NEMOTRON
-     ========================================================== */
-
-  if (
-    modelConfig.type ===
-    "nemotron"
-  ) {
-
-    /*
-     * Nemotron uses reasoning_effort and
-     * reasoning_budget.
-     */
-
-    request.reasoning_effort =
-      reasoningEffort === "low"
-        ? "medium"
-        : reasoningEffort;
-
-
-    /*
-     * NVIDIA's hosted API accepts the
-     * actual reasoning budget here.
-     */
-
-    request.reasoning_budget =
-      reasoningBudget;
-
-
-    request.chat_template_kwargs = {
-
-      ...(
-        request.chat_template_kwargs ||
-        {}
-      ),
-
-      enable_thinking:
-        true
-    };
-
-
-    /*
-     * Medium effort compatibility.
-     */
-
-    if (
-      reasoningEffort === "high"
-    ) {
-
-      request.chat_template_kwargs
-        .medium_effort = true;
-
-    } else {
-
-      delete request
-        .chat_template_kwargs
-        .medium_effort;
-    }
-
-
-    /*
-     * Tools + reasoning.
-     */
-
-    if (
-      Array.isArray(
-        request.tools
-      ) &&
-      request.tools.length > 0
-    ) {
-
-      request.chat_template_kwargs
-        .force_nonempty_content = true;
-    }
-
-
-    delete request.nvext;
-
-    delete request.reasoning_mode;
-  }
-
-
-  /* ==========================================================
      DEEPSEEK V4 FLASH / PRO
      ========================================================== */
 
-  else if (
-    modelConfig.type ===
-    "deepseek"
+  if (
+    modelConfig.provider ===
+    "deepseek-ai"
   ) {
 
     /*
-     * DeepSeek's NVIDIA NIM interface uses
-     * chat_template_kwargs.
+     * NVIDIA's current DeepSeek V4 Flash example uses:
      *
-     * Flash documents:
+     * chat_template_kwargs:
+     * {
+     *   thinking: true,
+     *   reasoning_effort: "high"
+     * }
      *
-     *   thinking: true
-     *   reasoning_effort: high
-     *
-     * Pro documents thinking control and
-     * reasoning-effort levels.
-     *
-     * We therefore deliberately DO NOT send
-     * reasoning_budget as a top-level field.
+     * We use the same structure for both V4 models.
      */
 
     request.chat_template_kwargs = {
@@ -1178,8 +668,14 @@ function buildNimRequest(
 
 
     /*
-     * Remove any accidentally supplied
-     * Nemotron-specific reasoning controls.
+     * DO NOT send:
+     *
+     * reasoning_budget
+     * reasoning_effort at the top level
+     * reasoning_mode
+     * nvext
+     *
+     * to these models.
      */
 
     delete request.reasoning_budget;
@@ -1197,12 +693,12 @@ function buildNimRequest(
      ========================================================== */
 
   else if (
-    modelConfig.type ===
-    "kimi"
+    modelConfig.provider ===
+    "moonshotai"
   ) {
 
     /*
-     * Kimi K3 ALWAYS thinks.
+     * Kimi K3 always reasons.
      *
      * NVIDIA documents:
      *
@@ -1210,44 +706,20 @@ function buildNimRequest(
      *   high
      *   max
      *
-     * There is no reasoning-off mode.
+     * We therefore send the effort level directly.
      */
 
-    request.reasoning_effort =
-      reasoningEffort;
+    request.chat_template_kwargs = {
 
+      ...(
+        request.chat_template_kwargs ||
+        {}
+      ),
 
-    /*
-     * Do not send a fake numeric reasoning_budget.
-     */
+      reasoning_effort:
+        reasoningEffort
+    };
 
-    delete request.reasoning_budget;
-
-    delete request.reasoning_mode;
-
-    delete request.nvext;
-
-
-    /*
-     * Kimi does not need:
-     *
-     *   enable_thinking: false
-     *
-     * Thinking remains enabled.
-     */
-  }
-
-
-  /* ==========================================================
-     GENERIC MODEL
-     ========================================================== */
-
-  else {
-
-    /*
-     * For models we don't have a specific configuration for,
-     * don't inject model-specific reasoning parameters.
-     */
 
     delete request.reasoning_budget;
 
@@ -1259,316 +731,84 @@ function buildNimRequest(
   }
 
 
+  /* ==========================================================
+     NEMOTRON ULTRA
+     ========================================================== */
+
+  else if (
+    modelConfig.provider ===
+    "nvidia"
+  ) {
+
+    /*
+     * Keep the Nemotron-specific behavior isolated.
+     */
+
+    request.reasoning_effort =
+      reasoningEffort;
+
+
+    /*
+     * Nemotron accepts a numeric reasoning budget.
+     *
+     * This is the ONLY model in this configuration
+     * where we intentionally send reasoning_budget.
+     */
+
+    const reasoningBudget =
+      Math.min(
+        32768,
+        Math.max(
+          1,
+          Math.floor(
+            numberOrDefault(
+              incoming.reasoning_budget,
+              modelConfig.reasoningBudget
+            )
+          )
+        )
+      );
+
+
+    request.reasoning_budget =
+      reasoningBudget;
+
+
+    request.chat_template_kwargs = {
+
+      ...(
+        request.chat_template_kwargs ||
+        {}
+      ),
+
+      enable_thinking:
+        true
+    };
+
+
+    if (
+      reasoningEffort === "high"
+    ) {
+
+      request.chat_template_kwargs
+        .medium_effort = true;
+
+    } else {
+
+      delete request
+        .chat_template_kwargs
+        .medium_effort;
+    }
+  }
+
+
   return request;
 }
 
 
 /* ============================================================
-   REMOVE REASONING FROM RESPONSE
+   ERROR RESPONSE
    ============================================================ */
-
-function stripReasoning(
-  parsed
-) {
-
-  if (
-    !parsed ||
-    typeof parsed !== "object"
-  ) {
-    return parsed;
-  }
-
-  if (
-    !Array.isArray(
-      parsed.choices
-    )
-  ) {
-    return parsed;
-  }
-
-
-  for (
-    const choice of
-      parsed.choices
-  ) {
-
-    if (
-      !choice ||
-      typeof choice !== "object"
-    ) {
-      continue;
-    }
-
-
-    /*
-     * Streaming.
-     */
-
-    if (
-      choice.delta &&
-      typeof choice.delta ===
-        "object"
-    ) {
-
-      delete choice.delta
-        .reasoning_content;
-
-      delete choice.delta
-        .reasoning;
-
-      delete choice.delta
-        .thinking;
-    }
-
-
-    /*
-     * Non-streaming.
-     */
-
-    if (
-      choice.message &&
-      typeof choice.message ===
-        "object"
-    ) {
-
-      delete choice.message
-        .reasoning_content;
-
-      delete choice.message
-        .reasoning;
-
-      delete choice.message
-        .thinking;
-    }
-  }
-
-
-  return parsed;
-}
-
-
-/* ============================================================
-   SSE PROCESSOR
-   ============================================================ */
-
-function processSSEEvent(
-  event
-) {
-
-  if (
-    !event ||
-    !event.trim()
-  ) {
-    return "";
-  }
-
-
-  const lines =
-    event.split(/\r?\n/);
-
-  const output = [];
-
-
-  for (
-    const line of lines
-  ) {
-
-    if (
-      !line.startsWith("data:")
-    ) {
-
-      output.push(line);
-
-      continue;
-    }
-
-
-    const data =
-      line
-        .slice(5)
-        .trim();
-
-
-    if (
-      !data
-    ) {
-
-      output.push(line);
-
-      continue;
-    }
-
-
-    if (
-      data === "[DONE]"
-    ) {
-
-      output.push(
-        "data: [DONE]"
-      );
-
-      continue;
-    }
-
-
-    try {
-
-      const parsed =
-        JSON.parse(data);
-
-      stripReasoning(parsed);
-
-      output.push(
-        "data: " +
-        JSON.stringify(parsed)
-      );
-
-    } catch (_) {
-
-      /*
-       * Preserve non-JSON SSE.
-       */
-
-      output.push(line);
-    }
-  }
-
-
-  if (
-    output.length === 0
-  ) {
-    return "";
-  }
-
-
-  return (
-    output.join("\n") +
-    "\n\n"
-  );
-}
-
-
-/* ============================================================
-   READ STREAM
-   ============================================================ */
-
-function readStream(
-  stream
-) {
-
-  return new Promise(
-    (resolve) => {
-
-      let output = "";
-
-      let finished = false;
-
-
-      const finish = () => {
-
-        if (
-          finished
-        ) {
-          return;
-        }
-
-        finished = true;
-
-        resolve(output);
-      };
-
-
-      stream.on(
-        "data",
-        (chunk) => {
-
-          output +=
-            chunk.toString("utf8");
-
-
-          /*
-           * Prevent huge upstream errors
-           * from consuming memory.
-           */
-
-          if (
-            output.length >
-            2 * 1024 * 1024
-          ) {
-
-            output =
-              output.slice(
-                0,
-                2 * 1024 * 1024
-              );
-          }
-        }
-      );
-
-
-      stream.on(
-        "end",
-        finish
-      );
-
-      stream.on(
-        "close",
-        finish
-      );
-
-      stream.on(
-        "error",
-        finish
-      );
-    }
-  );
-}
-
-
-/* ============================================================
-   ERROR HANDLING
-   ============================================================ */
-
-function extractErrorMessage(
-  data
-) {
-
-  if (
-    !data
-  ) {
-    return null;
-  }
-
-
-  if (
-    typeof data === "object"
-  ) {
-
-    return (
-      data.error?.message ||
-      data.message ||
-      null
-    );
-  }
-
-
-  try {
-
-    const parsed =
-      JSON.parse(data);
-
-    return (
-      parsed?.error?.message ||
-      parsed?.message ||
-      null
-    );
-
-  } catch (_) {
-
-    return String(data);
-  }
-}
-
 
 function sendError(
   res,
@@ -1577,9 +817,7 @@ function sendError(
   details = null
 ) {
 
-  if (
-    res.headersSent
-  ) {
+  if (res.headersSent) {
 
     try {
       res.end();
@@ -1616,18 +854,223 @@ function sendError(
 
 
 /* ============================================================
+   UPSTREAM ERROR PARSER
+   ============================================================ */
+
+function extractErrorMessage(data) {
+
+  if (!data) {
+    return null;
+  }
+
+
+  if (
+    typeof data === "object"
+  ) {
+
+    return (
+      data.error?.message ||
+      data.message ||
+      null
+    );
+  }
+
+
+  try {
+
+    const parsed =
+      JSON.parse(data);
+
+    return (
+      parsed?.error?.message ||
+      parsed?.message ||
+      null
+    );
+
+  } catch (_) {
+
+    return String(data);
+  }
+}
+
+
+/* ============================================================
+   STREAM PROCESSING
+   ============================================================ */
+
+function processSSEEvent(event) {
+
+  if (
+    !event ||
+    !event.trim()
+  ) {
+    return "";
+  }
+
+
+  const lines =
+    event.split(/\r?\n/);
+
+  const output = [];
+
+
+  for (
+    const line of lines
+  ) {
+
+    if (
+      !line.startsWith("data:")
+    ) {
+
+      output.push(line);
+
+      continue;
+    }
+
+
+    const data =
+      line.slice(5).trim();
+
+
+    if (!data) {
+
+      output.push(line);
+
+      continue;
+    }
+
+
+    if (
+      data === "[DONE]"
+    ) {
+
+      output.push(
+        "data: [DONE]"
+      );
+
+      continue;
+    }
+
+
+    try {
+
+      const parsed =
+        JSON.parse(data);
+
+      /*
+       * We deliberately do NOT delete
+       * reasoning_content here.
+       *
+       * It can be required for multi-turn
+       * reasoning/tool conversations,
+       * particularly with Kimi K3.
+       */
+
+      output.push(
+        "data: " +
+        JSON.stringify(parsed)
+      );
+
+    } catch (_) {
+
+      /*
+       * Preserve non-JSON SSE.
+       */
+
+      output.push(line);
+    }
+  }
+
+
+  if (
+    output.length === 0
+  ) {
+    return "";
+  }
+
+
+  return (
+    output.join("\n") +
+    "\n\n"
+  );
+}
+
+
+/* ============================================================
+   READ UPSTREAM ERROR STREAM
+   ============================================================ */
+
+function readStream(stream) {
+
+  return new Promise(
+    (resolve) => {
+
+      let output = "";
+
+      let finished = false;
+
+
+      function finish() {
+
+        if (finished) {
+          return;
+        }
+
+        finished = true;
+
+        resolve(output);
+      }
+
+
+      stream.on(
+        "data",
+        (chunk) => {
+
+          output +=
+            chunk.toString("utf8");
+
+
+          if (
+            output.length >
+            2 * 1024 * 1024
+          ) {
+
+            output =
+              output.slice(
+                0,
+                2 * 1024 * 1024
+              );
+          }
+        }
+      );
+
+
+      stream.on(
+        "end",
+        finish
+      );
+
+      stream.on(
+        "close",
+        finish
+      );
+
+      stream.on(
+        "error",
+        finish
+      );
+    }
+  );
+}
+
+
+/* ============================================================
    ROOT
    ============================================================ */
 
 app.get(
   "/",
   (req, res) => {
-
-    const config =
-      getModelConfig(
-        DEFAULT_MODEL
-      );
-
 
     res.json({
 
@@ -1638,89 +1081,20 @@ app.get(
         "JanitorAI -> NVIDIA NIM Proxy",
 
       default_model:
-        resolveModel(DEFAULT_MODEL),
+        resolveModel(
+          DEFAULT_MODEL
+        ),
 
-      model_config:
-        config,
-
-      available_models:
+      models:
         Object.keys(
           MODEL_CONFIG
         ),
-
-      aliases:
-        MODEL_ALIASES,
-
-      reasoning_budget:
-        config?.reasoningBudget ??
-        DEFAULT_REASONING_BUDGET,
-
-      reasoning_effort:
-        config?.reasoningEffort ??
-        DEFAULT_REASONING_EFFORT,
-
-      max_tokens:
-        config?.maxTokens ??
-        DEFAULT_MAX_TOKENS,
 
       nim_api_base:
         NIM_API_BASE,
 
       timeout_ms:
         NIM_TIMEOUT
-    });
-  }
-);
-
-
-/* ============================================================
-   MODEL LIST
-   ============================================================ */
-
-app.get(
-  "/v1/models",
-  (req, res) => {
-
-    const models =
-      Object.entries(
-        MODEL_CONFIG
-      ).map(
-        ([id, config]) => ({
-
-          id,
-
-          object:
-            "model",
-
-          owned_by:
-            config.type === "kimi"
-              ? "moonshotai"
-              : config.type === "deepseek"
-                ? "deepseek-ai"
-                : "nvidia",
-
-          reasoning:
-            config.reasoning,
-
-          reasoning_budget:
-            config.reasoningBudget,
-
-          reasoning_effort:
-            config.reasoningEffort,
-
-          max_tokens:
-            config.maxTokens
-        })
-      );
-
-
-    res.json({
-
-      object:
-        "list",
-
-      data:
-        models
     });
   }
 );
@@ -1734,15 +1108,13 @@ app.get(
   "/health",
   (req, res) => {
 
-    const resolved =
+    const model =
       resolveModel(
         DEFAULT_MODEL
       );
 
     const config =
-      getModelConfig(
-        resolved
-      );
+      getModelConfig(model);
 
 
     res.json({
@@ -1750,24 +1122,61 @@ app.get(
       ok:
         true,
 
-      model:
-        resolved,
+      model,
 
-      model_type:
-        config?.type ||
-        "generic",
+      reasoning:
+        config?.reasoning || false,
 
       reasoning_budget:
-        config?.reasoningBudget ??
-        DEFAULT_REASONING_BUDGET,
+        config?.reasoningBudget || 0,
 
       reasoning_effort:
-        config?.reasoningEffort ??
-        DEFAULT_REASONING_EFFORT,
+        config?.reasoningEffort || null
+    });
+  }
+);
 
-      max_tokens:
-        config?.maxTokens ??
-        DEFAULT_MAX_TOKENS
+
+/* ============================================================
+   MODEL LIST
+   ============================================================ */
+
+app.get(
+  "/v1/models",
+  (req, res) => {
+
+    const data =
+      Object.entries(
+        MODEL_CONFIG
+      ).map(
+        ([id, config]) => ({
+
+          id,
+
+          object:
+            "model",
+
+          owned_by:
+            config.provider,
+
+          reasoning:
+            config.reasoning,
+
+          reasoning_effort:
+            config.reasoningEffort,
+
+          reasoning_budget:
+            config.reasoningBudget
+        })
+      );
+
+
+    res.json({
+
+      object:
+        "list",
+
+      data
     });
   }
 );
@@ -1789,8 +1198,7 @@ app.post(
 
       if (
         !NIM_API_KEY ||
-        typeof NIM_API_KEY !==
-          "string"
+        typeof NIM_API_KEY !== "string"
       ) {
 
         return sendError(
@@ -1806,9 +1214,7 @@ app.post(
          ------------------------------------------------------ */
 
       const incoming =
-        isPlainObject(
-          req.body
-        )
+        isPlainObject(req.body)
           ? req.body
           : {};
 
@@ -1818,8 +1224,7 @@ app.post(
          ------------------------------------------------------ */
 
       const requestedModel =
-        typeof incoming.model ===
-          "string" &&
+        typeof incoming.model === "string" &&
         incoming.model.trim()
           ? incoming.model.trim()
           : DEFAULT_MODEL;
@@ -1865,7 +1270,7 @@ app.post(
 
 
       /* ------------------------------------------------------
-         BUILD REQUEST
+         BUILD NIM REQUEST
          ------------------------------------------------------ */
 
       const nimRequest =
@@ -1881,16 +1286,10 @@ app.post(
          DEBUG
          ------------------------------------------------------ */
 
-      if (
-        DEBUG_PROXY
-      ) {
-
-        /*
-         * Never print the API key.
-         */
+      if (DEBUG_PROXY) {
 
         console.log(
-          "\n========== NIM REQUEST =========="
+          "========== NIM REQUEST =========="
         );
 
         console.log(
@@ -1902,13 +1301,13 @@ app.post(
         );
 
         console.log(
-          "=================================\n"
+          "================================="
         );
       }
 
 
       /* ------------------------------------------------------
-         AXIOS CONFIG
+         AXIOS
          ------------------------------------------------------ */
 
       const axiosConfig = {
@@ -1936,7 +1335,7 @@ app.post(
 
 
       /* ------------------------------------------------------
-         NVIDIA REQUEST
+         CALL NVIDIA
          ------------------------------------------------------ */
 
       const response =
@@ -1949,7 +1348,6 @@ app.post(
           stream
             ? {
                 ...axiosConfig,
-
                 responseType:
                   "stream"
               }
@@ -2008,7 +1406,7 @@ app.post(
         }
 
 
-        const upstreamMessage =
+        const message =
           extractErrorMessage(
             errorBody
           );
@@ -2028,13 +1426,13 @@ app.post(
         );
 
         console.error(
-          "Status:",
+          "HTTP:",
           response.status
         );
 
         console.error(
           "Message:",
-          upstreamMessage
+          message
         );
 
         console.error(
@@ -2047,23 +1445,14 @@ app.post(
         );
 
 
-        const proxyStatus =
+        return sendError(
+          res,
           response.status >= 500
             ? 502
-            : response.status;
-
-
-        return sendError(
-
-          res,
-
-          proxyStatus,
-
-          upstreamMessage ||
+            : response.status,
+          message ||
             `NVIDIA NIM returned HTTP ${response.status}.`,
-
           {
-
             upstream_status:
               response.status,
 
@@ -2078,24 +1467,16 @@ app.post(
          NON-STREAMING
          ------------------------------------------------------ */
 
-      if (
-        !stream
-      ) {
-
-        const cleaned =
-          stripReasoning(
-            response.data
-          );
-
+      if (!stream) {
 
         return res
           .status(200)
-          .json(cleaned);
+          .json(response.data);
       }
 
 
       /* ------------------------------------------------------
-         STREAM HEADERS
+         STREAMING HEADERS
          ------------------------------------------------------ */
 
       res.status(200);
@@ -2172,9 +1553,7 @@ app.post(
             true;
 
           try {
-
             upstream.destroy();
-
           } catch (_) {}
         }
       );
@@ -2192,9 +1571,7 @@ app.post(
               true;
 
             try {
-
               upstream.destroy();
-
             } catch (_) {}
           }
         }
@@ -2218,9 +1595,7 @@ app.post(
 
 
           buffer +=
-            chunk.toString(
-              "utf8"
-            );
+            chunk.toString("utf8");
 
 
           const events =
@@ -2234,8 +1609,7 @@ app.post(
 
 
           for (
-            const event of
-              events
+            const event of events
           ) {
 
             if (
@@ -2252,18 +1626,14 @@ app.post(
               );
 
 
-            if (
-              !output
-            ) {
+            if (!output) {
               continue;
             }
 
 
             try {
 
-              res.write(
-                output
-              );
+              res.write(output);
 
             } catch (error) {
 
@@ -2278,9 +1648,7 @@ app.post(
 
 
               try {
-
                 upstream.destroy();
-
               } catch (_) {}
             }
           }
@@ -2296,19 +1664,13 @@ app.post(
         "end",
         () => {
 
-          if (
-            ended
-          ) {
+          if (ended) {
             return;
           }
 
 
           ended = true;
 
-
-          /*
-           * Process final partial SSE event.
-           */
 
           if (
             buffer.trim() &&
@@ -2321,16 +1683,10 @@ app.post(
               );
 
 
-            if (
-              output
-            ) {
+            if (output) {
 
               try {
-
-                res.write(
-                  output
-                );
-
+                res.write(output);
               } catch (_) {}
             }
           }
@@ -2341,9 +1697,7 @@ app.post(
           ) {
 
             try {
-
               res.end();
-
             } catch (_) {}
           }
         }
@@ -2358,9 +1712,7 @@ app.post(
         "error",
         (error) => {
 
-          if (
-            ended
-          ) {
+          if (ended) {
             return;
           }
 
@@ -2388,9 +1740,7 @@ app.post(
 
 
           try {
-
             res.end();
-
           } catch (_) {}
         }
       );
@@ -2427,18 +1777,12 @@ app.post(
       ) {
 
         try {
-
           res.end();
-
         } catch (_) {}
 
         return;
       }
 
-
-      /*
-       * Axios timeout.
-       */
 
       if (
         error?.code ===
@@ -2456,10 +1800,6 @@ app.post(
         );
       }
 
-
-      /*
-       * Connection reset.
-       */
 
       if (
         error?.code ===
@@ -2518,8 +1858,8 @@ app.use(
     console.error(
       "Unhandled Express error:",
       error?.stack ||
-        error?.message ||
-        error
+      error?.message ||
+      error
     );
 
 
@@ -2543,7 +1883,7 @@ app.use(
 
 
 /* ============================================================
-   START SERVER
+   SERVER
    ============================================================ */
 
 const server =
@@ -2552,122 +1892,71 @@ const server =
     "0.0.0.0",
     () => {
 
-      const resolvedDefault =
-        resolveModel(
-          DEFAULT_MODEL
-        );
+      console.log(
+        "=========================================="
+      );
 
-      const config =
-        getModelConfig(
-          resolvedDefault
-        );
+      console.log(
+        "JanitorAI -> NVIDIA NIM Proxy"
+      );
 
+      console.log(
+        `Port: ${PORT}`
+      );
+
+      console.log(
+        `Default model: ${resolveModel(DEFAULT_MODEL)}`
+      );
+
+      console.log(
+        `NVIDIA endpoint: ${NIM_API_BASE}`
+      );
+
+      console.log(
+        `Timeout: ${NIM_TIMEOUT}ms`
+      );
 
       console.log(
         "=========================================="
       );
 
       console.log(
-        "🚀 JanitorAI -> NVIDIA NIM Proxy"
-      );
-
-      console.log(
-        `🌐 Port: ${PORT}`
-      );
-
-      console.log(
-        `🤖 Default model: ${resolvedDefault}`
-      );
-
-      console.log(
-        `🧠 Model type: ${config?.type || "generic"}`
-      );
-
-      console.log(
-        `💭 Reasoning budget: ${
-          config?.reasoningBudget ??
-          DEFAULT_REASONING_BUDGET
-        }`
-      );
-
-      console.log(
-        `🎯 Reasoning effort: ${
-          config?.reasoningEffort ??
-          DEFAULT_REASONING_EFFORT
-        }`
-      );
-
-      console.log(
-        `📝 Max tokens: ${
-          config?.maxTokens ??
-          DEFAULT_MAX_TOKENS
-        }`
-      );
-
-      console.log(
-        `🌡️ Temperature: ${
-          config?.temperature ??
-          DEFAULT_TEMPERATURE
-        }`
-      );
-
-      console.log(
-        `🎯 Top P: ${
-          config?.topP ??
-          DEFAULT_TOP_P
-        }`
-      );
-
-      console.log(
-        `⏱️ Timeout: ${NIM_TIMEOUT}ms`
-      );
-
-      console.log(
-        `🔗 NVIDIA endpoint: ${NIM_API_BASE}`
-      );
-
-      console.log(
-        "=========================================="
-      );
-
-
-      console.log(
-        "\nAvailable models:"
+        "Configured models:"
       );
 
 
       for (
-        const [
-          modelId,
-          modelConfig
-        ] of Object.entries(
-          MODEL_CONFIG
-        )
+        const [id, config]
+        of Object.entries(MODEL_CONFIG)
       ) {
 
         console.log(
-          `  • ${modelId}`
+          `- ${id}`
         );
 
         console.log(
-          `    reasoning budget: ${modelConfig.reasoningBudget}`
+          `  reasoning budget: ${config.reasoningBudget}`
         );
 
         console.log(
-          `    reasoning effort: ${modelConfig.reasoningEffort}`
+          `  reasoning effort: ${config.reasoningEffort}`
+        );
+
+        console.log(
+          `  max tokens: ${config.maxTokens}`
         );
       }
 
 
       console.log(
-        "\n==========================================\n"
+        "=========================================="
       );
     }
   );
 
 
 /* ============================================================
-   LONG-RUNNING AI REQUEST SETTINGS
+   LONG-RUNNING REQUESTS
    ============================================================ */
 
 server.timeout = 0;
@@ -2682,12 +1971,10 @@ server.keepAliveTimeout =
 
 
 /* ============================================================
-   GRACEFUL SHUTDOWN
+   SHUTDOWN
    ============================================================ */
 
-function shutdown(
-  signal
-) {
+function shutdown(signal) {
 
   console.log(
     `${signal} received. Shutting down...`
