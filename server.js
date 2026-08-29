@@ -28,22 +28,28 @@ const DEFAULT_MODEL =
   "deepseek-ai/deepseek-v4-flash-0731";
 
 /*
- * Supported models
+ * IMPORTANT:
  *
- * These are NVIDIA NIM hosted model IDs.
+ * Unknown models are now ALLOWED.
+ *
+ * MODELS below is therefore a SPECIAL-CASE configuration
+ * table, NOT an allowlist.
+ *
+ * If NVIDIA adds another model tomorrow, you do NOT have
+ * to add it here just to make the proxy accept it.
  */
+
 const MODELS = {
+  /*
+   * ==========================================================
+   * DEEPSEEK V4 FLASH 0731
+   * ==========================================================
+   */
+
   "deepseek-ai/deepseek-v4-flash-0731": {
     name: "DeepSeek V4 Flash 0731",
     provider: "DeepSeek AI",
 
-    /*
-     * NVIDIA supports:
-     * none / low / high / max
-     *
-     * The API examples/documentation primarily expose
-     * reasoning_effort for this model.
-     */
     reasoningLevels: [
       "none",
       "low",
@@ -53,26 +59,21 @@ const MODELS = {
 
     defaultReasoningEffort: "low",
 
-    /*
-     * NVIDIA's current NIM endpoint documents max_tokens
-     * up to 16384 for this model.
-     */
     maxOutputTokens: 16384,
 
-    /*
-     * This model uses chat_template_kwargs.thinking.
-     */
     thinkingParameter: "chat_template"
   },
+
+  /*
+   * ==========================================================
+   * DEEPSEEK V4 PRO 0813
+   * ==========================================================
+   */
 
   "deepseek-ai/deepseek-v4-pro-0813": {
     name: "DeepSeek V4 Pro 0813",
     provider: "DeepSeek AI",
 
-    /*
-     * NVIDIA documents:
-     * none / high / max
-     */
     reasoningLevels: [
       "none",
       "low",
@@ -87,16 +88,16 @@ const MODELS = {
     thinkingParameter: "chat_template"
   },
 
+  /*
+   * ==========================================================
+   * KIMI K3
+   * ==========================================================
+   */
+
   "moonshotai/kimi-k3": {
     name: "Kimi K3",
     provider: "Moonshot AI",
 
-    /*
-     * NVIDIA documents:
-     * low / high / max
-     *
-     * Thinking is always enabled for Kimi K3.
-     */
     reasoningLevels: [
       "low",
       "high",
@@ -105,18 +106,17 @@ const MODELS = {
 
     defaultReasoningEffort: "max",
 
-    /*
-     * NVIDIA documents max_tokens:
-     * 1 - 65536
-     */
     maxOutputTokens: 65536,
 
     thinkingParameter: "native"
   },
 
   /*
-   * Keep your existing Nemotron model available.
+   * ==========================================================
+   * NEMOTRON 3 ULTRA
+   * ==========================================================
    */
+
   "nvidia/nemotron-3-ultra-550b-a55b": {
     name: "NVIDIA Nemotron 3 Ultra 550B",
     provider: "NVIDIA",
@@ -137,35 +137,31 @@ const MODELS = {
 
 /*
  * ============================================================
- * DEFAULT REASONING SETTINGS
+ * ALLOW UNKNOWN NIM MODELS
  * ============================================================
  *
- * You can change these values directly.
+ * TRUE means:
  *
- * Example:
+ *   Any model ID accepted by NVIDIA NIM can be requested.
  *
- *   reasoningBudget: 8192
+ * The MODELS object above is only used when a model requires
+ * special request construction.
  *
- * or:
- *
- *   reasoningEffort: "max"
- *
- * IMPORTANT:
- *
- * The newer DeepSeek V4 and Kimi K3 NIM APIs expose
- * reasoning_effort rather than a universal numeric
- * reasoning_budget parameter.
- *
- * Therefore this proxy supports BOTH:
- *
- *   reasoningEffort
- *   reasoningBudget
- *
- * reasoningEffort is sent to NVIDIA.
- *
- * reasoningBudget is used by this proxy to choose an
- * appropriate reasoning level when reasoningEffort was
- * not explicitly supplied.
+ * This is what makes the proxy future-proof.
+ */
+
+const ALLOW_UNKNOWN_MODELS =
+  String(
+    process.env.ALLOW_UNKNOWN_MODELS ||
+      "true"
+  )
+    .trim()
+    .toLowerCase() === "true";
+
+/*
+ * ============================================================
+ * DEFAULT REASONING SETTINGS
+ * ============================================================
  */
 
 const DEFAULT_REASONING_EFFORT =
@@ -192,15 +188,13 @@ const DEFAULT_REASONING_BUDGET =
  * PER-MODEL REASONING BUDGETS
  * ============================================================
  *
- * These are the easiest values to edit.
+ * KEEP THESE HERE.
  *
- * NOTE:
- * NVIDIA's current DeepSeek V4/Kimi K3 hosted APIs use
- * reasoning_effort rather than accepting an arbitrary
- * numeric reasoning budget.
+ * These remain easy to edit.
  *
- * The numbers below are therefore used as a policy layer
- * that maps your desired budget to low/high/max.
+ * For models that expose reasoning_effort rather than an
+ * arbitrary numeric budget, the budget acts as a LOCAL
+ * policy that gets mapped to the closest supported effort.
  */
 
 const MODEL_REASONING_BUDGETS = {
@@ -218,10 +212,10 @@ const MODEL_REASONING_BUDGETS = {
  * PER-MODEL REASONING EFFORT
  * ============================================================
  *
- * If you want exact control over the NVIDIA parameter,
- * edit these values.
+ * KEEP THESE HERE.
  *
- * Valid values depend on the model.
+ * Change these when you want to manually control a known
+ * model's reasoning level.
  */
 
 const MODEL_REASONING_EFFORTS = {
@@ -311,8 +305,11 @@ const DEFAULT_PRESENCE_PENALTY =
     : 0.0;
 
 /*
- * Long-running AI requests need a generous timeout.
+ * ============================================================
+ * TIMEOUTS
+ * ============================================================
  */
+
 const NIM_TIMEOUT =
   Number.isFinite(
     Number(
@@ -325,8 +322,35 @@ const NIM_TIMEOUT =
     : 900000;
 
 /*
- * Debug mode should NEVER print your API key.
+ * Cache the upstream model list.
+ *
+ * This avoids calling NVIDIA every time /v1/models is opened.
  */
+
+const MODEL_CACHE_TTL =
+  Number.isFinite(
+    Number(
+      process.env.MODEL_CACHE_TTL_MS
+    )
+  )
+    ? Number(
+        process.env.MODEL_CACHE_TTL_MS
+      )
+    : 300000;
+
+/*
+ * Maximum amount of upstream error data retained in memory.
+ */
+
+const MAX_ERROR_BODY_SIZE =
+  2 * 1024 * 1024;
+
+/*
+ * ============================================================
+ * DEBUG
+ * ============================================================
+ */
+
 const DEBUG_PROXY =
   String(
     process.env.DEBUG_PROXY ||
@@ -336,10 +360,147 @@ const DEBUG_PROXY =
     .toLowerCase() === "true";
 
 /* ============================================================
+   MODEL DISCOVERY CACHE
+   ============================================================ */
+
+let modelCache = null;
+let modelCacheTimestamp = 0;
+let modelCachePromise = null;
+
+/*
+ * Fetch NVIDIA's actual model list.
+ *
+ * This is intentionally separate from MODELS.
+ *
+ * MODELS = special behavior.
+ *
+ * NVIDIA /v1/models = actual available models.
+ */
+
+async function fetchNimModels(
+  forceRefresh = false
+) {
+  const now = Date.now();
+
+  if (
+    !forceRefresh &&
+    Array.isArray(modelCache) &&
+    now - modelCacheTimestamp <
+      MODEL_CACHE_TTL
+  ) {
+    return modelCache;
+  }
+
+  if (
+    modelCachePromise &&
+    !forceRefresh
+  ) {
+    return modelCachePromise;
+  }
+
+  modelCachePromise =
+    (async () => {
+      try {
+        if (!NIM_API_KEY) {
+          return Array.isArray(modelCache)
+            ? modelCache
+            : [];
+        }
+
+        const response =
+          await axios.get(
+            `${NIM_API_BASE}/models`,
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${NIM_API_KEY}`,
+
+                Accept:
+                  "application/json"
+              },
+
+              timeout:
+                Math.min(
+                  NIM_TIMEOUT,
+                  30000
+                ),
+
+              validateStatus:
+                () => true
+            }
+          );
+
+        if (
+          response.status >= 200 &&
+          response.status < 300 &&
+          response.data &&
+          Array.isArray(
+            response.data.data
+          )
+        ) {
+          modelCache =
+            response.data.data;
+
+          modelCacheTimestamp =
+            Date.now();
+
+          return modelCache;
+        }
+
+        console.warn(
+          `NVIDIA /v1/models returned HTTP ${response.status}`
+        );
+
+        return Array.isArray(modelCache)
+          ? modelCache
+          : [];
+      } catch (error) {
+        console.warn(
+          "Unable to refresh NVIDIA model list:",
+          error?.message ||
+            error
+        );
+
+        return Array.isArray(modelCache)
+          ? modelCache
+          : [];
+      } finally {
+        modelCachePromise =
+          null;
+      }
+    })();
+
+  return modelCachePromise;
+}
+
+/*
+ * Determine whether the upstream model list contains a model.
+ */
+
+async function isKnownToNim(
+  model
+) {
+  const models =
+    await fetchNimModels();
+
+  const normalized =
+    normalizeModel(model);
+
+  return models.some(
+    (item) =>
+      normalizeModel(
+        item?.id
+      ) === normalized
+  );
+}
+
+/* ============================================================
    EXPRESS CONFIGURATION
    ============================================================ */
 
-app.disable("x-powered-by");
+app.disable(
+  "x-powered-by"
+);
 
 app.use(
   cors()
@@ -355,7 +516,9 @@ app.use(
    HELPER FUNCTIONS
    ============================================================ */
 
-function isPlainObject(value) {
+function isPlainObject(
+  value
+) {
   return (
     value !== null &&
     typeof value === "object" &&
@@ -363,7 +526,9 @@ function isPlainObject(value) {
   );
 }
 
-function isFiniteNumber(value) {
+function isFiniteNumber(
+  value
+) {
   if (
     typeof value === "number"
   ) {
@@ -386,13 +551,9 @@ function numberOrDefault(
   value,
   fallback
 ) {
-  if (
-    isFiniteNumber(value)
-  ) {
-    return Number(value);
-  }
-
-  return fallback;
+  return isFiniteNumber(value)
+    ? Number(value)
+    : fallback;
 }
 
 function parseBoolean(
@@ -448,7 +609,9 @@ function parseBoolean(
   return fallback;
 }
 
-function normalizeModel(model) {
+function normalizeModel(
+  model
+) {
   return String(
     model || ""
   )
@@ -456,23 +619,40 @@ function normalizeModel(model) {
     .toLowerCase();
 }
 
-function getModelConfig(model) {
-  const normalized =
-    normalizeModel(model);
-
+function getModelConfig(
+  model
+) {
   return (
-    MODELS[normalized] ||
+    MODELS[
+      normalizeModel(model)
+    ] ||
     null
   );
 }
 
-function isSupportedModel(model) {
-  return Boolean(
+/*
+ * This is deliberately NOT the old "isSupportedModel".
+ *
+ * Known models have special configuration.
+ *
+ * Unknown models are allowed when ALLOW_UNKNOWN_MODELS=true.
+ */
+
+function isSupportedModel(
+  model
+) {
+  if (
     getModelConfig(model)
-  );
+  ) {
+    return true;
+  }
+
+  return ALLOW_UNKNOWN_MODELS;
 }
 
-function clampTemperature(value) {
+function clampTemperature(
+  value
+) {
   const number =
     numberOrDefault(
       value,
@@ -488,7 +668,9 @@ function clampTemperature(value) {
   );
 }
 
-function clampTopP(value) {
+function clampTopP(
+  value
+) {
   const number =
     numberOrDefault(
       value,
@@ -514,16 +696,31 @@ function clampMaxTokens(
       DEFAULT_MAX_TOKENS
     );
 
-  const modelMaximum =
-    modelConfig?.maxOutputTokens ||
-    16384;
+  /*
+   * For explicitly configured models, respect the known
+   * maximum.
+   *
+   * For unknown models, do NOT artificially restrict the
+   * user's requested max_tokens to 16384.
+   *
+   * NVIDIA will validate the actual model limit.
+   */
 
-  return Math.min(
-    modelMaximum,
-    Math.max(
-      1,
-      Math.floor(number)
-    )
+  if (
+    modelConfig?.maxOutputTokens
+  ) {
+    return Math.min(
+      modelConfig.maxOutputTokens,
+      Math.max(
+        1,
+        Math.floor(number)
+      )
+    );
+  }
+
+  return Math.max(
+    1,
+    Math.floor(number)
   );
 }
 
@@ -549,15 +746,6 @@ function clampReasoningBudget(
    REASONING CONTROL
    ============================================================ */
 
-/*
- * Convert a numeric reasoning budget into one of the levels
- * actually supported by the model.
- *
- * This DOES NOT pretend that NVIDIA accepts arbitrary
- * reasoning token counts for DeepSeek V4 / Kimi K3.
- *
- * It is simply a convenient local control layer.
- */
 function budgetToReasoningEffort(
   budget,
   modelConfig
@@ -571,9 +759,6 @@ function budgetToReasoningEffort(
     modelConfig?.reasoningLevels ||
     [];
 
-  /*
-   * Models that support "none".
-   */
   if (
     levels.includes("none") &&
     value <= 0
@@ -581,9 +766,6 @@ function budgetToReasoningEffort(
     return "none";
   }
 
-  /*
-   * Low.
-   */
   if (
     levels.includes("low") &&
     value <= 8192
@@ -591,9 +773,6 @@ function budgetToReasoningEffort(
     return "low";
   }
 
-  /*
-   * Medium.
-   */
   if (
     levels.includes("medium") &&
     value <= 16384
@@ -601,9 +780,6 @@ function budgetToReasoningEffort(
     return "medium";
   }
 
-  /*
-   * High.
-   */
   if (
     levels.includes("high") &&
     value <= 24576
@@ -611,18 +787,12 @@ function budgetToReasoningEffort(
     return "high";
   }
 
-  /*
-   * Max.
-   */
   if (
     levels.includes("max")
   ) {
     return "max";
   }
 
-  /*
-   * Fall back to the highest supported level.
-   */
   if (
     levels.includes("high")
   ) {
@@ -668,14 +838,10 @@ function normalizeReasoningEffort(
       return normalized;
     }
 
-    /*
-     * Friendly aliases.
-     */
     if (
       normalized === "off" ||
       normalized === "false" ||
-      normalized === "0" ||
-      normalized === "none"
+      normalized === "0"
     ) {
       if (
         levels.includes("none")
@@ -685,8 +851,8 @@ function normalizeReasoningEffort(
     }
 
     if (
-      normalized === "medium" ||
-      normalized === "med"
+      normalized === "med" ||
+      normalized === "medium"
     ) {
       if (
         levels.includes("medium")
@@ -697,7 +863,8 @@ function normalizeReasoningEffort(
 
     if (
       normalized === "maximum" ||
-      normalized === "maximum_reasoning"
+      normalized ===
+        "maximum_reasoning"
     ) {
       if (
         levels.includes("max")
@@ -715,17 +882,33 @@ function normalizeReasoningEffort(
 }
 
 /*
- * Determine the actual reasoning effort for this request.
+ * Known model:
  *
- * Priority:
+ *   1. request.reasoning_effort
+ *   2. request.reasoning_mode
+ *   3. request.reasoning_budget
+ *   4. per-model configured effort
+ *   5. global effort
+ *   6. model default
  *
- * 1. request.reasoning_effort
- * 2. request.reasoning_mode
- * 3. request.reasoning_budget
- * 4. per-model configured effort
- * 5. global configured effort
- * 6. model default
+ * Unknown model:
+ *
+ *   We DO NOT invent a model-specific default.
+ *
+ *   If the caller explicitly sends reasoning_effort,
+ *   it is passed through.
+ *
+ *   If the caller explicitly sends reasoning_mode,
+ *   it is passed through as reasoning_effort.
+ *
+ *   If the caller explicitly sends reasoning_budget,
+ *   it is passed through as reasoning_budget.
+ *
+ * This prevents the proxy from sending unsupported reasoning
+ * controls to models whose NIM implementation we haven't
+ * explicitly configured.
  */
+
 function getRequestedReasoningEffort(
   incoming,
   model,
@@ -735,30 +918,40 @@ function getRequestedReasoningEffort(
     incoming.reasoning_effort !==
     undefined
   ) {
-    return normalizeReasoningEffort(
-      incoming.reasoning_effort,
-      modelConfig
-    );
+    return modelConfig
+      ? normalizeReasoningEffort(
+          incoming.reasoning_effort,
+          modelConfig
+        )
+      : String(
+          incoming.reasoning_effort
+        ).trim();
   }
 
   if (
     incoming.reasoning_mode !==
     undefined
   ) {
-    return normalizeReasoningEffort(
-      incoming.reasoning_mode,
-      modelConfig
-    );
+    return modelConfig
+      ? normalizeReasoningEffort(
+          incoming.reasoning_mode,
+          modelConfig
+        )
+      : String(
+          incoming.reasoning_mode
+        ).trim();
   }
 
   if (
     incoming.reasoning_budget !==
     undefined
   ) {
-    return budgetToReasoningEffort(
-      incoming.reasoning_budget,
-      modelConfig
-    );
+    return modelConfig
+      ? budgetToReasoningEffort(
+          incoming.reasoning_budget,
+          modelConfig
+        )
+      : null;
   }
 
   if (
@@ -774,10 +967,16 @@ function getRequestedReasoningEffort(
     );
   }
 
-  return normalizeReasoningEffort(
-    DEFAULT_REASONING_EFFORT,
+  if (
     modelConfig
-  );
+  ) {
+    return normalizeReasoningEffort(
+      DEFAULT_REASONING_EFFORT,
+      modelConfig
+    );
+  }
+
+  return null;
 }
 
 /* ============================================================
@@ -819,9 +1018,8 @@ function normalizeMessages(
             null
         ) {
           /*
-           * Allow assistant messages that contain
-           * tool calls/reasoning content without normal
-           * textual content.
+           * Preserve assistant messages that only contain
+           * tool calls or other structured content.
            */
           if (
             !Array.isArray(
@@ -892,7 +1090,7 @@ function buildNimRequest(
 
   /*
    * ==========================================================
-   * STANDARD PARAMETERS
+   * STANDARD GENERATION PARAMETERS
    * ==========================================================
    */
 
@@ -931,7 +1129,7 @@ function buildNimRequest(
 
   /*
    * ==========================================================
-   * OPTIONAL OPENAI-COMPATIBLE PARAMETERS
+   * OPENAI/NIM COMPATIBLE PARAMETERS
    * ==========================================================
    */
 
@@ -948,7 +1146,11 @@ function buildNimRequest(
     "logit_bias",
     "user",
     "parallel_tool_calls",
-    "stream_options"
+    "stream_options",
+    "n",
+    "service_tier",
+    "modalities",
+    "audio"
   ];
 
   for (
@@ -966,7 +1168,7 @@ function buildNimRequest(
 
   /*
    * ==========================================================
-   * EXISTING CHAT TEMPLATE KWARGS
+   * PRESERVE CHAT TEMPLATE KWARGS
    * ==========================================================
    */
 
@@ -982,21 +1184,76 @@ function buildNimRequest(
 
   /*
    * ==========================================================
-   * DEEPSEEK V4 FLASH 0731
+   * PRESERVE EXTRA BODY
    * ==========================================================
    *
-   * NVIDIA's current example uses:
+   * Some NVIDIA models expose model-specific options through
+   * extra_body.
    *
-   * extra_body:
-   * {
-   *   chat_template_kwargs: {
-   *     thinking: true,
-   *     reasoning_effort: "high"
-   *   }
-   * }
+   * We preserve it instead of deleting it.
+   */
+
+  if (
+    isPlainObject(
+      incoming.extra_body
+    )
+  ) {
+    Object.assign(
+      request,
+      incoming.extra_body
+    );
+  }
+
+  /*
+   * ==========================================================
+   * UNKNOWN MODEL
+   * ==========================================================
    *
-   * Through the OpenAI-compatible endpoint we send the
-   * corresponding chat_template_kwargs directly.
+   * Do not guess model-specific reasoning implementation.
+   *
+   * Explicit reasoning_effort is forwarded.
+   */
+
+  if (
+    !modelConfig
+  ) {
+    if (
+      incoming.reasoning_effort !==
+      undefined
+    ) {
+      request.reasoning_effort =
+        incoming.reasoning_effort;
+    } else if (
+      incoming.reasoning_mode !==
+      undefined
+    ) {
+      request.reasoning_effort =
+        incoming.reasoning_mode;
+    }
+
+    /*
+     * Only forward an explicitly supplied numeric budget.
+     *
+     * We do not fabricate one for an unknown model.
+     */
+
+    if (
+      incoming.reasoning_budget !==
+      undefined
+    ) {
+      request.reasoning_budget =
+        clampReasoningBudget(
+          incoming.reasoning_budget
+        );
+    }
+
+    return request;
+  }
+
+  /*
+   * ==========================================================
+   * DEEPSEEK V4 FLASH 0731
+   * ==========================================================
    */
 
   if (
@@ -1025,15 +1282,6 @@ function buildNimRequest(
    * ==========================================================
    * DEEPSEEK V4 PRO 0813
    * ==========================================================
-   *
-   * NVIDIA documents reasoning_effort:
-   *
-   * none
-   * high
-   * max
-   *
-   * The NIM API translates this into the model's
-   * chat-template configuration.
    */
 
   if (
@@ -1050,17 +1298,6 @@ function buildNimRequest(
    * ==========================================================
    * KIMI K3
    * ==========================================================
-   *
-   * NVIDIA documents:
-   *
-   * low
-   * high
-   * max
-   *
-   * Thinking is always enabled.
-   *
-   * Kimi K3 also requires preserved reasoning content
-   * to be passed back on multi-turn reasoning/tool calls.
    */
 
   if (
@@ -1112,8 +1349,9 @@ function buildNimRequest(
     }
 
     /*
-     * Nemotron supports a real numeric reasoning_budget.
+     * Nemotron keeps the real numeric reasoning budget.
      */
+
     if (
       reasoning !== "none"
     ) {
@@ -1131,8 +1369,9 @@ function buildNimRequest(
     }
 
     /*
-     * Recommended when tools are used with reasoning.
+     * Recommended when reasoning + tools are used.
      */
+
     if (
       Array.isArray(
         request.tools
@@ -1191,6 +1430,7 @@ function stripReasoning(
     /*
      * Streaming response.
      */
+
     if (
       choice.delta &&
       typeof choice.delta ===
@@ -1209,6 +1449,7 @@ function stripReasoning(
     /*
      * Non-streaming response.
      */
+
     if (
       choice.message &&
       typeof choice.message ===
@@ -1308,8 +1549,9 @@ function processSSEEvent(
       error
     ) {
       /*
-       * Preserve non-JSON SSE data.
+       * Preserve non-JSON SSE lines.
        */
+
       output.push(
         line
       );
@@ -1362,27 +1604,26 @@ function readStream(
       stream.on(
         "data",
         (chunk) => {
+          if (
+            output.length >=
+            MAX_ERROR_BODY_SIZE
+          ) {
+            return;
+          }
+
           output +=
             chunk.toString(
               "utf8"
             );
 
-          /*
-           * Prevent an enormous upstream error from
-           * consuming too much memory.
-           */
           if (
             output.length >
-            2 *
-              1024 *
-              1024
+            MAX_ERROR_BODY_SIZE
           ) {
             output =
               output.slice(
                 0,
-                2 *
-                  1024 *
-                  1024
+                MAX_ERROR_BODY_SIZE
               );
           }
         }
@@ -1501,7 +1742,13 @@ function sendError(
 
 app.get(
   "/",
-  (req, res) => {
+  async (
+    req,
+    res
+  ) => {
+    const upstreamModels =
+      await fetchNimModels();
+
     res.json({
       status: "online",
 
@@ -1511,10 +1758,16 @@ app.get(
       default_model:
         DEFAULT_MODEL,
 
-      supported_models:
+      explicitly_configured_models:
         Object.keys(
           MODELS
         ),
+
+      upstream_model_count:
+        upstreamModels.length,
+
+      unknown_models_allowed:
+        ALLOW_UNKNOWN_MODELS,
 
       default_reasoning_effort:
         DEFAULT_REASONING_EFFORT,
@@ -1537,17 +1790,29 @@ app.get(
 
 app.get(
   "/health",
-  (req, res) => {
+  async (
+    req,
+    res
+  ) => {
+    const upstreamModels =
+      await fetchNimModels();
+
     res.json({
       ok: true,
 
       model:
         DEFAULT_MODEL,
 
-      supported_models:
+      explicitly_configured_models:
         Object.keys(
           MODELS
         ),
+
+      upstream_model_count:
+        upstreamModels.length,
+
+      unknown_models_allowed:
+        ALLOW_UNKNOWN_MODELS,
 
       reasoning:
         DEFAULT_REASONING_EFFORT,
@@ -1560,45 +1825,134 @@ app.get(
 
 /* ============================================================
    MODELS ENDPOINT
-   ============================================================ */
+   ============================================================
+ *
+ * Return NVIDIA's real model list.
+ *
+ * This is a major change from the original code:
+ *
+ * Your proxy is no longer limited to the MODELS object.
+ */
 
 app.get(
   "/v1/models",
-  (req, res) => {
-    const models =
-      Object.entries(
-        MODELS
-      ).map(
-        ([id, config]) => ({
-          id,
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const upstreamModels =
+        await fetchNimModels();
 
+      /*
+       * If NVIDIA successfully returned models, use them.
+       */
+
+      if (
+        upstreamModels.length > 0
+      ) {
+        return res.json({
           object:
-            "model",
+            "list",
 
-          created:
-            Math.floor(
-              Date.now() /
-                1000
-            ),
+          data:
+            upstreamModels
+        });
+      }
 
-          owned_by:
-            config.provider,
+      /*
+       * Fallback to the explicitly configured models if
+       * upstream discovery is temporarily unavailable.
+       */
 
-          reasoning_levels:
-            config.reasoningLevels,
+      const models =
+        Object.entries(
+          MODELS
+        ).map(
+          ([id, config]) => ({
+            id,
 
-          max_output_tokens:
-            config.maxOutputTokens
-        })
+            object:
+              "model",
+
+            created:
+              Math.floor(
+                Date.now() / 1000
+              ),
+
+            owned_by:
+              config.provider,
+
+            reasoning_levels:
+              config.reasoningLevels,
+
+            max_output_tokens:
+              config.maxOutputTokens
+          })
+        );
+
+      return res.json({
+        object:
+          "list",
+
+        data:
+          models
+      });
+    } catch (
+      error
+    ) {
+      return sendError(
+        res,
+        502,
+        "Unable to retrieve NVIDIA NIM models.",
+        error?.message ||
+          String(
+            error
+          )
       );
+    }
+  }
+);
 
-    res.json({
-      object:
-        "list",
+/* ============================================================
+   FORCE MODEL CACHE REFRESH
+   ============================================================ */
 
-      data:
-        models
-    });
+app.post(
+  "/v1/models/refresh",
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const models =
+        await fetchNimModels(
+          true
+        );
+
+      return res.json({
+        object:
+          "list",
+
+        data:
+          models,
+
+        count:
+          models.length
+      });
+    } catch (
+      error
+    ) {
+      return sendError(
+        res,
+        502,
+        "Unable to refresh NVIDIA NIM model list.",
+        error?.message ||
+          String(
+            error
+          )
+      );
+    }
   }
 );
 
@@ -1650,7 +2004,7 @@ app.post(
        * ======================================================
        */
 
-      const model =
+      const requestedModel =
         typeof incoming.model ===
           "string" &&
         incoming.model.trim()
@@ -1658,9 +2012,37 @@ app.post(
           : DEFAULT_MODEL;
 
       /*
+       * Keep the actual model string for NVIDIA.
+       *
+       * normalizeModel() is only used for lookup.
+       */
+
+      const model =
+        requestedModel;
+
+      const normalizedModel =
+        normalizeModel(
+          model
+        );
+
+      const modelConfig =
+        getModelConfig(
+          model
+        );
+
+      /*
        * ======================================================
        * MODEL VALIDATION
        * ======================================================
+       *
+       * IMPORTANT:
+       *
+       * Unknown models are now allowed.
+       *
+       * We do not require the model to be in MODELS.
+       *
+       * If ALLOW_UNKNOWN_MODELS=true, NVIDIA gets to decide
+       * whether the model exists/is usable.
        */
 
       if (
@@ -1673,18 +2055,13 @@ app.post(
           400,
           `Unsupported model: ${model}`,
           {
-            supported_models:
+            explicitly_configured_models:
               Object.keys(
                 MODELS
               )
           }
         );
       }
-
-      const normalizedModel =
-        normalizeModel(
-          model
-        );
 
       /*
        * ======================================================
@@ -1729,7 +2106,7 @@ app.post(
       const nimRequest =
         buildNimRequest(
           incoming,
-          normalizedModel,
+          model,
           messages,
           stream
         );
@@ -1893,6 +2270,23 @@ app.post(
           "=========================================="
         );
 
+        /*
+         * If NVIDIA says the model doesn't exist, refresh the
+         * model cache. This makes newly added/removed models
+         * appear quickly without restarting Render.
+         */
+
+        if (
+          response.status ===
+            400 ||
+          response.status ===
+            404
+        ) {
+          await fetchNimModels(
+            true
+          );
+        }
+
         const proxyStatus =
           response.status >=
           500
@@ -2004,6 +2398,27 @@ app.post(
 
       /*
        * ======================================================
+       * CLEAN UP UPSTREAM
+       * ======================================================
+       */
+
+      const destroyUpstream =
+        () => {
+          try {
+            if (
+              upstream &&
+              typeof upstream.destroy ===
+                "function"
+            ) {
+              upstream.destroy();
+            }
+          } catch (
+            error
+          ) {}
+        };
+
+      /*
+       * ======================================================
        * CLIENT DISCONNECT
        * ======================================================
        */
@@ -2014,11 +2429,7 @@ app.post(
           clientDisconnected =
             true;
 
-          try {
-            upstream.destroy();
-          } catch (
-            error
-          ) {}
+          destroyUpstream();
         }
       );
 
@@ -2031,11 +2442,7 @@ app.post(
             clientDisconnected =
               true;
 
-            try {
-              upstream.destroy();
-            } catch (
-              error
-            ) {}
+            destroyUpstream();
           }
         }
       );
@@ -2107,11 +2514,7 @@ app.post(
               clientDisconnected =
                 true;
 
-              try {
-                upstream.destroy();
-              } catch (
-                destroyError
-              ) {}
+              destroyUpstream();
             }
           }
         }
@@ -2138,6 +2541,7 @@ app.post(
           /*
            * Process final partial SSE event.
            */
+
           if (
             buffer.trim() &&
             !clientDisconnected
@@ -2258,6 +2662,7 @@ app.post(
       /*
        * Axios timeout.
        */
+
       if (
         error?.code ===
         "ECONNABORTED"
@@ -2276,6 +2681,7 @@ app.post(
       /*
        * Connection reset.
        */
+
       if (
         error?.code ===
         "ECONNRESET"
@@ -2306,7 +2712,10 @@ app.post(
    ============================================================ */
 
 app.use(
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     return sendError(
       res,
       404,
@@ -2381,7 +2790,7 @@ const server =
       );
 
       console.log(
-        `💭 Default reasoning budget policy: ${DEFAULT_REASONING_BUDGET}`
+        `💭 Default reasoning budget: ${DEFAULT_REASONING_BUDGET}`
       );
 
       console.log(
@@ -2405,7 +2814,11 @@ const server =
       );
 
       console.log(
-        "📦 Supported models:"
+        `🌐 Unknown NIM models allowed: ${ALLOW_UNKNOWN_MODELS}`
+      );
+
+      console.log(
+        "📦 Explicitly configured models:"
       );
 
       Object.entries(
@@ -2431,6 +2844,30 @@ const server =
       console.log(
         "=========================================="
       );
+
+      /*
+       * Warm the model cache after startup.
+       *
+       * Failure here does NOT stop the proxy.
+       */
+
+      fetchNimModels()
+        .then(
+          (models) => {
+            console.log(
+              `📡 NVIDIA reports ${models.length} available model(s).`
+            );
+          }
+        )
+        .catch(
+          (error) => {
+            console.warn(
+              "Initial NVIDIA model discovery failed:",
+              error?.message ||
+                error
+            );
+          }
+        );
     }
   );
 
@@ -2447,7 +2884,19 @@ server.requestTimeout =
 server.keepAliveTimeout =
   Math.max(
     65000,
-    NIM_TIMEOUT + 5000
+    Math.min(
+      NIM_TIMEOUT + 5000,
+      120000
+    )
+  );
+
+server.headersTimeout =
+  Math.max(
+    66000,
+    Math.min(
+      NIM_TIMEOUT + 10000,
+      125000
+    )
   );
 
 /* ============================================================
