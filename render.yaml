@@ -1,18 +1,33 @@
+```yaml
 services:
   - type: web
     name: janitorai-nvidia-nim-proxy
     runtime: node
+
     buildCommand: npm ci
     startCommand: npm start
+
     healthCheckPath: /health
+
     envVars:
+      - key: NODE_ENV
+        value: production
+
       - key: NIM_API_KEY
         sync: false
+
       - key: DEFAULT_MODEL
         value: moonshotai/kimi-k3
+
       - key: KIMI_MEMORY_ENABLED
         value: "true"
+
       - key: KIMI_CONTEXT_BUDGET
         value: "1000000"
+
       - key: ALLOW_UNKNOWN_MODELS
         value: "true"
+
+      - key: NODE_VERSION
+        value: "22"
+```
