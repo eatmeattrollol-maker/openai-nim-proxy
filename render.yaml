@@ -1,4 +1,3 @@
-```yaml
 services:
   - type: web
     name: janitorai-nvidia-nim-proxy
@@ -30,4 +29,3 @@ services:
 
       - key: NODE_VERSION
         value: "22"
-```
