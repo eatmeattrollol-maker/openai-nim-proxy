@@ -8,6 +8,12 @@ const crypto = require("crypto");
 
 const app = express();
 
+/*
+ * ============================================================
+ * CONFIGURATION
+ * ============================================================
+ */
+
 const PORT = Number(process.env.PORT) || 3000;
 
 const NIM_API_BASE = (
@@ -30,8 +36,7 @@ const MODELS = {
     provider: "DeepSeek AI",
     reasoningLevels: ["none", "low", "high", "max"],
     defaultReasoningEffort: "high",
-    maxOutputTokens: 16384,
-    thinkingParameter: "chat_template"
+    maxOutputTokens: 16384
   },
 
   "deepseek-ai/deepseek-v4-pro-0813": {
@@ -39,8 +44,7 @@ const MODELS = {
     provider: "DeepSeek AI",
     reasoningLevels: ["none", "low", "high", "max"],
     defaultReasoningEffort: "max",
-    maxOutputTokens: 16384,
-    thinkingParameter: "chat_template"
+    maxOutputTokens: 16384
   },
 
   "moonshotai/kimi-k3": {
@@ -48,8 +52,7 @@ const MODELS = {
     provider: "Moonshot AI",
     reasoningLevels: ["low", "high", "max"],
     defaultReasoningEffort: "max",
-    maxOutputTokens: 1048576,
-    thinkingParameter: "native"
+    maxOutputTokens: 1048576
   },
 
   "nvidia/nemotron-3-ultra-550b-a55b": {
@@ -57,8 +60,7 @@ const MODELS = {
     provider: "NVIDIA",
     reasoningLevels: ["none", "medium", "high"],
     defaultReasoningEffort: "high",
-    maxOutputTokens: 32768,
-    thinkingParameter: "nemotron"
+    maxOutputTokens: 32768
   }
 };
 
@@ -143,16 +145,6 @@ const KIMI_MEMORY_ENABLED =
     .trim()
     .toLowerCase() === "true";
 
-/*
- * NVIDIA currently documents 1,048,576 input tokens for K3.
- *
- * Default:
- *
- *     1,000,000
- *
- * You can lower this through Render environment variables if
- * necessary.
- */
 const KIMI_CONTEXT_BUDGET =
   Number.isFinite(Number(process.env.KIMI_CONTEXT_BUDGET))
     ? Math.min(
@@ -164,28 +156,11 @@ const KIMI_CONTEXT_BUDGET =
       )
     : 1000000;
 
-/*
- * Approximate token calculation.
- *
- * This is deliberately conservative and is NOT intended to
- * replace Kimi/NVIDIA's actual tokenizer.
- *
- * 3.5 characters/token is a practical approximation for mixed
- * conversational English text.
- */
 const KIMI_CHARS_PER_TOKEN =
   Number.isFinite(Number(process.env.KIMI_CHARS_PER_TOKEN))
     ? Math.max(2, Number(process.env.KIMI_CHARS_PER_TOKEN))
     : 3.5;
 
-/*
- * Maximum number of messages kept in the server memory.
- *
- * The token budget is the real context limiter.
- *
- * This simply prevents pathological numbers of tiny messages
- * from consuming unlimited Node.js memory.
- */
 const KIMI_MAX_STORED_MESSAGES =
   Number.isFinite(Number(process.env.KIMI_MAX_STORED_MESSAGES))
     ? Math.max(
@@ -194,19 +169,11 @@ const KIMI_MAX_STORED_MESSAGES =
       )
     : 10000;
 
-/*
- * Remove completely inactive conversations after this period.
- *
- * Default: 7 days.
- */
 const KIMI_MEMORY_TTL_MS =
   Number.isFinite(Number(process.env.KIMI_MEMORY_TTL_MS))
     ? Math.max(60000, Number(process.env.KIMI_MEMORY_TTL_MS))
     : 7 * 24 * 60 * 60 * 1000;
 
-/*
- * Maximum simultaneous conversations held in RAM.
- */
 const KIMI_MAX_CONVERSATIONS =
   Number.isFinite(Number(process.env.KIMI_MAX_CONVERSATIONS))
     ? Math.max(
@@ -216,22 +183,12 @@ const KIMI_MAX_CONVERSATIONS =
     : 2000;
 
 /*
- * Map:
- *
- * conversationId -> {
- *   messages: [],
- *   updatedAt,
- *   systemFingerprint,
- *   firstUserFingerprint
- * }
+ * ============================================================
+ * KIMI MEMORY
+ * ============================================================
  */
-const kimiConversationStore = new Map();
 
-/*
- * ============================================================
- * KIMI TOKEN ESTIMATION
- * ============================================================
- */
+const kimiConversationStore = new Map();
 
 function estimateKimiTokens(value) {
   if (value === undefined || value === null) {
@@ -270,33 +227,12 @@ function estimateKimiMessagesTokens(messages) {
   );
 }
 
-/*
- * ============================================================
- * KIMI MEMORY HASHING
- * ============================================================
- */
-
 function hashKimiValue(value) {
   return crypto
     .createHash("sha256")
     .update(String(value || ""), "utf8")
     .digest("hex");
 }
-
-/*
- * ============================================================
- * KIMI CONVERSATION ID
- * ============================================================
- *
- * Best case:
- *
- * JanitorAI/client gives us a conversation/session ID.
- *
- * We accept several common names.
- *
- * If no ID is supplied, we derive one from stable conversation
- * information and also use overlap matching below.
- */
 
 function getExplicitKimiConversationId(req, incoming) {
   const candidates = [
@@ -377,18 +313,6 @@ function getKimiStableFingerprint(messages) {
   };
 }
 
-/*
- * ============================================================
- * KIMI MESSAGE SIGNATURE
- * ============================================================
- *
- * Includes reasoning_content and tool calls.
- *
- * This matters because NVIDIA specifically says K3 multi-turn
- * conversations/tool calls should preserve the complete prior
- * assistant message.
- */
-
 function kimiMessageSignature(message) {
   return hashKimiValue(
     JSON.stringify({
@@ -398,16 +322,11 @@ function kimiMessageSignature(message) {
         message?.reasoning_content ?? null,
       name: message?.name ?? null,
       tool_calls: message?.tool_calls ?? null,
-      function_call: message?.function_call ?? null
+      function_call:
+        message?.function_call ?? null
     })
   );
 }
-
-/*
- * ============================================================
- * KIMI MEMORY TOUCH / CLEANUP
- * ============================================================
- */
 
 function touchKimiConversation(conversationId) {
   const entry =
@@ -419,10 +338,6 @@ function touchKimiConversation(conversationId) {
 
   entry.updatedAt = Date.now();
 
-  /*
-   * Reinsert so Map iteration order makes the oldest entry
-   * the least recently used entry.
-   */
   kimiConversationStore.delete(conversationId);
   kimiConversationStore.set(conversationId, entry);
 }
@@ -431,7 +346,10 @@ function cleanupKimiMemory() {
   const cutoff =
     Date.now() - KIMI_MEMORY_TTL_MS;
 
-  for (const [conversationId, entry] of kimiConversationStore) {
+  for (
+    const [conversationId, entry] of
+    kimiConversationStore
+  ) {
     if (entry.updatedAt < cutoff) {
       kimiConversationStore.delete(conversationId);
     }
@@ -445,12 +363,6 @@ setInterval(
     60 * 60 * 1000
   )
 ).unref();
-
-/*
- * ============================================================
- * KIMI CONVERSATION LOOKUP
- * ============================================================
- */
 
 function createKimiConversation(
   conversationId,
@@ -473,9 +385,6 @@ function createKimiConversation(
     entry
   );
 
-  /*
-   * LRU cleanup.
-   */
   while (
     kimiConversationStore.size >
     KIMI_MAX_CONVERSATIONS
@@ -495,16 +404,6 @@ function createKimiConversation(
 
   return entry;
 }
-
-/*
- * If an explicit ID isn't available, try to identify an existing
- * conversation from messages already known to the server.
- *
- * This is intentionally conservative.
- *
- * It prefers exact first-user matches, then system-prompt
- * matches with message overlap.
- */
 
 function findKimiConversationByHistory(messages) {
   if (
@@ -530,10 +429,6 @@ function findKimiConversationByHistory(messages) {
   ) {
     let score = 0;
 
-    /*
-     * Strongest signal:
-     * same first user message.
-     */
     if (
       fingerprints.firstUserFingerprint &&
       entry.firstUserFingerprint &&
@@ -543,9 +438,6 @@ function findKimiConversationByHistory(messages) {
       score += 1000;
     }
 
-    /*
-     * System prompt match is useful for character chats.
-     */
     if (
       fingerprints.systemFingerprint &&
       entry.systemFingerprint &&
@@ -555,10 +447,6 @@ function findKimiConversationByHistory(messages) {
       score += 100;
     }
 
-    /*
-     * Message overlap is the most useful fallback when
-     * JanitorAI sends a shortened recent history.
-     */
     if (Array.isArray(entry.messages)) {
       let overlap = 0;
 
@@ -575,9 +463,6 @@ function findKimiConversationByHistory(messages) {
       score += Math.min(overlap * 10, 500);
     }
 
-    /*
-     * Don't match completely unrelated conversations.
-     */
     if (score > bestScore) {
       bestScore = score;
 
@@ -588,9 +473,6 @@ function findKimiConversationByHistory(messages) {
     }
   }
 
-  /*
-   * Require an actual meaningful match.
-   */
   if (!bestMatch || bestScore < 10) {
     return null;
   }
@@ -610,6 +492,10 @@ function getOrCreateKimiConversation(
     );
 
   if (explicitId) {
+    /*
+     * IMPORTANT:
+     * The backticks here are required.
+     */
     const conversationId =
       `explicit:${hashKimiValue(explicitId)}`;
 
@@ -625,7 +511,9 @@ function getOrCreateKimiConversation(
       );
     }
 
-    touchKimiConversation(conversationId);
+    touchKimiConversation(
+      conversationId
+    );
 
     return {
       conversationId,
@@ -633,12 +521,6 @@ function getOrCreateKimiConversation(
     };
   }
 
-  /*
-   * No explicit ID.
-   *
-   * Try to reconnect the request to a conversation that already
-   * exists in RAM.
-   */
   const matched =
     findKimiConversationByHistory(
       messages
@@ -652,19 +534,14 @@ function getOrCreateKimiConversation(
     return matched;
   }
 
-  /*
-   * Last resort:
-   * create a new conversation.
-   *
-   * This is only used when the request contains no usable
-   * conversation identifier and no previous history overlaps.
-   */
   const fingerprints =
     getKimiStableFingerprint(messages);
 
   const seed = JSON.stringify({
-    system: fingerprints.systemFingerprint,
-    firstUser: fingerprints.firstUserFingerprint,
+    system:
+      fingerprints.systemFingerprint,
+    firstUser:
+      fingerprints.firstUserFingerprint,
     time: Date.now(),
     random: Math.random()
   });
@@ -683,22 +560,6 @@ function getOrCreateKimiConversation(
     entry
   };
 }
-
-/*
- * ============================================================
- * KIMI MESSAGE MERGING
- * ============================================================
- *
- * JanitorAI may send only part of the conversation.
- *
- * We merge:
- *
- *     server memory
- *          +
- *     JanitorAI's incoming messages
- *
- * without duplicating messages.
- */
 
 function mergeKimiMessages(
   storedMessages,
@@ -730,20 +591,6 @@ function mergeKimiMessages(
   return result;
 }
 
-/*
- * ============================================================
- * KIMI CONTEXT FITTING
- * ============================================================
- *
- * System/developer messages are always preserved.
- *
- * For the remaining messages, take the newest messages that fit
- * the context budget.
- *
- * Because K3 supports a 1M input context, this allows vastly
- * more history than the 20-message example in the Kimi docs.
- */
-
 function fitKimiContext(messages) {
   if (
     !Array.isArray(messages) ||
@@ -769,19 +616,12 @@ function fitKimiContext(messages) {
   let used =
     estimateKimiMessagesTokens(pinned);
 
-  /*
-   * If system messages alone exceed the configured budget,
-   * return them rather than corrupting them.
-   */
   if (used >= KIMI_CONTEXT_BUDGET) {
     return pinned;
   }
 
   const selected = [];
 
-  /*
-   * Walk backward so the newest messages are preferred.
-   */
   for (
     let index = normal.length - 1;
     index >= 0;
@@ -796,10 +636,6 @@ function fitKimiContext(messages) {
       used + cost >
       KIMI_CONTEXT_BUDGET
     ) {
-      /*
-       * Skip an oversized individual message rather than
-       * abandoning the entire history.
-       */
       continue;
     }
 
@@ -815,12 +651,6 @@ function fitKimiContext(messages) {
   ];
 }
 
-/*
- * ============================================================
- * KIMI MEMORY UPDATE
- * ============================================================
- */
-
 function updateKimiMemory(
   conversationId,
   incomingMessages
@@ -834,27 +664,17 @@ function updateKimiMemory(
       incomingMessages
     );
 
-  /*
-   * Preserve everything the server already knows, then merge
-   * the history JanitorAI just sent us.
-   */
   const merged =
     mergeKimiMessages(
       memory.messages,
       incomingMessages
     );
 
-  /*
-   * Keep the maximum useful context that fits K3's budget.
-   */
   memory.messages =
     fitKimiContext(merged).slice(
       -KIMI_MAX_STORED_MESSAGES
     );
 
-  /*
-   * Refresh stable fingerprints as the conversation grows.
-   */
   const fingerprints =
     getKimiStableFingerprint(
       memory.messages
@@ -878,12 +698,6 @@ function updateKimiMemory(
 
   return memory.messages;
 }
-
-/*
- * ============================================================
- * KIMI MEMORY PREPARATION
- * ============================================================
- */
 
 function buildKimiMemoryContext(
   req,
@@ -916,26 +730,6 @@ function buildKimiMemoryContext(
     messages
   };
 }
-
-/*
- * ============================================================
- * STORE KIMI ASSISTANT RESPONSE
- * ============================================================
- *
- * This stores the COMPLETE assistant message internally.
- *
- * In particular:
- *
- *     content
- *     reasoning_content
- *     tool_calls
- *     function_call
- *
- * are retained.
- *
- * stripReasoning() is only applied to the response going back
- * to JanitorAI, NOT to this internal memory.
- */
 
 function appendKimiAssistantMessage(
   conversationId,
@@ -1038,12 +832,6 @@ function appendKimiAssistantMessage(
   );
 }
 
-/*
- * ============================================================
- * EXTRACT COMPLETE NON-STREAM KIMI ASSISTANT MESSAGE
- * ============================================================
- */
-
 function extractKimiAssistantMessage(parsed) {
   const choice = parsed?.choices?.[0];
 
@@ -1075,18 +863,6 @@ function extractKimiAssistantMessage(parsed) {
       choice.message.name
   };
 }
-
-/*
- * ============================================================
- * EXTRACT STREAMED KIMI ASSISTANT MESSAGE
- * ============================================================
- *
- * Streaming responses arrive as deltas.
- *
- * We reconstruct the assistant message from those deltas so
- * Kimi's reasoning history and tool calls can be preserved for
- * the next turn.
- */
 
 function createKimiStreamAccumulator() {
   return {
@@ -1161,9 +937,6 @@ function mergeKimiToolCallDelta(
     }
   }
 
-  /*
-   * Preserve any provider-specific fields.
-   */
   for (
     const [key, value] of
     Object.entries(toolCall)
@@ -1244,9 +1017,6 @@ function addKimiSSEToAccumulator(
       );
     }
 
-    /*
-     * K3's reasoning history.
-     */
     if (
       typeof delta.reasoning_content ===
       "string"
@@ -1256,9 +1026,6 @@ function addKimiSSEToAccumulator(
       );
     }
 
-    /*
-     * Some compatible servers may use "reasoning".
-     */
     if (
       typeof delta.reasoning ===
       "string"
@@ -1336,11 +1103,8 @@ function finalizeKimiStreamAccumulator(
   const content =
     accumulator.contentParts.join("");
 
-  if (content) {
-    message.content = content;
-  } else {
-    message.content = "";
-  }
+  message.content =
+    content || "";
 
   const reasoning =
     accumulator.reasoningParts.join("");
@@ -1357,8 +1121,7 @@ function finalizeKimiStreamAccumulator(
     );
 
   if (
-    toolCalls.length >
-    0
+    toolCalls.length > 0
   ) {
     message.tool_calls =
       toolCalls;
@@ -1483,20 +1246,6 @@ async function fetchNimModels(
     })();
 
   return modelCachePromise;
-}
-
-async function isKnownToNim(model) {
-  const models =
-    await fetchNimModels();
-
-  const normalized =
-    normalizeModel(model);
-
-  return models.some(
-    (item) =>
-      normalizeModel(item?.id) ===
-      normalized
-  );
 }
 
 /*
@@ -1884,7 +1633,7 @@ function getRequestedReasoningEffort(
 
 /*
  * ============================================================
- * NORMALIZE MESSAGES
+ * MESSAGE NORMALIZATION
  * ============================================================
  */
 
@@ -1915,10 +1664,6 @@ function normalizeMessages(messages) {
             message.tool_calls
           )
         ) {
-          /*
-           * Preserve assistant messages that contain
-           * reasoning/tool-call information.
-           */
           if (
             message.reasoning_content ===
               undefined &&
@@ -1940,7 +1685,7 @@ function normalizeMessages(messages) {
 
 /*
  * ============================================================
- * BUILD NIM REQUEST
+ * BUILD NVIDIA REQUEST
  * ============================================================
  */
 
@@ -2100,9 +1845,7 @@ function buildNimRequest(
   }
 
   /*
-   * ==========================================================
-   * DEEPSEEK V4 FLASH
-   * ==========================================================
+   * DeepSeek V4 Flash
    */
 
   if (
@@ -2124,9 +1867,7 @@ function buildNimRequest(
   }
 
   /*
-   * ==========================================================
-   * DEEPSEEK V4 PRO
-   * ==========================================================
+   * DeepSeek V4 Pro
    */
 
   if (
@@ -2140,15 +1881,7 @@ function buildNimRequest(
   }
 
   /*
-   * ==========================================================
-   * KIMI K3
-   * ==========================================================
-   *
-   * K3 uses top-level reasoning_effort.
-   *
-   * The memory itself is handled before this function is
-   * called, so `messages` here already contains the expanded
-   * server-side history.
+   * Kimi K3
    */
 
   if (
@@ -2162,9 +1895,7 @@ function buildNimRequest(
   }
 
   /*
-   * ==========================================================
-   * NEMOTRON
-   * ==========================================================
+   * Nemotron
    */
 
   if (
@@ -2237,11 +1968,6 @@ function buildNimRequest(
  * ============================================================
  * REMOVE REASONING FROM RESPONSE
  * ============================================================
- *
- * This only modifies what JanitorAI receives.
- *
- * Kimi's internal memory has already retained the full assistant
- * message before this function is used.
  */
 
 function stripReasoning(parsed) {
@@ -2292,7 +2018,7 @@ function stripReasoning(parsed) {
 
 /*
  * ============================================================
- * SSE PROCESSOR
+ * SSE
  * ============================================================
  */
 
@@ -2363,7 +2089,7 @@ function processSSEEvent(event) {
 
 /*
  * ============================================================
- * READ STREAM
+ * ERROR HELPERS
  * ============================================================
  */
 
@@ -2409,12 +2135,6 @@ function readStream(stream) {
   });
 }
 
-/*
- * ============================================================
- * EXTRACT UPSTREAM ERROR
- * ============================================================
- */
-
 function extractErrorMessage(data) {
   if (!data) {
     return null;
@@ -2441,12 +2161,6 @@ function extractErrorMessage(data) {
     return String(data);
   }
 }
-
-/*
- * ============================================================
- * ERROR RESPONSE
- * ============================================================
- */
 
 function sendError(
   res,
@@ -2582,7 +2296,7 @@ app.get(
 
 /*
  * ============================================================
- * NVIDIA MODEL LIST
+ * MODEL LIST
  * ============================================================
  */
 
@@ -2642,7 +2356,7 @@ app.get(
 
 /*
  * ============================================================
- * FORCE MODEL CACHE REFRESH
+ * FORCE MODEL REFRESH
  * ============================================================
  */
 
@@ -2681,9 +2395,7 @@ app.post(
   async (req, res) => {
     try {
       /*
-       * ======================================================
        * API KEY
-       * ======================================================
        */
 
       if (
@@ -2699,9 +2411,7 @@ app.post(
       }
 
       /*
-       * ======================================================
        * BODY
-       * ======================================================
        */
 
       const incoming =
@@ -2710,9 +2420,7 @@ app.post(
           : {};
 
       /*
-       * ======================================================
        * MODEL
-       * ======================================================
        */
 
       const requestedModel =
@@ -2732,9 +2440,7 @@ app.post(
         getModelConfig(model);
 
       /*
-       * ======================================================
        * MODEL VALIDATION
-       * ======================================================
        */
 
       if (
@@ -2752,9 +2458,7 @@ app.post(
       }
 
       /*
-       * ======================================================
        * MESSAGES
-       * ======================================================
        */
 
       let messages =
@@ -2773,15 +2477,7 @@ app.post(
       }
 
       /*
-       * ======================================================
-       * KIMI K3 MEMORY
-       * ======================================================
-       *
-       * This is the ONLY point where the memory system changes
-       * the request history.
-       *
-       * DeepSeek and Nemotron continue using exactly the
-       * messages supplied by JanitorAI.
+       * KIMI MEMORY
        */
 
       let kimiConversationId = null;
@@ -2839,9 +2535,7 @@ app.post(
       }
 
       /*
-       * ======================================================
        * STREAM
-       * ======================================================
        */
 
       const stream =
@@ -2851,9 +2545,7 @@ app.post(
         );
 
       /*
-       * ======================================================
-       * BUILD NIM REQUEST
-       * ======================================================
+       * BUILD REQUEST
        */
 
       const nimRequest =
@@ -2865,9 +2557,7 @@ app.post(
         );
 
       /*
-       * ======================================================
        * DEBUG
-       * ======================================================
        */
 
       if (DEBUG_PROXY) {
@@ -2889,9 +2579,7 @@ app.post(
       }
 
       /*
-       * ======================================================
-       * AXIOS CONFIG
-       * ======================================================
+       * AXIOS
        */
 
       const axiosConfig = {
@@ -2916,9 +2604,7 @@ app.post(
       };
 
       /*
-       * ======================================================
-       * REQUEST NVIDIA NIM
-       * ======================================================
+       * NVIDIA REQUEST
        */
 
       const response =
@@ -2934,9 +2620,7 @@ app.post(
         );
 
       /*
-       * ======================================================
        * UPSTREAM ERROR
-       * ======================================================
        */
 
       if (
@@ -3040,20 +2724,10 @@ app.post(
       }
 
       /*
-       * ======================================================
        * NON-STREAMING
-       * ======================================================
        */
 
       if (!stream) {
-        /*
-         * IMPORTANT:
-         *
-         * Save the COMPLETE Kimi assistant message before
-         * stripReasoning() removes internal reasoning from
-         * the response.
-         */
-
         if (
           normalizedModel ===
             "moonshotai/kimi-k3" &&
@@ -3086,9 +2760,7 @@ app.post(
       }
 
       /*
-       * ======================================================
        * STREAM HEADERS
-       * ======================================================
        */
 
       res.status(200);
@@ -3121,9 +2793,7 @@ app.post(
       }
 
       /*
-       * ======================================================
        * UPSTREAM STREAM
-       * ======================================================
        */
 
       const upstream =
@@ -3142,7 +2812,7 @@ app.post(
       }
 
       /*
-       * Kimi streaming memory accumulator.
+       * Kimi streaming memory.
        */
 
       if (
@@ -3159,12 +2829,6 @@ app.post(
       let ended = false;
       let clientDisconnected = false;
 
-      /*
-       * ======================================================
-       * CLEAN UP UPSTREAM
-       * ======================================================
-       */
-
       const destroyUpstream = () => {
         try {
           if (
@@ -3178,9 +2842,7 @@ app.post(
       };
 
       /*
-       * ======================================================
        * CLIENT DISCONNECT
-       * ======================================================
        */
 
       req.on(
@@ -3202,9 +2864,7 @@ app.post(
       );
 
       /*
-       * ======================================================
        * STREAM DATA
-       * ======================================================
        */
 
       upstream.on(
@@ -3238,12 +2898,6 @@ app.post(
               break;
             }
 
-            /*
-             * Reconstruct Kimi's complete assistant message
-             * BEFORE stripping reasoning from the outgoing
-             * stream.
-             */
-
             if (
               kimiStreamAccumulator
             ) {
@@ -3252,10 +2906,6 @@ app.post(
                 event
               );
             }
-
-            /*
-             * JanitorAI receives the normal cleaned stream.
-             */
 
             const output =
               processSSEEvent(
@@ -3282,9 +2932,7 @@ app.post(
       );
 
       /*
-       * ======================================================
        * STREAM END
-       * ======================================================
        */
 
       upstream.on(
@@ -3296,18 +2944,10 @@ app.post(
 
           ended = true;
 
-          /*
-           * Process final partial SSE event.
-           */
-
           if (
             buffer.trim() &&
             !clientDisconnected
           ) {
-            /*
-             * First capture it internally for Kimi.
-             */
-
             if (
               kimiStreamAccumulator
             ) {
@@ -3316,10 +2956,6 @@ app.post(
                 buffer
               );
             }
-
-            /*
-             * Then send the cleaned version to JanitorAI.
-             */
 
             const output =
               processSSEEvent(
@@ -3332,13 +2968,6 @@ app.post(
               } catch (error) {}
             }
           }
-
-          /*
-           * Save the COMPLETE Kimi assistant response.
-           *
-           * This happens even though reasoning_content was
-           * removed from the outgoing stream.
-           */
 
           if (
             kimiStreamAccumulator &&
@@ -3365,9 +2994,7 @@ app.post(
       );
 
       /*
-       * ======================================================
        * STREAM ERROR
-       * ======================================================
        */
 
       upstream.on(
@@ -3540,63 +3167,63 @@ const server =
       );
 
       console.log(
-        "🚀 JanitorAI → NVIDIA NIM Proxy"
+        "JanitorAI -> NVIDIA NIM Proxy"
       );
 
       console.log(
-        `🌐 Port: ${PORT}`
+        `Port: ${PORT}`
       );
 
       console.log(
-        `🤖 Default model: ${DEFAULT_MODEL}`
+        `Default model: ${DEFAULT_MODEL}`
       );
 
       console.log(
-        `🧠 Default reasoning effort: ${DEFAULT_REASONING_EFFORT}`
+        `Default reasoning effort: ${DEFAULT_REASONING_EFFORT}`
       );
 
       console.log(
-        `💭 Default reasoning budget: ${DEFAULT_REASONING_BUDGET}`
+        `Default reasoning budget: ${DEFAULT_REASONING_BUDGET}`
       );
 
       console.log(
-        `📝 Default max tokens: ${DEFAULT_MAX_TOKENS}`
+        `Default max tokens: ${DEFAULT_MAX_TOKENS}`
       );
 
       console.log(
-        `🌡️ Temperature: ${DEFAULT_TEMPERATURE}`
+        `Temperature: ${DEFAULT_TEMPERATURE}`
       );
 
       console.log(
-        `🎯 Top P: ${DEFAULT_TOP_P}`
+        `Top P: ${DEFAULT_TOP_P}`
       );
 
       console.log(
-        `⏱️ Timeout: ${NIM_TIMEOUT}ms`
+        `Timeout: ${NIM_TIMEOUT}ms`
       );
 
       console.log(
-        `🔗 NVIDIA endpoint: ${NIM_API_BASE}`
+        `NVIDIA endpoint: ${NIM_API_BASE}`
       );
 
       console.log(
-        `🌐 Unknown NIM models allowed: ${ALLOW_UNKNOWN_MODELS}`
+        `Unknown NIM models allowed: ${ALLOW_UNKNOWN_MODELS}`
       );
 
       console.log(
-        `🧠 Kimi memory enabled: ${KIMI_MEMORY_ENABLED}`
+        `Kimi memory enabled: ${KIMI_MEMORY_ENABLED}`
       );
 
       console.log(
-        `📚 Kimi context budget: ${KIMI_CONTEXT_BUDGET} estimated tokens`
+        `Kimi context budget: ${KIMI_CONTEXT_BUDGET} estimated tokens`
       );
 
       console.log(
-        `💾 Kimi memory conversations: ${kimiConversationStore.size}`
+        `Kimi memory conversations: ${kimiConversationStore.size}`
       );
 
       console.log(
-        "📦 Explicitly configured models:"
+        "Explicitly configured models:"
       );
 
       Object.entries(MODELS).forEach(
@@ -3623,7 +3250,7 @@ const server =
         .then(
           (models) => {
             console.log(
-              `📡 NVIDIA reports ${models.length} available model(s).`
+              `NVIDIA reports ${models.length} available model(s).`
             );
           }
         )
@@ -3641,7 +3268,7 @@ const server =
 
 /*
  * ============================================================
- * LONG-RUNNING AI REQUEST SETTINGS
+ * RENDER / LONG-RUNNING AI REQUEST SETTINGS
  * ============================================================
  */
 
