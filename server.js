@@ -4,12 +4,10 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const crypto = require("crypto");
-const http = require("http");
-const https = require("https");
 
 const app = express();
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 10000;
 
 const NIM_API_BASE = (
   process.env.NIM_API_BASE ||
@@ -58,8 +56,6 @@ const MODELS = {
     maxOutputTokens: 32768
   }
 };
-
-const CONFIGURED_MODEL_IDS = Object.keys(MODELS);
 
 const ALLOW_UNKNOWN_MODELS =
   String(process.env.ALLOW_UNKNOWN_MODELS || "true")
@@ -181,83 +177,29 @@ const KIMI_MAX_CONVERSATIONS =
 
 
 /* ============================================================
-   UPSTREAM CONNECTION POOL
+   HTTP AGENT
    ============================================================ */
 
-/*
- * The proxy is long-running and normally talks to the same
- * NVIDIA endpoint repeatedly.
- *
- * Reusing TCP/TLS connections removes connection establishment
- * from subsequent requests and is one of the most important
- * proxy-side TTFT optimizations.
- */
-
-const nimUrl = new URL(NIM_API_BASE);
-
-const commonAgentOptions = {
+const httpAgent = new require("http").Agent({
   keepAlive: true,
-  keepAliveMsecs: 1000,
-
-  /*
-   * A small pool is enough for a single-user proxy while still
-   * allowing overlapping requests without unnecessary queuing.
-   */
-  maxSockets: 4,
-  maxFreeSockets: 2,
-
-  /*
-   * Prefer the newest idle socket. This reduces the chance of
-   * attempting to reuse an old connection that an upstream
-   * load balancer has already closed.
-   */
+  maxSockets: 64,
+  maxFreeSockets: 16,
   scheduling: "lifo"
-};
+});
 
-const nimHttpAgent =
-  nimUrl.protocol === "http:"
-    ? new http.Agent(commonAgentOptions)
-    : null;
-
-const nimHttpsAgent =
-  nimUrl.protocol === "https:"
-    ? new https.Agent(commonAgentOptions)
-    : null;
-
-const nimClient = axios.create({
-  timeout: NIM_TIMEOUT,
-
-  httpAgent: nimHttpAgent,
-  httpsAgent: nimHttpsAgent,
-
-  /*
-   * Render does not require an HTTP proxy for the NVIDIA endpoint.
-   * Avoiding environment-proxy discovery keeps this connection
-   * direct and removes another possible hop.
-   */
-  proxy: false,
-
-  validateStatus: function () {
-    return true;
-  }
+const httpsAgent = new require("https").Agent({
+  keepAlive: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+  scheduling: "lifo"
 });
 
 
 /* ============================================================
-   KIMI MEMORY STORE
+   STATE
    ============================================================ */
 
 const kimiConversationStore = new Map();
-
-/*
- * Cache expensive per-message calculations for the lifetime of
- * the message object.
- *
- * This is particularly useful for Kimi because the same stored
- * messages may participate in multiple requests.
- */
-const kimiSignatureCache = new WeakMap();
-const kimiTokenEstimateCache = new WeakMap();
 
 let modelCache = null;
 let modelCacheTimestamp = 0;
@@ -336,9 +278,7 @@ function parseBoolean(value, fallback) {
 }
 
 function normalizeModel(model) {
-  return String(model || "")
-    .trim()
-    .toLowerCase();
+  return String(model || "").trim().toLowerCase();
 }
 
 function getModelConfig(model) {
@@ -346,58 +286,63 @@ function getModelConfig(model) {
 }
 
 function isSupportedModel(model) {
-  return Boolean(getModelConfig(model)) ||
-    ALLOW_UNKNOWN_MODELS;
+  return !!getModelConfig(model) || ALLOW_UNKNOWN_MODELS;
 }
 
 function clampTemperature(value) {
-  const number = numberOrDefault(
-    value,
-    DEFAULT_TEMPERATURE
+  return Math.min(
+    2,
+    Math.max(
+      0,
+      numberOrDefault(
+        value,
+        DEFAULT_TEMPERATURE
+      )
+    )
   );
-
-  return Math.min(2, Math.max(0, number));
 }
 
 function clampTopP(value) {
-  const number = numberOrDefault(
-    value,
-    DEFAULT_TOP_P
+  return Math.min(
+    1,
+    Math.max(
+      0,
+      numberOrDefault(
+        value,
+        DEFAULT_TOP_P
+      )
+    )
   );
-
-  return Math.min(1, Math.max(0, number));
 }
 
 function clampMaxTokens(value, modelConfig) {
-  const number = numberOrDefault(
-    value,
-    DEFAULT_MAX_TOKENS
-  );
-
-  const result = Math.max(
+  const number = Math.max(
     1,
-    Math.floor(number)
+    Math.floor(
+      numberOrDefault(
+        value,
+        DEFAULT_MAX_TOKENS
+      )
+    )
   );
 
-  if (modelConfig && modelConfig.maxOutputTokens) {
-    return Math.min(
-      modelConfig.maxOutputTokens,
-      result
-    );
-  }
-
-  return result;
+  return modelConfig?.maxOutputTokens
+    ? Math.min(modelConfig.maxOutputTokens, number)
+    : number;
 }
 
 function clampReasoningBudget(value) {
-  const number = numberOrDefault(
-    value,
-    DEFAULT_REASONING_BUDGET
-  );
-
   return Math.min(
     65536,
-    Math.max(0, Math.floor(number))
+    Math.max(
+      0,
+      Math.floor(
+        numberOrDefault(
+          value,
+          DEFAULT_REASONING_BUDGET
+        )
+      )
+    )
   );
 }
 
@@ -406,40 +351,23 @@ function clampReasoningBudget(value) {
    REASONING
    ============================================================ */
 
-function budgetToReasoningEffort(
-  budget,
-  modelConfig
-) {
+function budgetToReasoningEffort(budget, modelConfig) {
   const value = clampReasoningBudget(budget);
-  const levels = modelConfig
-    ? modelConfig.reasoningLevels
-    : [];
+  const levels = modelConfig?.reasoningLevels || [];
 
-  if (
-    levels.includes("none") &&
-    value <= 0
-  ) {
+  if (levels.includes("none") && value <= 0) {
     return "none";
   }
 
-  if (
-    levels.includes("low") &&
-    value <= 8192
-  ) {
+  if (levels.includes("low") && value <= 8192) {
     return "low";
   }
 
-  if (
-    levels.includes("medium") &&
-    value <= 16384
-  ) {
+  if (levels.includes("medium") && value <= 16384) {
     return "medium";
   }
 
-  if (
-    levels.includes("high") &&
-    value <= 24576
-  ) {
+  if (levels.includes("high") && value <= 24576) {
     return "high";
   }
 
@@ -462,13 +390,8 @@ function budgetToReasoningEffort(
   return levels[0] || "none";
 }
 
-function normalizeReasoningEffort(
-  value,
-  modelConfig
-) {
-  const levels = modelConfig
-    ? modelConfig.reasoningLevels
-    : [];
+function normalizeReasoningEffort(value, modelConfig) {
+  const levels = modelConfig?.reasoningLevels || [];
 
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
@@ -478,31 +401,28 @@ function normalizeReasoningEffort(
     }
 
     if (
-      normalized === "off" ||
-      normalized === "false" ||
-      normalized === "0"
+      (normalized === "off" ||
+        normalized === "false" ||
+        normalized === "0") &&
+      levels.includes("none")
     ) {
-      if (levels.includes("none")) {
-        return "none";
-      }
+      return "none";
     }
 
     if (
-      normalized === "med" ||
-      normalized === "medium"
+      (normalized === "med" ||
+        normalized === "medium") &&
+      levels.includes("medium")
     ) {
-      if (levels.includes("medium")) {
-        return "medium";
-      }
+      return "medium";
     }
 
     if (
-      normalized === "maximum" ||
-      normalized === "maximum_reasoning"
+      (normalized === "maximum" ||
+        normalized === "maximum_reasoning") &&
+      levels.includes("max")
     ) {
-      if (levels.includes("max")) {
-        return "max";
-      }
+      return "max";
     }
   }
 
@@ -518,47 +438,31 @@ function getRequestedReasoningEffort(
   model,
   modelConfig
 ) {
-  if (
-    incoming.reasoning_effort !== undefined
-  ) {
-    if (modelConfig) {
-      return normalizeReasoningEffort(
-        incoming.reasoning_effort,
-        modelConfig
-      );
-    }
-
-    return String(
-      incoming.reasoning_effort
-    ).trim();
+  if (incoming.reasoning_effort !== undefined) {
+    return modelConfig
+      ? normalizeReasoningEffort(
+          incoming.reasoning_effort,
+          modelConfig
+        )
+      : String(incoming.reasoning_effort).trim();
   }
 
-  if (
-    incoming.reasoning_mode !== undefined
-  ) {
-    if (modelConfig) {
-      return normalizeReasoningEffort(
-        incoming.reasoning_mode,
-        modelConfig
-      );
-    }
-
-    return String(
-      incoming.reasoning_mode
-    ).trim();
+  if (incoming.reasoning_mode !== undefined) {
+    return modelConfig
+      ? normalizeReasoningEffort(
+          incoming.reasoning_mode,
+          modelConfig
+        )
+      : String(incoming.reasoning_mode).trim();
   }
 
-  if (
-    incoming.reasoning_budget !== undefined
-  ) {
-    if (modelConfig) {
-      return budgetToReasoningEffort(
-        incoming.reasoning_budget,
-        modelConfig
-      );
-    }
-
-    return null;
+  if (incoming.reasoning_budget !== undefined) {
+    return modelConfig
+      ? budgetToReasoningEffort(
+          incoming.reasoning_budget,
+          modelConfig
+        )
+      : null;
   }
 
   if (MODEL_REASONING_EFFORTS[model]) {
@@ -568,14 +472,12 @@ function getRequestedReasoningEffort(
     );
   }
 
-  if (modelConfig) {
-    return normalizeReasoningEffort(
-      DEFAULT_REASONING_EFFORT,
-      modelConfig
-    );
-  }
-
-  return null;
+  return modelConfig
+    ? normalizeReasoningEffort(
+        DEFAULT_REASONING_EFFORT,
+        modelConfig
+      )
+    : null;
 }
 
 
@@ -599,43 +501,20 @@ function estimateKimiTokens(value) {
       JSON.stringify(value).length /
         KIMI_CHARS_PER_TOKEN
     );
-  } catch (error) {
+  } catch {
     return 0;
   }
 }
 
 function estimateKimiMessageTokens(message) {
-  if (
-    message &&
-    typeof message === "object"
-  ) {
-    const cached =
-      kimiTokenEstimateCache.get(message);
-
-    if (cached !== undefined) {
-      return cached;
-    }
-  }
-
-  const result =
+  return (
     8 +
     estimateKimiTokens(message?.content) +
     estimateKimiTokens(message?.reasoning_content) +
     estimateKimiTokens(message?.tool_calls) +
     estimateKimiTokens(message?.function_call) +
-    estimateKimiTokens(message?.name);
-
-  if (
-    message &&
-    typeof message === "object"
-  ) {
-    kimiTokenEstimateCache.set(
-      message,
-      result
-    );
-  }
-
-  return result;
+    estimateKimiTokens(message?.name)
+  );
 }
 
 function estimateKimiMessagesTokens(messages) {
@@ -655,10 +534,7 @@ function hashKimiValue(value) {
     .digest("hex");
 }
 
-function getExplicitKimiConversationId(
-  req,
-  incoming
-) {
+function getExplicitKimiConversationId(req, incoming) {
   const candidates = [
     incoming?.conversation_id,
     incoming?.conversationId,
@@ -674,7 +550,7 @@ function getExplicitKimiConversationId(
   for (const candidate of candidates) {
     if (
       typeof candidate === "string" &&
-      candidate.trim() !== ""
+      candidate.trim()
     ) {
       return candidate.trim();
     }
@@ -690,105 +566,51 @@ function getExplicitKimiConversationId(
   return null;
 }
 
-function getKimiSystemMessages(messages) {
-  const result = [];
+function getKimiStableFingerprint(messages) {
+  let system = "";
+  let firstUser = "";
+  let systemCount = 0;
 
   for (const message of messages) {
     if (
-      message?.role === "system" ||
-      message?.role === "developer"
+      (message?.role === "system" ||
+        message?.role === "developer") &&
+      systemCount < 3
     ) {
-      result.push(message);
+      system += JSON.stringify({
+        role: message.role,
+        content: message.content
+      });
+      systemCount++;
+      continue;
+    }
+
+    if (
+      !firstUser &&
+      message?.role === "user"
+    ) {
+      firstUser = JSON.stringify({
+        role: message.role,
+        content: message.content
+      });
+    }
+
+    if (systemCount >= 3 && firstUser) {
+      break;
     }
   }
-
-  return result;
-}
-
-function getKimiUserMessages(messages) {
-  const result = [];
-
-  for (const message of messages) {
-    if (message?.role === "user") {
-      result.push(message);
-    }
-  }
-
-  return result;
-}
-
-function getKimiStableFingerprint(messages) {
-  const systemMessages =
-    getKimiSystemMessages(messages);
-
-  const userMessages =
-    getKimiUserMessages(messages);
-
-  const systemFingerprint =
-    hashKimiValue(
-      JSON.stringify(
-        systemMessages
-          .slice(0, 3)
-          .map(function (message) {
-            return {
-              role: message.role,
-              content: message.content
-            };
-          })
-      )
-    );
-
-  const firstUser = userMessages[0];
-
-  const firstUserFingerprint = firstUser
-    ? hashKimiValue(
-        JSON.stringify({
-          role: firstUser.role,
-          content: firstUser.content
-        })
-      )
-    : null;
 
   return {
-    systemFingerprint,
-    firstUserFingerprint
+    systemFingerprint:
+      hashKimiValue(system),
+    firstUserFingerprint:
+      firstUser
+        ? hashKimiValue(firstUser)
+        : null
   };
 }
 
 function kimiMessageSignature(message) {
-  if (
-    message &&
-    typeof message === "object"
-  ) {
-    const cached =
-      kimiSignatureCache.get(message);
-
-    if (cached) {
-      return cached;
-    }
-
-    const signature =
-      hashKimiValue(
-        JSON.stringify({
-          role: message?.role || "",
-          content: message?.content ?? null,
-          reasoning_content:
-            message?.reasoning_content ?? null,
-          name: message?.name ?? null,
-          tool_calls: message?.tool_calls ?? null,
-          function_call:
-            message?.function_call ?? null
-        })
-      );
-
-    kimiSignatureCache.set(
-      message,
-      signature
-    );
-
-    return signature;
-  }
-
   return hashKimiValue(
     JSON.stringify({
       role: message?.role || "",
@@ -813,10 +635,7 @@ function touchKimiConversation(conversationId) {
 
   entry.updatedAt = Date.now();
 
-  kimiConversationStore.delete(
-    conversationId
-  );
-
+  kimiConversationStore.delete(conversationId);
   kimiConversationStore.set(
     conversationId,
     entry
@@ -827,12 +646,10 @@ function cleanupKimiMemory() {
   const cutoff =
     Date.now() - KIMI_MEMORY_TTL_MS;
 
-  for (
-    const [
-      conversationId,
-      entry
-    ] of kimiConversationStore
-  ) {
+  for (const [
+    conversationId,
+    entry
+  ] of kimiConversationStore) {
     if (entry.updatedAt < cutoff) {
       kimiConversationStore.delete(
         conversationId
@@ -858,7 +675,6 @@ function createKimiConversation(
 
   const entry = {
     messages: [],
-    messageSignatures: new Set(),
     updatedAt: Date.now(),
     systemFingerprint:
       fingerprints.systemFingerprint,
@@ -885,17 +701,13 @@ function createKimiConversation(
       break;
     }
 
-    kimiConversationStore.delete(
-      oldestKey
-    );
+    kimiConversationStore.delete(oldestKey);
   }
 
   return entry;
 }
 
-function findKimiConversationByHistory(
-  messages
-) {
+function findKimiConversationByHistory(messages) {
   if (
     !Array.isArray(messages) ||
     messages.length === 0
@@ -906,9 +718,6 @@ function findKimiConversationByHistory(
   const fingerprints =
     getKimiStableFingerprint(messages);
 
-  let bestMatch = null;
-  let bestScore = 0;
-
   const incomingSignatures =
     new Set();
 
@@ -918,59 +727,32 @@ function findKimiConversationByHistory(
     );
   }
 
-  for (
-    const [
-      conversationId,
-      entry
-    ] of kimiConversationStore
-  ) {
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const [
+    conversationId,
+    entry
+  ] of kimiConversationStore) {
     let score = 0;
 
     if (
       fingerprints.firstUserFingerprint &&
-      entry.firstUserFingerprint &&
-      fingerprints.firstUserFingerprint ===
-        entry.firstUserFingerprint
+      entry.firstUserFingerprint ===
+        fingerprints.firstUserFingerprint
     ) {
       score += 1000;
     }
 
     if (
       fingerprints.systemFingerprint &&
-      entry.systemFingerprint &&
-      fingerprints.systemFingerprint ===
-        entry.systemFingerprint
+      entry.systemFingerprint ===
+        fingerprints.systemFingerprint
     ) {
       score += 100;
     }
 
-    if (
-      entry.messageSignatures &&
-      entry.messageSignatures.size > 0
-    ) {
-      let overlap = 0;
-
-      for (const signature of incomingSignatures) {
-        if (
-          entry.messageSignatures.has(
-            signature
-          )
-        ) {
-          overlap++;
-        }
-      }
-
-      score += Math.min(
-        overlap * 10,
-        500
-      );
-    } else if (
-      Array.isArray(entry.messages)
-    ) {
-      /*
-       * Compatibility fallback for entries created before the
-       * signature index exists.
-       */
+    if (entry.messages.length) {
       let overlap = 0;
 
       for (const message of entry.messages) {
@@ -980,6 +762,10 @@ function findKimiConversationByHistory(
           )
         ) {
           overlap++;
+
+          if (overlap >= 50) {
+            break;
+          }
         }
       }
 
@@ -991,22 +777,20 @@ function findKimiConversationByHistory(
 
     if (score > bestScore) {
       bestScore = score;
-
       bestMatch = {
         conversationId,
         entry
       };
+
+      if (score >= 1600) {
+        break;
+      }
     }
   }
 
-  if (
-    !bestMatch ||
-    bestScore < 10
-  ) {
-    return null;
-  }
-
-  return bestMatch;
+  return bestScore >= 10
+    ? bestMatch
+    : null;
 }
 
 function getOrCreateKimiConversation(
@@ -1031,11 +815,10 @@ function getOrCreateKimiConversation(
       );
 
     if (!entry) {
-      entry =
-        createKimiConversation(
-          conversationId,
-          messages
-        );
+      entry = createKimiConversation(
+        conversationId,
+        messages
+      );
     }
 
     touchKimiConversation(
@@ -1062,21 +845,16 @@ function getOrCreateKimiConversation(
   }
 
   const fingerprints =
-    getKimiStableFingerprint(
-      messages
-    );
+    getKimiStableFingerprint(messages);
 
-  const seed = JSON.stringify({
-    system:
-      fingerprints.systemFingerprint,
-
-    firstUser:
-      fingerprints.firstUserFingerprint,
-
-    time: Date.now(),
-
-    random: Math.random()
-  });
+  const seed =
+    fingerprints.systemFingerprint +
+    "|" +
+    (fingerprints.firstUserFingerprint || "") +
+    "|" +
+    Date.now() +
+    "|" +
+    Math.random();
 
   const conversationId =
     "derived:" +
@@ -1105,24 +883,20 @@ function mergeKimiMessages(
     const signature =
       kimiMessageSignature(message);
 
-    if (seen.has(signature)) {
-      continue;
+    if (!seen.has(signature)) {
+      seen.add(signature);
+      result.push(message);
     }
-
-    seen.add(signature);
-    result.push(message);
   }
 
   for (const message of incomingMessages) {
     const signature =
       kimiMessageSignature(message);
 
-    if (seen.has(signature)) {
-      continue;
+    if (!seen.has(signature)) {
+      seen.add(signature);
+      result.push(message);
     }
-
-    seen.add(signature);
-    result.push(message);
   }
 
   return result;
@@ -1151,13 +925,9 @@ function fitKimiContext(messages) {
   }
 
   let used =
-    estimateKimiMessagesTokens(
-      pinned
-    );
+    estimateKimiMessagesTokens(pinned);
 
-  if (
-    used >= KIMI_CONTEXT_BUDGET
-  ) {
+  if (used >= KIMI_CONTEXT_BUDGET) {
     return pinned;
   }
 
@@ -1171,9 +941,7 @@ function fitKimiContext(messages) {
     const message = normal[index];
 
     const cost =
-      estimateKimiMessageTokens(
-        message
-      );
+      estimateKimiMessageTokens(message);
 
     if (
       used + cost >
@@ -1191,18 +959,6 @@ function fitKimiContext(messages) {
   return pinned.concat(selected);
 }
 
-function rebuildKimiMessageIndex(memory) {
-  const signatures = new Set();
-
-  for (const message of memory.messages) {
-    signatures.add(
-      kimiMessageSignature(message)
-    );
-  }
-
-  memory.messageSignatures = signatures;
-}
-
 function updateKimiMemory(
   conversationId,
   incomingMessages
@@ -1213,11 +969,10 @@ function updateKimiMemory(
     );
 
   if (!memory) {
-    memory =
-      createKimiConversation(
-        conversationId,
-        incomingMessages
-      );
+    memory = createKimiConversation(
+      conversationId,
+      incomingMessages
+    );
   }
 
   const merged =
@@ -1231,21 +986,15 @@ function updateKimiMemory(
       -KIMI_MAX_STORED_MESSAGES
     );
 
-  rebuildKimiMessageIndex(memory);
-
   const fingerprints =
     getKimiStableFingerprint(
       memory.messages
     );
 
-  if (fingerprints.systemFingerprint) {
-    memory.systemFingerprint =
-      fingerprints.systemFingerprint;
-  }
+  memory.systemFingerprint =
+    fingerprints.systemFingerprint;
 
-  if (
-    fingerprints.firstUserFingerprint
-  ) {
+  if (fingerprints.firstUserFingerprint) {
     memory.firstUserFingerprint =
       fingerprints.firstUserFingerprint;
   }
@@ -1278,16 +1027,15 @@ function buildKimiMemoryContext(
       incomingMessages
     );
 
-  const messages =
-    updateKimiMemory(
-      conversation.conversationId,
-      incomingMessages
-    );
-
   return {
     conversationId:
       conversation.conversationId,
-    messages
+
+    messages:
+      updateKimiMemory(
+        conversation.conversationId,
+        incomingMessages
+      )
   };
 }
 
@@ -1317,17 +1065,14 @@ function appendKimiAssistantMessage(
     return;
   }
 
-  const cleanAssistantMessage = {
+  const clean = {
     role:
       assistantMessage.role ||
       "assistant"
   };
 
-  if (
-    assistantMessage.content !==
-    undefined
-  ) {
-    cleanAssistantMessage.content =
+  if (assistantMessage.content !== undefined) {
+    clean.content =
       assistantMessage.content;
   }
 
@@ -1335,16 +1080,12 @@ function appendKimiAssistantMessage(
     assistantMessage.reasoning_content !==
     undefined
   ) {
-    cleanAssistantMessage.reasoning_content =
+    clean.reasoning_content =
       assistantMessage.reasoning_content;
   }
 
-  if (
-    Array.isArray(
-      assistantMessage.tool_calls
-    )
-  ) {
-    cleanAssistantMessage.tool_calls =
+  if (Array.isArray(assistantMessage.tool_calls)) {
+    clean.tool_calls =
       assistantMessage.tool_calls;
   }
 
@@ -1352,49 +1093,38 @@ function appendKimiAssistantMessage(
     assistantMessage.function_call !==
     undefined
   ) {
-    cleanAssistantMessage.function_call =
+    clean.function_call =
       assistantMessage.function_call;
   }
 
-  if (
-    assistantMessage.name !==
-    undefined
-  ) {
-    cleanAssistantMessage.name =
+  if (assistantMessage.name !== undefined) {
+    clean.name =
       assistantMessage.name;
   }
 
   const signature =
-    kimiMessageSignature(
-      cleanAssistantMessage
-    );
+    kimiMessageSignature(clean);
 
-  if (
-    !memory.messageSignatures ||
-    !memory.messageSignatures.has(signature)
-  ) {
-    memory.messages.push(
-      cleanAssistantMessage
-    );
+  let exists = false;
 
-    if (!memory.messageSignatures) {
-      memory.messageSignatures =
-        new Set();
-    }
-
-    memory.messageSignatures.add(
+  for (const message of memory.messages) {
+    if (
+      kimiMessageSignature(message) ===
       signature
-    );
+    ) {
+      exists = true;
+      break;
+    }
+  }
+
+  if (!exists) {
+    memory.messages.push(clean);
   }
 
   memory.messages =
-    fitKimiContext(
-      memory.messages
-    ).slice(
+    fitKimiContext(memory.messages).slice(
       -KIMI_MAX_STORED_MESSAGES
     );
-
-  rebuildKimiMessageIndex(memory);
 
   memory.updatedAt = Date.now();
 
@@ -1403,38 +1133,27 @@ function appendKimiAssistantMessage(
   );
 }
 
-function extractKimiAssistantMessage(
-  parsed
-) {
-  const choice =
-    parsed?.choices?.[0];
+function extractKimiAssistantMessage(parsed) {
+  const message =
+    parsed?.choices?.[0]?.message;
 
-  if (
-    !choice ||
-    !choice.message
-  ) {
+  if (!message) {
     return null;
   }
 
   return {
     role:
-      choice.message.role ||
-      "assistant",
-
+      message.role || "assistant",
     content:
-      choice.message.content,
-
+      message.content,
     reasoning_content:
-      choice.message.reasoning_content,
-
+      message.reasoning_content,
     tool_calls:
-      choice.message.tool_calls,
-
+      message.tool_calls,
     function_call:
-      choice.message.function_call,
-
+      message.function_call,
     name:
-      choice.message.name
+      message.name
   };
 }
 
@@ -1466,15 +1185,12 @@ function mergeKimiToolCallDelta(
   }
 
   const index =
-    Number.isFinite(
-      Number(toolCall.index)
-    )
+    Number.isFinite(Number(toolCall.index))
       ? Number(toolCall.index)
       : accumulator.toolCalls.length;
 
   while (
-    accumulator.toolCalls.length <=
-    index
+    accumulator.toolCalls.length <= index
   ) {
     accumulator.toolCalls.push({});
   }
@@ -1508,30 +1224,20 @@ function mergeKimiToolCallDelta(
       undefined
     ) {
       target.function.arguments =
-        (
-          target.function.arguments ||
-          ""
-        ) +
+        (target.function.arguments || "") +
         toolCall.function.arguments;
     }
   }
 
-  for (
-    const [
-      key,
-      value
-    ] of Object.entries(toolCall)
-  ) {
+  for (const key of Object.keys(toolCall)) {
     if (
-      key === "index" ||
-      key === "id" ||
-      key === "type" ||
-      key === "function"
+      key !== "index" &&
+      key !== "id" &&
+      key !== "type" &&
+      key !== "function"
     ) {
-      continue;
+      target[key] = toolCall[key];
     }
-
-    target[key] = value;
   }
 }
 
@@ -1539,10 +1245,7 @@ function addKimiSSEToAccumulator(
   accumulator,
   event
 ) {
-  if (
-    !event ||
-    !event.trim()
-  ) {
+  if (!event || !event.trim()) {
     return;
   }
 
@@ -1557,10 +1260,7 @@ function addKimiSSEToAccumulator(
     const data =
       line.slice(5).trim();
 
-    if (
-      !data ||
-      data === "[DONE]"
-    ) {
+    if (!data || data === "[DONE]") {
       continue;
     }
 
@@ -1568,15 +1268,12 @@ function addKimiSSEToAccumulator(
 
     try {
       parsed = JSON.parse(data);
-    } catch (error) {
+    } catch {
       continue;
     }
 
-    const choice =
-      parsed?.choices?.[0];
-
     const delta =
-      choice?.delta;
+      parsed?.choices?.[0]?.delta;
 
     if (!delta) {
       continue;
@@ -1587,10 +1284,7 @@ function addKimiSSEToAccumulator(
         delta.role;
     }
 
-    if (
-      typeof delta.content ===
-      "string"
-    ) {
+    if (typeof delta.content === "string") {
       accumulator.contentParts.push(
         delta.content
       );
@@ -1605,24 +1299,14 @@ function addKimiSSEToAccumulator(
       );
     }
 
-    if (
-      typeof delta.reasoning ===
-      "string"
-    ) {
+    if (typeof delta.reasoning === "string") {
       accumulator.reasoningParts.push(
         delta.reasoning
       );
     }
 
-    if (
-      Array.isArray(
-        delta.tool_calls
-      )
-    ) {
-      for (
-        const toolCall of
-        delta.tool_calls
-      ) {
+    if (Array.isArray(delta.tool_calls)) {
+      for (const toolCall of delta.tool_calls) {
         mergeKimiToolCallDelta(
           accumulator,
           toolCall
@@ -1631,9 +1315,7 @@ function addKimiSSEToAccumulator(
     }
 
     if (delta.function_call) {
-      if (
-        !accumulator.functionCall
-      ) {
+      if (!accumulator.functionCall) {
         accumulator.functionCall = {};
       }
 
@@ -1658,10 +1340,7 @@ function addKimiSSEToAccumulator(
       }
     }
 
-    if (
-      delta.name !==
-      undefined
-    ) {
+    if (delta.name !== undefined) {
       accumulator.name =
         delta.name;
     }
@@ -1673,12 +1352,10 @@ function finalizeKimiStreamAccumulator(
 ) {
   const message = {
     role:
-      accumulator.role ||
-      "assistant"
+      accumulator.role || "assistant",
+    content:
+      accumulator.contentParts.join("")
   };
-
-  message.content =
-    accumulator.contentParts.join("");
 
   const reasoning =
     accumulator.reasoningParts.join("");
@@ -1690,15 +1367,11 @@ function finalizeKimiStreamAccumulator(
 
   const toolCalls =
     accumulator.toolCalls.filter(
-      function (toolCall) {
-        return (
-          Object.keys(toolCall).length >
-          0
-        );
-      }
+      toolCall =>
+        Object.keys(toolCall).length > 0
     );
 
-  if (toolCalls.length > 0) {
+  if (toolCalls.length) {
     message.tool_calls =
       toolCalls;
   }
@@ -1708,10 +1381,7 @@ function finalizeKimiStreamAccumulator(
       accumulator.functionCall;
   }
 
-  if (
-    accumulator.name !==
-    undefined
-  ) {
+  if (accumulator.name !== undefined) {
     message.name =
       accumulator.name;
   }
@@ -1721,15 +1391,11 @@ function finalizeKimiStreamAccumulator(
 
 
 /* ============================================================
-   NVIDIA MODELS
+   NVIDIA MODEL CACHE
    ============================================================ */
 
-async function fetchNimModels(
-  forceRefresh
-) {
-  const refresh =
-    forceRefresh === true;
-
+async function fetchNimModels(forceRefresh) {
+  const refresh = forceRefresh === true;
   const now = Date.now();
 
   if (
@@ -1741,15 +1407,12 @@ async function fetchNimModels(
     return modelCache;
   }
 
-  if (
-    modelCachePromise &&
-    !refresh
-  ) {
+  if (modelCachePromise && !refresh) {
     return modelCachePromise;
   }
 
   modelCachePromise =
-    (async function () {
+    (async () => {
       try {
         if (!NIM_API_KEY) {
           return Array.isArray(modelCache)
@@ -1758,14 +1421,12 @@ async function fetchNimModels(
         }
 
         const response =
-          await nimClient.get(
+          await axios.get(
             NIM_API_BASE + "/models",
             {
               headers: {
                 Authorization:
-                  "Bearer " +
-                  NIM_API_KEY,
-
+                  "Bearer " + NIM_API_KEY,
                 Accept:
                   "application/json"
               },
@@ -1774,16 +1435,21 @@ async function fetchNimModels(
                 Math.min(
                   NIM_TIMEOUT,
                   30000
-                )
+                ),
+
+              httpAgent,
+              httpsAgent,
+
+              validateStatus:
+                () => true
             }
           );
 
         if (
           response.status >= 200 &&
           response.status < 300 &&
-          response.data &&
           Array.isArray(
-            response.data.data
+            response.data?.data
           )
         ) {
           modelCache =
@@ -1794,11 +1460,6 @@ async function fetchNimModels(
 
           return modelCache;
         }
-
-        console.warn(
-          "NVIDIA /v1/models returned HTTP " +
-            response.status
-        );
 
         return Array.isArray(modelCache)
           ? modelCache
@@ -1838,31 +1499,20 @@ function normalizeMessages(messages) {
     }
 
     if (
-      typeof message.role !==
-        "string" ||
-      message.role.trim() === ""
+      typeof message.role !== "string" ||
+      !message.role.trim()
     ) {
       continue;
     }
 
     if (
-      message.content === undefined ||
-      message.content === null
+      (message.content === undefined ||
+        message.content === null) &&
+      !Array.isArray(message.tool_calls) &&
+      message.reasoning_content === undefined &&
+      message.reasoning === undefined
     ) {
-      if (
-        !Array.isArray(
-          message.tool_calls
-        )
-      ) {
-        if (
-          message.reasoning_content ===
-            undefined &&
-          message.reasoning ===
-            undefined
-        ) {
-          continue;
-        }
-      }
+      continue;
     }
 
     result.push({
@@ -1896,32 +1546,21 @@ function buildNimRequest(
     );
 
   const request = {
-    model: model,
-    messages: messages,
-
+    model,
+    messages,
     temperature:
-      clampTemperature(
-        incoming.temperature
-      ),
-
+      clampTemperature(incoming.temperature),
     top_p:
-      clampTopP(
-        incoming.top_p
-      ),
-
+      clampTopP(incoming.top_p),
     max_tokens:
       clampMaxTokens(
         incoming.max_tokens,
         modelConfig
       ),
-
-    stream: stream
+    stream
   };
 
-  if (
-    incoming.repetition_penalty !==
-    undefined
-  ) {
+  if (incoming.repetition_penalty !== undefined) {
     request.repetition_penalty =
       numberOrDefault(
         incoming.repetition_penalty,
@@ -1929,10 +1568,7 @@ function buildNimRequest(
       );
   }
 
-  if (
-    incoming.frequency_penalty !==
-    undefined
-  ) {
+  if (incoming.frequency_penalty !== undefined) {
     request.frequency_penalty =
       numberOrDefault(
         incoming.frequency_penalty,
@@ -1940,10 +1576,7 @@ function buildNimRequest(
       );
   }
 
-  if (
-    incoming.presence_penalty !==
-    undefined
-  ) {
+  if (incoming.presence_penalty !== undefined) {
     request.presence_penalty =
       numberOrDefault(
         incoming.presence_penalty,
@@ -1971,14 +1604,8 @@ function buildNimRequest(
     "audio"
   ];
 
-  for (
-    const parameter of
-    optionalParameters
-  ) {
-    if (
-      incoming[parameter] !==
-      undefined
-    ) {
+  for (const parameter of optionalParameters) {
+    if (incoming[parameter] !== undefined) {
       request[parameter] =
         incoming[parameter];
     }
@@ -1994,11 +1621,7 @@ function buildNimRequest(
     };
   }
 
-  if (
-    isPlainObject(
-      incoming.extra_body
-    )
-  ) {
+  if (isPlainObject(incoming.extra_body)) {
     Object.assign(
       request,
       incoming.extra_body
@@ -2006,24 +1629,17 @@ function buildNimRequest(
   }
 
   if (!modelConfig) {
-    if (
-      incoming.reasoning_effort !==
-      undefined
-    ) {
+    if (incoming.reasoning_effort !== undefined) {
       request.reasoning_effort =
         incoming.reasoning_effort;
     } else if (
-      incoming.reasoning_mode !==
-      undefined
+      incoming.reasoning_mode !== undefined
     ) {
       request.reasoning_effort =
         incoming.reasoning_mode;
     }
 
-    if (
-      incoming.reasoning_budget !==
-      undefined
-    ) {
+    if (incoming.reasoning_budget !== undefined) {
       request.reasoning_budget =
         clampReasoningBudget(
           incoming.reasoning_budget
@@ -2033,102 +1649,79 @@ function buildNimRequest(
     return request;
   }
 
-  if (
-    model ===
-    "deepseek-ai/deepseek-v4-flash-0731"
-  ) {
-    request.reasoning_effort =
-      reasoningEffort;
+  switch (model) {
+    case "deepseek-ai/deepseek-v4-flash-0731":
+      request.reasoning_effort =
+        reasoningEffort;
 
-    request.chat_template_kwargs = {
-      ...(request.chat_template_kwargs || {}),
+      request.chat_template_kwargs = {
+        ...(request.chat_template_kwargs || {}),
+        thinking:
+          reasoningEffort !== "none",
+        reasoning_effort:
+          reasoningEffort
+      };
 
-      thinking:
-        reasoningEffort !== "none",
+      break;
 
-      reasoning_effort:
-        reasoningEffort
-    };
+    case "deepseek-ai/deepseek-v4-pro-0813":
+    case "moonshotai/kimi-k3":
+      request.reasoning_effort =
+        reasoningEffort;
 
-    return request;
-  }
+      break;
 
-  if (
-    model ===
-    "deepseek-ai/deepseek-v4-pro-0813"
-  ) {
-    request.reasoning_effort =
-      reasoningEffort;
-
-    return request;
-  }
-
-  if (
-    model ===
-    "moonshotai/kimi-k3"
-  ) {
-    request.reasoning_effort =
-      reasoningEffort;
-
-    return request;
-  }
-
-  if (
-    model ===
-    "nvidia/nemotron-3-ultra-550b-a55b"
-  ) {
-    const reasoning =
-      normalizeReasoningEffort(
-        reasoningEffort,
-        modelConfig
-      );
-
-    request.reasoning_effort =
-      reasoning;
-
-    request.chat_template_kwargs = {
-      ...(request.chat_template_kwargs || {}),
-
-      enable_thinking:
-        reasoning !== "none"
-    };
-
-    if (reasoning === "medium") {
-      request.chat_template_kwargs.medium_effort =
-        true;
-    } else {
-      delete request
-        .chat_template_kwargs
-        .medium_effort;
-    }
-
-    if (reasoning !== "none") {
-      request.reasoning_budget =
-        clampReasoningBudget(
-          incoming.reasoning_budget !==
-            undefined
-            ? incoming.reasoning_budget
-            : MODEL_REASONING_BUDGETS[
-                model
-              ]
+    case "nvidia/nemotron-3-ultra-550b-a55b": {
+      const reasoning =
+        normalizeReasoningEffort(
+          reasoningEffort,
+          modelConfig
         );
-    } else {
-      delete request.reasoning_budget;
+
+      request.reasoning_effort =
+        reasoning;
+
+      request.chat_template_kwargs = {
+        ...(request.chat_template_kwargs || {}),
+        enable_thinking:
+          reasoning !== "none"
+      };
+
+      if (reasoning === "medium") {
+        request.chat_template_kwargs.medium_effort =
+          true;
+      } else {
+        delete request
+          .chat_template_kwargs
+          .medium_effort;
+      }
+
+      if (reasoning !== "none") {
+        request.reasoning_budget =
+          clampReasoningBudget(
+            incoming.reasoning_budget !==
+              undefined
+              ? incoming.reasoning_budget
+              : MODEL_REASONING_BUDGETS[model]
+          );
+      } else {
+        delete request.reasoning_budget;
+      }
+
+      if (
+        Array.isArray(request.tools) &&
+        request.tools.length > 0 &&
+        reasoning !== "none"
+      ) {
+        request.chat_template_kwargs
+          .force_nonempty_content = true;
+      }
+
+      delete request.nvext;
+      delete request.reasoning_mode;
+
+      break;
     }
-
-    if (
-      Array.isArray(request.tools) &&
-      request.tools.length > 0 &&
-      reasoning !== "none"
-    ) {
-      request.chat_template_kwargs.force_nonempty_content =
-        true;
-    }
-
-    delete request.nvext;
-    delete request.reasoning_mode;
-
-    return request;
   }
 
   return request;
@@ -2142,36 +1735,24 @@ function buildNimRequest(
 function stripReasoning(parsed) {
   if (
     !parsed ||
-    typeof parsed !== "object"
+    typeof parsed !== "object" ||
+    !Array.isArray(parsed.choices)
   ) {
     return parsed;
   }
 
-  if (!Array.isArray(parsed.choices)) {
-    return parsed;
-  }
-
   for (const choice of parsed.choices) {
-    if (
-      !choice ||
-      typeof choice !== "object"
-    ) {
+    if (!choice || typeof choice !== "object") {
       continue;
     }
 
-    if (
-      choice.delta &&
-      typeof choice.delta === "object"
-    ) {
+    if (choice.delta) {
       delete choice.delta.reasoning_content;
       delete choice.delta.reasoning;
       delete choice.delta.thinking;
     }
 
-    if (
-      choice.message &&
-      typeof choice.message === "object"
-    ) {
+    if (choice.message) {
       delete choice.message.reasoning_content;
       delete choice.message.reasoning;
       delete choice.message.thinking;
@@ -2187,10 +1768,7 @@ function stripReasoning(parsed) {
    ============================================================ */
 
 function processSSEEvent(event) {
-  if (
-    !event ||
-    !event.trim()
-  ) {
+  if (!event || !event.trim()) {
     return "";
   }
 
@@ -2214,9 +1792,7 @@ function processSSEEvent(event) {
     }
 
     if (data === "[DONE]") {
-      output.push(
-        "data: [DONE]"
-      );
+      output.push("data: [DONE]");
       continue;
     }
 
@@ -2228,21 +1804,16 @@ function processSSEEvent(event) {
 
       output.push(
         "data: " +
-          JSON.stringify(parsed)
+        JSON.stringify(parsed)
       );
-    } catch (error) {
+    } catch {
       output.push(line);
     }
   }
 
-  if (output.length === 0) {
-    return "";
-  }
-
-  return (
-    output.join("\n") +
-    "\n\n"
-  );
+  return output.length
+    ? output.join("\n") + "\n\n"
+    : "";
 }
 
 
@@ -2251,7 +1822,7 @@ function processSSEEvent(event) {
    ============================================================ */
 
 function readStream(stream) {
-  return new Promise(function (resolve) {
+  return new Promise(resolve => {
     let output = "";
     let finished = false;
 
@@ -2264,31 +1835,28 @@ function readStream(stream) {
       resolve(output);
     }
 
-    stream.on(
-      "data",
-      function (chunk) {
-        if (
-          output.length >=
-          MAX_ERROR_BODY_SIZE
-        ) {
-          return;
-        }
-
-        output +=
-          chunk.toString("utf8");
-
-        if (
-          output.length >
-          MAX_ERROR_BODY_SIZE
-        ) {
-          output =
-            output.slice(
-              0,
-              MAX_ERROR_BODY_SIZE
-            );
-        }
+    stream.on("data", chunk => {
+      if (
+        output.length >=
+        MAX_ERROR_BODY_SIZE
+      ) {
+        return;
       }
-    );
+
+      output +=
+        chunk.toString("utf8");
+
+      if (
+        output.length >
+        MAX_ERROR_BODY_SIZE
+      ) {
+        output =
+          output.slice(
+            0,
+            MAX_ERROR_BODY_SIZE
+          );
+      }
+    });
 
     stream.on("end", finish);
     stream.on("close", finish);
@@ -2318,7 +1886,7 @@ function extractErrorMessage(data) {
       parsed?.message ||
       null
     );
-  } catch (error) {
+  } catch {
     return String(data);
   }
 }
@@ -2332,7 +1900,7 @@ function sendError(
   if (res.headersSent) {
     try {
       res.end();
-    } catch (error) {}
+    } catch {}
 
     return;
   }
@@ -2376,97 +1944,68 @@ app.use(
    ROOT
    ============================================================ */
 
-app.get(
-  "/",
-  async function (req, res) {
-    const upstreamModels =
-      await fetchNimModels();
-
-    res.json({
-      status: "online",
-
-      service:
-        "JanitorAI -> NVIDIA NIM Proxy",
-
-      default_model:
-        DEFAULT_MODEL,
-
-      explicitly_configured_models:
-        CONFIGURED_MODEL_IDS,
-
-      upstream_model_count:
-        upstreamModels.length,
-
-      unknown_models_allowed:
-        ALLOW_UNKNOWN_MODELS,
-
-      default_reasoning_effort:
-        DEFAULT_REASONING_EFFORT,
-
-      default_reasoning_budget:
-        DEFAULT_REASONING_BUDGET,
-
-      nim_api_base:
-        NIM_API_BASE,
-
-      timeout_ms:
-        NIM_TIMEOUT,
-
-      kimi_memory:
-        KIMI_MEMORY_ENABLED,
-
-      kimi_context_budget:
-        KIMI_CONTEXT_BUDGET,
-
-      kimi_active_conversations:
-        kimiConversationStore.size
-    });
-  }
-);
+app.get("/", function (req, res) {
+  res.json({
+    status: "online",
+    service:
+      "JanitorAI -> NVIDIA NIM Proxy",
+    default_model:
+      DEFAULT_MODEL,
+    explicitly_configured_models:
+      Object.keys(MODELS),
+    upstream_model_count:
+      Array.isArray(modelCache)
+        ? modelCache.length
+        : 0,
+    unknown_models_allowed:
+      ALLOW_UNKNOWN_MODELS,
+    default_reasoning_effort:
+      DEFAULT_REASONING_EFFORT,
+    default_reasoning_budget:
+      DEFAULT_REASONING_BUDGET,
+    nim_api_base:
+      NIM_API_BASE,
+    timeout_ms:
+      NIM_TIMEOUT,
+    kimi_memory:
+      KIMI_MEMORY_ENABLED,
+    kimi_context_budget:
+      KIMI_CONTEXT_BUDGET,
+    kimi_active_conversations:
+      kimiConversationStore.size
+  });
+});
 
 
 /* ============================================================
    HEALTH
    ============================================================ */
 
-app.get(
-  "/health",
-  async function (req, res) {
-    const upstreamModels =
-      await fetchNimModels();
-
-    res.json({
-      ok: true,
-
-      model:
-        DEFAULT_MODEL,
-
-      explicitly_configured_models:
-        CONFIGURED_MODEL_IDS,
-
-      upstream_model_count:
-        upstreamModels.length,
-
-      unknown_models_allowed:
-        ALLOW_UNKNOWN_MODELS,
-
-      reasoning:
-        DEFAULT_REASONING_EFFORT,
-
-      max_tokens:
-        DEFAULT_MAX_TOKENS,
-
-      kimi_memory:
-        KIMI_MEMORY_ENABLED,
-
-      kimi_context_budget:
-        KIMI_CONTEXT_BUDGET,
-
-      kimi_active_conversations:
-        kimiConversationStore.size
-    });
-  }
-);
+app.get("/health", function (req, res) {
+  res.json({
+    ok: true,
+    model:
+      DEFAULT_MODEL,
+    explicitly_configured_models:
+      Object.keys(MODELS),
+    upstream_model_count:
+      Array.isArray(modelCache)
+        ? modelCache.length
+        : 0,
+    unknown_models_allowed:
+      ALLOW_UNKNOWN_MODELS,
+    reasoning:
+      DEFAULT_REASONING_EFFORT,
+    max_tokens:
+      DEFAULT_MAX_TOKENS,
+    kimi_memory:
+      KIMI_MEMORY_ENABLED,
+    kimi_context_budget:
+      KIMI_CONTEXT_BUDGET,
+    kimi_active_conversations:
+      kimiConversationStore.size
+  });
+});
 
 
 /* ============================================================
@@ -2488,30 +2027,21 @@ app.get(
       }
 
       const models =
-        CONFIGURED_MODEL_IDS.map(
-          function (id) {
-            const config =
-              MODELS[id];
-
-            return {
-              id: id,
-              object: "model",
-
-              created:
-                Math.floor(
-                  Date.now() / 1000
-                ),
-
-              owned_by:
-                config.provider,
-
-              reasoning_levels:
-                config.reasoningLevels,
-
-              max_output_tokens:
-                config.maxOutputTokens
-            };
-          }
+        Object.entries(MODELS).map(
+          ([id, config]) => ({
+            id,
+            object: "model",
+            created:
+              Math.floor(
+                Date.now() / 1000
+              ),
+            owned_by:
+              config.provider,
+            reasoning_levels:
+              config.reasoningLevels,
+            max_output_tokens:
+              config.maxOutputTokens
+          })
         );
 
       return res.json({
@@ -2571,10 +2101,7 @@ app.post(
     let kimiStreamAccumulator = null;
 
     try {
-      if (
-        !NIM_API_KEY ||
-        typeof NIM_API_KEY !== "string"
-      ) {
+      if (!NIM_API_KEY) {
         return sendError(
           res,
           500,
@@ -2588,8 +2115,7 @@ app.post(
           : {};
 
       const requestedModel =
-        typeof incoming.model ===
-          "string" &&
+        typeof incoming.model === "string" &&
         incoming.model.trim()
           ? incoming.model.trim()
           : DEFAULT_MODEL;
@@ -2607,11 +2133,10 @@ app.post(
         return sendError(
           res,
           400,
-          "Unsupported model: " +
-            model,
+          "Unsupported model: " + model,
           {
             explicitly_configured_models:
-              CONFIGURED_MODEL_IDS
+              Object.keys(MODELS)
           }
         );
       }
@@ -2621,7 +2146,7 @@ app.post(
           incoming.messages
         );
 
-      if (messages.length === 0) {
+      if (!messages.length) {
         return sendError(
           res,
           400,
@@ -2629,9 +2154,6 @@ app.post(
         );
       }
 
-      /*
-       * KIMI MEMORY
-       */
       if (
         normalizedModel ===
           "moonshotai/kimi-k3" &&
@@ -2652,33 +2174,12 @@ app.post(
 
         if (DEBUG_PROXY) {
           console.log(
-            "========== KIMI MEMORY =========="
-          );
-
-          console.log(
-            "Conversation:",
-            kimiConversationId
-          );
-
-          console.log(
-            "Messages:",
-            messages.length
-          );
-
-          console.log(
-            "Estimated input tokens:",
+            "KIMI MEMORY:",
+            kimiConversationId,
+            messages.length,
             estimateKimiMessagesTokens(
               messages
             )
-          );
-
-          console.log(
-            "Context budget:",
-            KIMI_CONTEXT_BUDGET
-          );
-
-          console.log(
-            "=================================="
           );
         }
       }
@@ -2699,46 +2200,35 @@ app.post(
 
       if (DEBUG_PROXY) {
         console.log(
-          "========== NIM REQUEST =========="
-        );
-
-        console.log(
-          JSON.stringify(
-            nimRequest,
-            null,
-            2
-          )
-        );
-
-        console.log(
-          "================================="
+          "NIM REQUEST:",
+          JSON.stringify(nimRequest)
         );
       }
 
       const axiosConfig = {
         headers: {
           Authorization:
-            "Bearer " +
-            NIM_API_KEY,
-
+            "Bearer " + NIM_API_KEY,
           "Content-Type":
             "application/json",
-
           Accept:
             stream
               ? "text/event-stream"
               : "application/json"
         },
 
-        /*
-         * The agent is already attached to the axios instance.
-         * This request therefore reuses an existing TCP/TLS
-         * connection whenever one is available.
-         */
+        timeout:
+          NIM_TIMEOUT,
+
+        httpAgent,
+        httpsAgent,
+
+        validateStatus:
+          () => true
       };
 
       const response =
-        await nimClient.post(
+        await axios.post(
           NIM_API_BASE +
             "/chat/completions",
           nimRequest,
@@ -2751,9 +2241,6 @@ app.post(
             : axiosConfig
         );
 
-      /*
-       * UPSTREAM ERROR
-       */
       if (
         response.status < 200 ||
         response.status >= 300
@@ -2782,11 +2269,9 @@ app.post(
               JSON.stringify(
                 response.data
               );
-          } catch (error) {
+          } catch {
             errorBody =
-              String(
-                response.data
-              );
+              String(response.data);
           }
         }
 
@@ -2796,42 +2281,20 @@ app.post(
           );
 
         console.error(
-          "=========================================="
-        );
-
-        console.error(
-          "NVIDIA NIM ERROR"
-        );
-
-        console.error(
-          "Model:",
-          normalizedModel
-        );
-
-        console.error(
-          "Status:",
-          response.status
-        );
-
-        console.error(
-          "Message:",
-          upstreamMessage
-        );
-
-        console.error(
-          "Body:",
+          "NVIDIA NIM ERROR",
+          normalizedModel,
+          response.status,
+          upstreamMessage,
           errorBody
-        );
-
-        console.error(
-          "=========================================="
         );
 
         if (
           response.status === 400 ||
           response.status === 404
         ) {
-          await fetchNimModels(true);
+          fetchNimModels(true).catch(
+            () => {}
+          );
         }
 
         const proxyStatus =
@@ -2849,16 +2312,12 @@ app.post(
           {
             upstream_status:
               response.status,
-
             upstream_body:
               errorBody
           }
         );
       }
 
-      /*
-       * NON-STREAMING
-       */
       if (!stream) {
         if (
           normalizedModel ===
@@ -2879,19 +2338,15 @@ app.post(
           }
         }
 
-        const cleaned =
-          stripReasoning(
-            response.data
-          );
-
         return res
           .status(200)
-          .json(cleaned);
+          .json(
+            stripReasoning(
+              response.data
+            )
+          );
       }
 
-      /*
-       * STREAM HEADERS
-       */
       res.status(200);
 
       res.setHeader(
@@ -2952,33 +2407,21 @@ app.post(
 
       function destroyUpstream() {
         try {
-          if (
-            upstream &&
-            typeof upstream.destroy ===
-              "function"
-          ) {
-            upstream.destroy();
-          }
-        } catch (error) {}
+          upstream.destroy();
+        } catch {}
       }
 
-      req.on(
-        "aborted",
-        function () {
+      req.on("aborted", function () {
+        clientDisconnected = true;
+        destroyUpstream();
+      });
+
+      res.on("close", function () {
+        if (!res.writableEnded) {
           clientDisconnected = true;
           destroyUpstream();
         }
-      );
-
-      res.on(
-        "close",
-        function () {
-          if (!res.writableEnded) {
-            clientDisconnected = true;
-            destroyUpstream();
-          }
-        }
-      );
+      });
 
       upstream.on(
         "data",
@@ -2993,15 +2436,13 @@ app.post(
           buffer +=
             chunk.toString("utf8");
 
-          /*
-           * SSE events are separated by a blank line.
-           * Preserve incomplete events in buffer.
-           */
           let separatorIndex;
 
           while (
             (separatorIndex =
-              buffer.indexOf("\n\n")) !== -1
+              buffer.search(
+                /\r?\n\r?\n/
+              )) !== -1
           ) {
             const event =
               buffer.slice(
@@ -3009,69 +2450,17 @@ app.post(
                 separatorIndex
               );
 
-            buffer =
-              buffer.slice(
-                separatorIndex + 2
-              );
-
-            if (
-              ended ||
-              clientDisconnected
-            ) {
-              break;
-            }
-
-            if (
-              kimiStreamAccumulator
-            ) {
-              addKimiSSEToAccumulator(
-                kimiStreamAccumulator,
-                event
-              );
-            }
-
-            const output =
-              processSSEEvent(
-                event
-              );
-
-            if (!output) {
-              continue;
-            }
-
-            try {
-              res.write(output);
-            } catch (error) {
-              console.error(
-                "Client write error:",
-                error.message
-              );
-
-              clientDisconnected = true;
-              destroyUpstream();
-              break;
-            }
-          }
-
-          /*
-           * Handle CRLF-delimited SSE when the separator is
-           * represented as \r\n\r\n.
-           */
-          while (
-            !clientDisconnected &&
-            !ended &&
-            (separatorIndex =
-              buffer.indexOf("\r\n\r\n")) !== -1
-          ) {
-            const event =
-              buffer.slice(
-                0,
+            const separatorLength =
+              buffer[
                 separatorIndex
-              );
+              ] === "\r"
+                ? 4
+                : 2;
 
             buffer =
               buffer.slice(
-                separatorIndex + 4
+                separatorIndex +
+                  separatorLength
               );
 
             if (
@@ -3095,11 +2484,6 @@ app.post(
             try {
               res.write(output);
             } catch (error) {
-              console.error(
-                "Client write error:",
-                error.message
-              );
-
               clientDisconnected = true;
               destroyUpstream();
               break;
@@ -3138,7 +2522,7 @@ app.post(
             if (output) {
               try {
                 res.write(output);
-              } catch (error) {}
+              } catch {}
             }
           }
 
@@ -3147,21 +2531,18 @@ app.post(
             kimiConversationId &&
             KIMI_MEMORY_ENABLED
           ) {
-            const assistantMessage =
-              finalizeKimiStreamAccumulator(
-                kimiStreamAccumulator
-              );
-
             appendKimiAssistantMessage(
               kimiConversationId,
-              assistantMessage
+              finalizeKimiStreamAccumulator(
+                kimiStreamAccumulator
+              )
             );
           }
 
           if (!clientDisconnected) {
             try {
               res.end();
-            } catch (error) {}
+            } catch {}
           }
         }
       );
@@ -3191,41 +2572,21 @@ app.post(
 
           try {
             res.end();
-          } catch (endError) {}
+          } catch {}
         }
       );
     } catch (error) {
       console.error(
-        "=========================================="
-      );
-
-      console.error(
-        "PROXY ERROR"
-      );
-
-      console.error(
+        "PROXY ERROR:",
         error?.stack ||
           error?.message ||
           error
       );
 
-      if (
-        error?.response?.data
-      ) {
-        console.error(
-          "Upstream response:",
-          error.response.data
-        );
-      }
-
-      console.error(
-        "=========================================="
-      );
-
       if (res.headersSent) {
         try {
           res.end();
-        } catch (endError) {}
+        } catch {}
 
         return;
       }
@@ -3273,15 +2634,13 @@ app.post(
    404
    ============================================================ */
 
-app.use(
-  function (req, res) {
-    return sendError(
-      res,
-      404,
-      "Endpoint not found."
-    );
-  }
-);
+app.use(function (req, res) {
+  return sendError(
+    res,
+    404,
+    "Endpoint not found."
+  );
+});
 
 
 /* ============================================================
@@ -3310,8 +2669,7 @@ app.use(
       res,
       500,
       "Internal proxy error.",
-      error?.message ||
-        null
+      error?.message || null
     );
   }
 );
@@ -3327,146 +2685,39 @@ const server =
     "0.0.0.0",
     function () {
       console.log(
-        "=========================================="
+        "JanitorAI -> NVIDIA NIM Proxy listening on 0.0.0.0:" +
+          PORT
       );
 
       console.log(
-        "JanitorAI -> NVIDIA NIM Proxy"
+        "Default model:",
+        DEFAULT_MODEL
       );
 
       console.log(
-        "Port: " + PORT
+        "Kimi memory:",
+        KIMI_MEMORY_ENABLED
       );
 
       console.log(
-        "Default model: " +
-          DEFAULT_MODEL
+        "NIM endpoint:",
+        NIM_API_BASE
       );
 
-      console.log(
-        "Default reasoning effort: " +
-          DEFAULT_REASONING_EFFORT
-      );
-
-      console.log(
-        "Default reasoning budget: " +
-          DEFAULT_REASONING_BUDGET
-      );
-
-      console.log(
-        "Default max tokens: " +
-          DEFAULT_MAX_TOKENS
-      );
-
-      console.log(
-        "Temperature: " +
-          DEFAULT_TEMPERATURE
-      );
-
-      console.log(
-        "Top P: " +
-          DEFAULT_TOP_P
-      );
-
-      console.log(
-        "Timeout: " +
-          NIM_TIMEOUT +
-          "ms"
-      );
-
-      console.log(
-        "NVIDIA endpoint: " +
-          NIM_API_BASE
-      );
-
-      console.log(
-        "Unknown NIM models allowed: " +
-          ALLOW_UNKNOWN_MODELS
-      );
-
-      console.log(
-        "NIM keep-alive: enabled"
-      );
-
-      console.log(
-        "NIM connection pool: 4 sockets / 2 idle"
-      );
-
-      console.log(
-        "Unknown NIM models allowed: " +
-          ALLOW_UNKNOWN_MODELS
-      );
-
-      console.log(
-        "Kimi memory enabled: " +
-          KIMI_MEMORY_ENABLED
-      );
-
-      console.log(
-        "Kimi context budget: " +
-          KIMI_CONTEXT_BUDGET +
-          " estimated tokens"
-      );
-
-      console.log(
-        "Kimi memory conversations: " +
-          kimiConversationStore.size
-      );
-
-      console.log(
-        "Explicitly configured models:"
-      );
-
-      for (const id of CONFIGURED_MODEL_IDS) {
-        const config =
-          MODELS[id];
-
-        console.log(
-          "   - " + id
-        );
-
-        console.log(
-          "     reasoning: " +
-            config.reasoningLevels.join(
-              ", "
-            )
-        );
-
-        console.log(
-          "     max output: " +
-            config.maxOutputTokens
-        );
-      }
-
-      console.log(
-        "=========================================="
-      );
-
-      /*
-       * Warm the shared NIM connection pool.
-       * Because fetchNimModels uses the same axios instance and
-       * agent as chat completions, the first chat request can
-       * potentially reuse the already-established connection.
-       */
       fetchNimModels()
-        .then(
-          function (models) {
-            console.log(
-              "NVIDIA reports " +
-                models.length +
-                " available model(s)."
-            );
-          }
-        )
-        .catch(
-          function (error) {
-            console.warn(
-              "Initial NVIDIA model discovery failed:",
-              error?.message ||
-                error
-            );
-          }
-        );
+        .then(models => {
+          console.log(
+            "NVIDIA reports",
+            models.length,
+            "available model(s)."
+          );
+        })
+        .catch(error => {
+          console.warn(
+            "Initial NVIDIA model discovery failed:",
+            error?.message || error
+          );
+        });
     }
   );
 
@@ -3476,7 +2727,6 @@ const server =
    ============================================================ */
 
 server.timeout = 0;
-
 server.requestTimeout = 0;
 
 server.keepAliveTimeout =
@@ -3508,15 +2758,10 @@ function shutdown(signal) {
       " received. Shutting down..."
   );
 
-  server.close(
-    function () {
-      console.log(
-        "Server closed."
-      );
-
-      process.exit(0);
-    }
-  );
+  server.close(function () {
+    console.log("Server closed.");
+    process.exit(0);
+  });
 
   setTimeout(
     function () {
@@ -3530,16 +2775,10 @@ function shutdown(signal) {
   ).unref();
 }
 
-process.on(
-  "SIGTERM",
-  function () {
-    shutdown("SIGTERM");
-  }
+process.on("SIGTERM", () =>
+  shutdown("SIGTERM")
 );
 
-process.on(
-  "SIGINT",
-  function () {
-    shutdown("SIGINT");
-  }
+process.on("SIGINT", () =>
+  shutdown("SIGINT")
 );
