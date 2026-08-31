@@ -4,6 +4,8 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const crypto = require("crypto");
+const http = require("http");
+const https = require("https");
 
 const app = express();
 
@@ -56,6 +58,8 @@ const MODELS = {
     maxOutputTokens: 32768
   }
 };
+
+const CONFIGURED_MODEL_IDS = Object.keys(MODELS);
 
 const ALLOW_UNKNOWN_MODELS =
   String(process.env.ALLOW_UNKNOWN_MODELS || "true")
@@ -175,7 +179,85 @@ const KIMI_MAX_CONVERSATIONS =
       )
     : 2000;
 
+
+/* ============================================================
+   UPSTREAM CONNECTION POOL
+   ============================================================ */
+
+/*
+ * The proxy is long-running and normally talks to the same
+ * NVIDIA endpoint repeatedly.
+ *
+ * Reusing TCP/TLS connections removes connection establishment
+ * from subsequent requests and is one of the most important
+ * proxy-side TTFT optimizations.
+ */
+
+const nimUrl = new URL(NIM_API_BASE);
+
+const commonAgentOptions = {
+  keepAlive: true,
+  keepAliveMsecs: 1000,
+
+  /*
+   * A small pool is enough for a single-user proxy while still
+   * allowing overlapping requests without unnecessary queuing.
+   */
+  maxSockets: 4,
+  maxFreeSockets: 2,
+
+  /*
+   * Prefer the newest idle socket. This reduces the chance of
+   * attempting to reuse an old connection that an upstream
+   * load balancer has already closed.
+   */
+  scheduling: "lifo"
+};
+
+const nimHttpAgent =
+  nimUrl.protocol === "http:"
+    ? new http.Agent(commonAgentOptions)
+    : null;
+
+const nimHttpsAgent =
+  nimUrl.protocol === "https:"
+    ? new https.Agent(commonAgentOptions)
+    : null;
+
+const nimClient = axios.create({
+  timeout: NIM_TIMEOUT,
+
+  httpAgent: nimHttpAgent,
+  httpsAgent: nimHttpsAgent,
+
+  /*
+   * Render does not require an HTTP proxy for the NVIDIA endpoint.
+   * Avoiding environment-proxy discovery keeps this connection
+   * direct and removes another possible hop.
+   */
+  proxy: false,
+
+  validateStatus: function () {
+    return true;
+  }
+});
+
+
+/* ============================================================
+   KIMI MEMORY STORE
+   ============================================================ */
+
 const kimiConversationStore = new Map();
+
+/*
+ * Cache expensive per-message calculations for the lifetime of
+ * the message object.
+ *
+ * This is particularly useful for Kimi because the same stored
+ * messages may participate in multiple requests.
+ */
+const kimiSignatureCache = new WeakMap();
+const kimiTokenEstimateCache = new WeakMap();
 
 let modelCache = null;
 let modelCacheTimestamp = 0;
@@ -264,11 +346,8 @@ function getModelConfig(model) {
 }
 
 function isSupportedModel(model) {
-  if (getModelConfig(model)) {
-    return true;
-  }
-
-  return ALLOW_UNKNOWN_MODELS;
+  return Boolean(getModelConfig(model)) ||
+    ALLOW_UNKNOWN_MODELS;
 }
 
 function clampTemperature(value) {
@@ -526,26 +605,47 @@ function estimateKimiTokens(value) {
 }
 
 function estimateKimiMessageTokens(message) {
-  return (
+  if (
+    message &&
+    typeof message === "object"
+  ) {
+    const cached =
+      kimiTokenEstimateCache.get(message);
+
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
+
+  const result =
     8 +
     estimateKimiTokens(message?.content) +
     estimateKimiTokens(message?.reasoning_content) +
     estimateKimiTokens(message?.tool_calls) +
     estimateKimiTokens(message?.function_call) +
-    estimateKimiTokens(message?.name)
-  );
+    estimateKimiTokens(message?.name);
+
+  if (
+    message &&
+    typeof message === "object"
+  ) {
+    kimiTokenEstimateCache.set(
+      message,
+      result
+    );
+  }
+
+  return result;
 }
 
 function estimateKimiMessagesTokens(messages) {
-  return messages.reduce(
-    function (total, message) {
-      return (
-        total +
-        estimateKimiMessageTokens(message)
-      );
-    },
-    0
-  );
+  let total = 0;
+
+  for (const message of messages) {
+    total += estimateKimiMessageTokens(message);
+  }
+
+  return total;
 }
 
 function hashKimiValue(value) {
@@ -591,22 +691,30 @@ function getExplicitKimiConversationId(
 }
 
 function getKimiSystemMessages(messages) {
-  return messages.filter(
-    function (message) {
-      return (
-        message?.role === "system" ||
-        message?.role === "developer"
-      );
+  const result = [];
+
+  for (const message of messages) {
+    if (
+      message?.role === "system" ||
+      message?.role === "developer"
+    ) {
+      result.push(message);
     }
-  );
+  }
+
+  return result;
 }
 
 function getKimiUserMessages(messages) {
-  return messages.filter(
-    function (message) {
-      return message?.role === "user";
+  const result = [];
+
+  for (const message of messages) {
+    if (message?.role === "user") {
+      result.push(message);
     }
-  );
+  }
+
+  return result;
 }
 
 function getKimiStableFingerprint(messages) {
@@ -648,6 +756,39 @@ function getKimiStableFingerprint(messages) {
 }
 
 function kimiMessageSignature(message) {
+  if (
+    message &&
+    typeof message === "object"
+  ) {
+    const cached =
+      kimiSignatureCache.get(message);
+
+    if (cached) {
+      return cached;
+    }
+
+    const signature =
+      hashKimiValue(
+        JSON.stringify({
+          role: message?.role || "",
+          content: message?.content ?? null,
+          reasoning_content:
+            message?.reasoning_content ?? null,
+          name: message?.name ?? null,
+          tool_calls: message?.tool_calls ?? null,
+          function_call:
+            message?.function_call ?? null
+        })
+      );
+
+    kimiSignatureCache.set(
+      message,
+      signature
+    );
+
+    return signature;
+  }
+
   return hashKimiValue(
     JSON.stringify({
       role: message?.role || "",
@@ -717,6 +858,7 @@ function createKimiConversation(
 
   const entry = {
     messages: [],
+    messageSignatures: new Set(),
     updatedAt: Date.now(),
     systemFingerprint:
       fingerprints.systemFingerprint,
@@ -768,11 +910,13 @@ function findKimiConversationByHistory(
   let bestScore = 0;
 
   const incomingSignatures =
-    new Set(
-      messages.map(
-        kimiMessageSignature
-      )
+    new Set();
+
+  for (const message of messages) {
+    incomingSignatures.add(
+      kimiMessageSignature(message)
     );
+  }
 
   for (
     const [
@@ -800,7 +944,33 @@ function findKimiConversationByHistory(
       score += 100;
     }
 
-    if (Array.isArray(entry.messages)) {
+    if (
+      entry.messageSignatures &&
+      entry.messageSignatures.size > 0
+    ) {
+      let overlap = 0;
+
+      for (const signature of incomingSignatures) {
+        if (
+          entry.messageSignatures.has(
+            signature
+          )
+        ) {
+          overlap++;
+        }
+      }
+
+      score += Math.min(
+        overlap * 10,
+        500
+      );
+    } else if (
+      Array.isArray(entry.messages)
+    ) {
+      /*
+       * Compatibility fallback for entries created before the
+       * signature index exists.
+       */
       let overlap = 0;
 
       for (const message of entry.messages) {
@@ -851,10 +1021,6 @@ function getOrCreateKimiConversation(
     );
 
   if (explicitId) {
-    /*
-     * Deliberately uses normal string concatenation.
-     * No template literals are used here.
-     */
     const conversationId =
       "explicit:" +
       hashKimiValue(explicitId);
@@ -935,24 +1101,28 @@ function mergeKimiMessages(
   const result = [];
   const seen = new Set();
 
-  function addMessage(message) {
+  for (const message of storedMessages) {
     const signature =
       kimiMessageSignature(message);
 
     if (seen.has(signature)) {
-      return;
+      continue;
     }
 
     seen.add(signature);
     result.push(message);
   }
 
-  for (const message of storedMessages) {
-    addMessage(message);
-  }
-
   for (const message of incomingMessages) {
-    addMessage(message);
+    const signature =
+      kimiMessageSignature(message);
+
+    if (seen.has(signature)) {
+      continue;
+    }
+
+    seen.add(signature);
+    result.push(message);
   }
 
   return result;
@@ -1021,6 +1191,18 @@ function fitKimiContext(messages) {
   return pinned.concat(selected);
 }
 
+function rebuildKimiMessageIndex(memory) {
+  const signatures = new Set();
+
+  for (const message of memory.messages) {
+    signatures.add(
+      kimiMessageSignature(message)
+    );
+  }
+
+  memory.messageSignatures = signatures;
+}
+
 function updateKimiMemory(
   conversationId,
   incomingMessages
@@ -1048,6 +1230,8 @@ function updateKimiMemory(
     fitKimiContext(merged).slice(
       -KIMI_MAX_STORED_MESSAGES
     );
+
+  rebuildKimiMessageIndex(memory);
 
   const fingerprints =
     getKimiStableFingerprint(
@@ -1185,20 +1369,21 @@ function appendKimiAssistantMessage(
       cleanAssistantMessage
     );
 
-  const alreadyExists =
-    memory.messages.some(
-      function (message) {
-        return (
-          kimiMessageSignature(
-            message
-          ) === signature
-        );
-      }
-    );
-
-  if (!alreadyExists) {
+  if (
+    !memory.messageSignatures ||
+    !memory.messageSignatures.has(signature)
+  ) {
     memory.messages.push(
       cleanAssistantMessage
+    );
+
+    if (!memory.messageSignatures) {
+      memory.messageSignatures =
+        new Set();
+    }
+
+    memory.messageSignatures.add(
+      signature
     );
   }
 
@@ -1208,6 +1393,8 @@ function appendKimiAssistantMessage(
     ).slice(
       -KIMI_MAX_STORED_MESSAGES
     );
+
+  rebuildKimiMessageIndex(memory);
 
   memory.updatedAt = Date.now();
 
@@ -1571,7 +1758,7 @@ async function fetchNimModels(
         }
 
         const response =
-          await axios.get(
+          await nimClient.get(
             NIM_API_BASE + "/models",
             {
               headers: {
@@ -1587,12 +1774,7 @@ async function fetchNimModels(
                 Math.min(
                   NIM_TIMEOUT,
                   30000
-                ),
-
-              validateStatus:
-                function () {
-                  return true;
-                }
+                )
             }
           );
 
@@ -1648,48 +1830,48 @@ function normalizeMessages(messages) {
     return [];
   }
 
-  return messages
-    .filter(function (message) {
-      if (!isPlainObject(message)) {
-        return false;
-      }
+  const result = [];
 
-      if (
-        typeof message.role !==
-          "string" ||
-        message.role.trim() === ""
-      ) {
-        return false;
-      }
+  for (const message of messages) {
+    if (!isPlainObject(message)) {
+      continue;
+    }
 
+    if (
+      typeof message.role !==
+        "string" ||
+      message.role.trim() === ""
+    ) {
+      continue;
+    }
+
+    if (
+      message.content === undefined ||
+      message.content === null
+    ) {
       if (
-        message.content === undefined ||
-        message.content === null
+        !Array.isArray(
+          message.tool_calls
+        )
       ) {
         if (
-          !Array.isArray(
-            message.tool_calls
-          )
+          message.reasoning_content ===
+            undefined &&
+          message.reasoning ===
+            undefined
         ) {
-          if (
-            message.reasoning_content ===
-              undefined &&
-            message.reasoning ===
-              undefined
-          ) {
-            return false;
-          }
+          continue;
         }
       }
+    }
 
-      return true;
-    })
-    .map(function (message) {
-      return {
-        ...message,
-        role: message.role.trim()
-      };
+    result.push({
+      ...message,
+      role: message.role.trim()
     });
+  }
+
+  return result;
 }
 
 
@@ -2210,7 +2392,7 @@ app.get(
         DEFAULT_MODEL,
 
       explicitly_configured_models:
-        Object.keys(MODELS),
+        CONFIGURED_MODEL_IDS,
 
       upstream_model_count:
         upstreamModels.length,
@@ -2260,7 +2442,7 @@ app.get(
         DEFAULT_MODEL,
 
       explicitly_configured_models:
-        Object.keys(MODELS),
+        CONFIGURED_MODEL_IDS,
 
       upstream_model_count:
         upstreamModels.length,
@@ -2306,10 +2488,10 @@ app.get(
       }
 
       const models =
-        Object.entries(MODELS).map(
-          function (entry) {
-            const id = entry[0];
-            const config = entry[1];
+        CONFIGURED_MODEL_IDS.map(
+          function (id) {
+            const config =
+              MODELS[id];
 
             return {
               id: id,
@@ -2429,7 +2611,7 @@ app.post(
             model,
           {
             explicitly_configured_models:
-              Object.keys(MODELS)
+              CONFIGURED_MODEL_IDS
           }
         );
       }
@@ -2548,17 +2730,15 @@ app.post(
               : "application/json"
         },
 
-        timeout:
-          NIM_TIMEOUT,
-
-        validateStatus:
-          function () {
-            return true;
-          }
+        /*
+         * The agent is already attached to the axios instance.
+         * This request therefore reuses an existing TCP/TLS
+         * connection whenever one is available.
+         */
       };
 
       const response =
-        await axios.post(
+        await nimClient.post(
           NIM_API_BASE +
             "/chat/completions",
           nimRequest,
@@ -2813,15 +2993,27 @@ app.post(
           buffer +=
             chunk.toString("utf8");
 
-          const events =
-            buffer.split(
-              /\r?\n\r?\n/
-            );
+          /*
+           * SSE events are separated by a blank line.
+           * Preserve incomplete events in buffer.
+           */
+          let separatorIndex;
 
-          buffer =
-            events.pop() || "";
+          while (
+            (separatorIndex =
+              buffer.indexOf("\n\n")) !== -1
+          ) {
+            const event =
+              buffer.slice(
+                0,
+                separatorIndex
+              );
 
-          for (const event of events) {
+            buffer =
+              buffer.slice(
+                separatorIndex + 2
+              );
+
             if (
               ended ||
               clientDisconnected
@@ -2857,6 +3049,60 @@ app.post(
 
               clientDisconnected = true;
               destroyUpstream();
+              break;
+            }
+          }
+
+          /*
+           * Handle CRLF-delimited SSE when the separator is
+           * represented as \r\n\r\n.
+           */
+          while (
+            !clientDisconnected &&
+            !ended &&
+            (separatorIndex =
+              buffer.indexOf("\r\n\r\n")) !== -1
+          ) {
+            const event =
+              buffer.slice(
+                0,
+                separatorIndex
+              );
+
+            buffer =
+              buffer.slice(
+                separatorIndex + 4
+              );
+
+            if (
+              kimiStreamAccumulator
+            ) {
+              addKimiSSEToAccumulator(
+                kimiStreamAccumulator,
+                event
+              );
+            }
+
+            const output =
+              processSSEEvent(
+                event
+              );
+
+            if (!output) {
+              continue;
+            }
+
+            try {
+              res.write(output);
+            } catch (error) {
+              console.error(
+                "Client write error:",
+                error.message
+              );
+
+              clientDisconnected = true;
+              destroyUpstream();
+              break;
             }
           }
         }
@@ -3139,6 +3385,19 @@ const server =
       );
 
       console.log(
+        "NIM keep-alive: enabled"
+      );
+
+      console.log(
+        "NIM connection pool: 4 sockets / 2 idle"
+      );
+
+      console.log(
+        "Unknown NIM models allowed: " +
+          ALLOW_UNKNOWN_MODELS
+      );
+
+      console.log(
         "Kimi memory enabled: " +
           KIMI_MEMORY_ENABLED
       );
@@ -3158,33 +3417,37 @@ const server =
         "Explicitly configured models:"
       );
 
-      Object.entries(MODELS).forEach(
-        function (entry) {
-          const id = entry[0];
-          const config = entry[1];
+      for (const id of CONFIGURED_MODEL_IDS) {
+        const config =
+          MODELS[id];
 
-          console.log(
-            "   - " + id
-          );
+        console.log(
+          "   - " + id
+        );
 
-          console.log(
-            "     reasoning: " +
-              config.reasoningLevels.join(
-                ", "
-              )
-          );
+        console.log(
+          "     reasoning: " +
+            config.reasoningLevels.join(
+              ", "
+            )
+        );
 
-          console.log(
-            "     max output: " +
-              config.maxOutputTokens
-          );
-        }
-      );
+        console.log(
+          "     max output: " +
+            config.maxOutputTokens
+        );
+      }
 
       console.log(
         "=========================================="
       );
 
+      /*
+       * Warm the shared NIM connection pool.
+       * Because fetchNimModels uses the same axios instance and
+       * agent as chat completions, the first chat request can
+       * potentially reuse the already-established connection.
+       */
       fetchNimModels()
         .then(
           function (models) {
