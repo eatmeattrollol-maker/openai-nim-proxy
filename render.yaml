@@ -2,7 +2,7 @@ services:
   - type: web
     name: janitorai-nvidia-nim-proxy
     runtime: node
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /health
     envVars:
