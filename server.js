@@ -28,8 +28,8 @@ const MODELS = {
     name: "DeepSeek V4 Flash 0731",
     provider: "DeepSeek AI",
     reasoningLevels: ["none", "low", "high", "max"],
-    defaultReasoningEffort: "high",
-    maxOutputTokens: 16384
+    defaultReasoningEffort: "max",
+    maxOutputTokens: 22768
   },
 
   "deepseek-ai/deepseek-v4-pro-0813": {
