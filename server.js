@@ -584,7 +584,7 @@ function hashKimiValue(value) {
  *
  * for the same message.
  */
-function kimiMessageSignature(message) {
+/* function kimiMessageSignature(message) {
   if (
     message &&
     typeof message === "object" &&
