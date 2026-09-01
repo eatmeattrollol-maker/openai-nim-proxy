@@ -4,6 +4,8 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const crypto = require("crypto");
+const http = require("http");
+const https = require("https");
 
 const app = express();
 
@@ -22,6 +24,10 @@ const NIM_API_KEY =
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
   "deepseek-ai/deepseek-v4-flash-0731";
+
+/* ============================================================
+   MODEL CONFIGURATION
+============================================================ */
 
 const MODELS = {
   "deepseek-ai/deepseek-v4-flash-0731": {
@@ -62,6 +68,11 @@ const ALLOW_UNKNOWN_MODELS =
     .trim()
     .toLowerCase() === "true";
 
+/* ============================================================
+   REASONING
+   IMPORTANT: VALUES PRESERVED FROM ORIGINAL
+============================================================ */
+
 const DEFAULT_REASONING_EFFORT =
   String(process.env.DEFAULT_REASONING_EFFORT || "high")
     .trim()
@@ -75,12 +86,12 @@ const DEFAULT_REASONING_BUDGET =
 const MODEL_REASONING_BUDGETS = {
   "deepseek-ai/deepseek-v4-flash-0731": 16384,
   "deepseek-ai/deepseek-v4-pro-0813": 24576,
-  "moonshotai/kimi-k3": 16384,
+  "moonshotai/kimi-k3": 32768,
   "nvidia/nemotron-3-ultra-550b-a55b": 16384
 };
 
 const MODEL_REASONING_EFFORTS = {
-  "deepseek-ai/deepseek-v4-flash-0731": "high",
+  "deepseek-ai/deepseek-v4-flash-0731": "low",
   "deepseek-ai/deepseek-v4-pro-0813": "max",
   "moonshotai/kimi-k3": "max",
   "nvidia/nemotron-3-ultra-550b-a55b": "high"
@@ -116,22 +127,43 @@ const DEFAULT_PRESENCE_PENALTY =
     ? Number(process.env.DEFAULT_PRESENCE_PENALTY)
     : 0.0;
 
+/* ============================================================
+   NETWORK
+============================================================ */
+
 const NIM_TIMEOUT =
   Number.isFinite(Number(process.env.NIM_TIMEOUT_MS))
     ? Number(process.env.NIM_TIMEOUT_MS)
     : 900000;
 
-const MODEL_CACHE_TTL =
-  Number.isFinite(Number(process.env.MODEL_CACHE_TTL_MS))
-    ? Number(process.env.MODEL_CACHE_TTL_MS)
-    : 300000;
-
 const MAX_ERROR_BODY_SIZE = 2 * 1024 * 1024;
+
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+  scheduling: "lifo"
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+  scheduling: "lifo"
+});
+
+/* ============================================================
+   DEBUG
+============================================================ */
 
 const DEBUG_PROXY =
   String(process.env.DEBUG_PROXY || "false")
     .trim()
     .toLowerCase() === "true";
+
+/* ============================================================
+   KIMI MEMORY CONFIGURATION
+============================================================ */
 
 const KIMI_MEMORY_ENABLED =
   String(process.env.KIMI_MEMORY_ENABLED || "true")
@@ -175,40 +207,37 @@ const KIMI_MAX_CONVERSATIONS =
       )
     : 2000;
 
-
-/* ============================================================
-   HTTP AGENT
-   ============================================================ */
-
-const httpAgent = new require("http").Agent({
-  keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  scheduling: "lifo"
-});
-
-const httpsAgent = new require("https").Agent({
-  keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  scheduling: "lifo"
-});
-
-
 /* ============================================================
    STATE
-   ============================================================ */
+============================================================ */
 
+/*
+ * Conversation store:
+ *
+ * conversationId -> {
+ *   messages: [],
+ *   updatedAt,
+ *   systemFingerprint,
+ *   firstUserFingerprint
+ * }
+ */
 const kimiConversationStore = new Map();
+
+/*
+ * Fast indexes used to avoid scanning every conversation.
+ *
+ * fingerprint -> Set(conversationId)
+ */
+const kimiFirstUserIndex = new Map();
+const kimiSystemIndex = new Map();
 
 let modelCache = null;
 let modelCacheTimestamp = 0;
 let modelCachePromise = null;
 
-
 /* ============================================================
    BASIC HELPERS
-   ============================================================ */
+============================================================ */
 
 function isPlainObject(value) {
   return (
@@ -223,10 +252,7 @@ function isFiniteNumber(value) {
     return Number.isFinite(value);
   }
 
-  if (
-    typeof value === "string" &&
-    value.trim() !== ""
-  ) {
+  if (typeof value === "string" && value.trim() !== "") {
     return Number.isFinite(Number(value));
   }
 
@@ -278,7 +304,9 @@ function parseBoolean(value, fallback) {
 }
 
 function normalizeModel(model) {
-  return String(model || "").trim().toLowerCase();
+  return String(model || "")
+    .trim()
+    .toLowerCase();
 }
 
 function getModelConfig(model) {
@@ -327,7 +355,10 @@ function clampMaxTokens(value, modelConfig) {
   );
 
   return modelConfig?.maxOutputTokens
-    ? Math.min(modelConfig.maxOutputTokens, number)
+    ? Math.min(
+        modelConfig.maxOutputTokens,
+        number
+      )
     : number;
 }
 
@@ -346,10 +377,10 @@ function clampReasoningBudget(value) {
   );
 }
 
-
 /* ============================================================
    REASONING
-   ============================================================ */
+   EXACT BEHAVIOR PRESERVED
+============================================================ */
 
 function budgetToReasoningEffort(budget, modelConfig) {
   const value = clampReasoningBudget(budget);
@@ -401,25 +432,31 @@ function normalizeReasoningEffort(value, modelConfig) {
     }
 
     if (
-      (normalized === "off" ||
+      (
+        normalized === "off" ||
         normalized === "false" ||
-        normalized === "0") &&
+        normalized === "0"
+      ) &&
       levels.includes("none")
     ) {
       return "none";
     }
 
     if (
-      (normalized === "med" ||
-        normalized === "medium") &&
+      (
+        normalized === "med" ||
+        normalized === "medium"
+      ) &&
       levels.includes("medium")
     ) {
       return "medium";
     }
 
     if (
-      (normalized === "maximum" ||
-        normalized === "maximum_reasoning") &&
+      (
+        normalized === "maximum" ||
+        normalized === "maximum_reasoning"
+      ) &&
       levels.includes("max")
     ) {
       return "max";
@@ -444,7 +481,9 @@ function getRequestedReasoningEffort(
           incoming.reasoning_effort,
           modelConfig
         )
-      : String(incoming.reasoning_effort).trim();
+      : String(
+          incoming.reasoning_effort
+        ).trim();
   }
 
   if (incoming.reasoning_mode !== undefined) {
@@ -453,7 +492,9 @@ function getRequestedReasoningEffort(
           incoming.reasoning_mode,
           modelConfig
         )
-      : String(incoming.reasoning_mode).trim();
+      : String(
+          incoming.reasoning_mode
+        ).trim();
   }
 
   if (incoming.reasoning_budget !== undefined) {
@@ -480,10 +521,9 @@ function getRequestedReasoningEffort(
     : null;
 }
 
-
 /* ============================================================
-   KIMI MEMORY
-   ============================================================ */
+   KIMI MEMORY HELPERS
+============================================================ */
 
 function estimateKimiTokens(value) {
   if (value === undefined || value === null) {
@@ -534,7 +574,61 @@ function hashKimiValue(value) {
     .digest("hex");
 }
 
-function getExplicitKimiConversationId(req, incoming) {
+/*
+ * Cache the expensive signature directly on the object.
+ *
+ * This avoids repeatedly doing:
+ *
+ * JSON.stringify()
+ * SHA-256
+ *
+ * for the same message.
+ */
+function kimiMessageSignature(message) {
+  if (
+    message &&
+    typeof message === "object" &&
+    typeof message.__kimiSignature === "string"
+  ) {
+    return message.__kimiSignature;
+  }
+
+  const signature = hashKimiValue(
+    JSON.stringify({
+      role: message?.role || "",
+      content: message?.content ?? null,
+      reasoning_content:
+        message?.reasoning_content ?? null,
+      name: message?.name ?? null,
+      tool_calls:
+        message?.tool_calls ?? null,
+      function_call:
+        message?.function_call ?? null
+    })
+  );
+
+  if (
+    message &&
+    typeof message === "object"
+  ) {
+    Object.defineProperty(
+      message,
+      "__kimiSignature",
+      {
+        value: signature,
+        enumerable: false,
+        configurable: true
+      }
+    );
+  }
+
+  return signature;
+}
+
+function getExplicitKimiConversationId(
+  req,
+  incoming
+) {
   const candidates = [
     incoming?.conversation_id,
     incoming?.conversationId,
@@ -573,15 +667,19 @@ function getKimiStableFingerprint(messages) {
 
   for (const message of messages) {
     if (
-      (message?.role === "system" ||
-        message?.role === "developer") &&
+      (
+        message?.role === "system" ||
+        message?.role === "developer"
+      ) &&
       systemCount < 3
     ) {
       system += JSON.stringify({
         role: message.role,
         content: message.content
       });
+
       systemCount++;
+
       continue;
     }
 
@@ -595,7 +693,10 @@ function getKimiStableFingerprint(messages) {
       });
     }
 
-    if (systemCount >= 3 && firstUser) {
+    if (
+      systemCount >= 3 &&
+      firstUser
+    ) {
       break;
     }
   }
@@ -603,6 +704,7 @@ function getKimiStableFingerprint(messages) {
   return {
     systemFingerprint:
       hashKimiValue(system),
+
     firstUserFingerprint:
       firstUser
         ? hashKimiValue(firstUser)
@@ -610,24 +712,114 @@ function getKimiStableFingerprint(messages) {
   };
 }
 
-function kimiMessageSignature(message) {
-  return hashKimiValue(
-    JSON.stringify({
-      role: message?.role || "",
-      content: message?.content ?? null,
-      reasoning_content:
-        message?.reasoning_content ?? null,
-      name: message?.name ?? null,
-      tool_calls: message?.tool_calls ?? null,
-      function_call:
-        message?.function_call ?? null
-    })
+/* ============================================================
+   KIMI INDEX MANAGEMENT
+============================================================ */
+
+function addToIndex(
+  index,
+  fingerprint,
+  conversationId
+) {
+  if (!fingerprint) {
+    return;
+  }
+
+  let set = index.get(fingerprint);
+
+  if (!set) {
+    set = new Set();
+    index.set(fingerprint, set);
+  }
+
+  set.add(conversationId);
+}
+
+function removeFromIndex(
+  index,
+  fingerprint,
+  conversationId
+) {
+  if (!fingerprint) {
+    return;
+  }
+
+  const set = index.get(fingerprint);
+
+  if (!set) {
+    return;
+  }
+
+  set.delete(conversationId);
+
+  if (set.size === 0) {
+    index.delete(fingerprint);
+  }
+}
+
+function indexConversation(
+  conversationId,
+  entry
+) {
+  addToIndex(
+    kimiFirstUserIndex,
+    entry.firstUserFingerprint,
+    conversationId
+  );
+
+  addToIndex(
+    kimiSystemIndex,
+    entry.systemFingerprint,
+    conversationId
   );
 }
 
-function touchKimiConversation(conversationId) {
+function unindexConversation(
+  conversationId,
+  entry
+) {
+  removeFromIndex(
+    kimiFirstUserIndex,
+    entry.firstUserFingerprint,
+    conversationId
+  );
+
+  removeFromIndex(
+    kimiSystemIndex,
+    entry.systemFingerprint,
+    conversationId
+  );
+}
+
+function deleteKimiConversation(
+  conversationId
+) {
   const entry =
-    kimiConversationStore.get(conversationId);
+    kimiConversationStore.get(
+      conversationId
+    );
+
+  if (!entry) {
+    return;
+  }
+
+  unindexConversation(
+    conversationId,
+    entry
+  );
+
+  kimiConversationStore.delete(
+    conversationId
+  );
+}
+
+function touchKimiConversation(
+  conversationId
+) {
+  const entry =
+    kimiConversationStore.get(
+      conversationId
+    );
 
   if (!entry) {
     return;
@@ -635,23 +827,38 @@ function touchKimiConversation(conversationId) {
 
   entry.updatedAt = Date.now();
 
-  kimiConversationStore.delete(conversationId);
+  /*
+   * Map insertion order is used as a cheap LRU.
+   */
+  kimiConversationStore.delete(
+    conversationId
+  );
+
   kimiConversationStore.set(
     conversationId,
     entry
   );
 }
 
+/* ============================================================
+   KIMI MEMORY CLEANUP
+============================================================ */
+
 function cleanupKimiMemory() {
   const cutoff =
-    Date.now() - KIMI_MEMORY_TTL_MS;
+    Date.now() -
+    KIMI_MEMORY_TTL_MS;
 
-  for (const [
-    conversationId,
-    entry
-  ] of kimiConversationStore) {
-    if (entry.updatedAt < cutoff) {
-      kimiConversationStore.delete(
+  for (
+    const [
+      conversationId,
+      entry
+    ] of kimiConversationStore
+  ) {
+    if (
+      entry.updatedAt < cutoff
+    ) {
+      deleteKimiConversation(
         conversationId
       );
     }
@@ -666,12 +873,18 @@ setInterval(
   )
 ).unref();
 
+/* ============================================================
+   CREATE CONVERSATION
+============================================================ */
+
 function createKimiConversation(
   conversationId,
   messages
 ) {
   const fingerprints =
-    getKimiStableFingerprint(messages);
+    getKimiStableFingerprint(
+      messages
+    );
 
   const entry = {
     messages: [],
@@ -687,6 +900,14 @@ function createKimiConversation(
     entry
   );
 
+  indexConversation(
+    conversationId,
+    entry
+  );
+
+  /*
+   * Cheap LRU eviction.
+   */
   while (
     kimiConversationStore.size >
     KIMI_MAX_CONVERSATIONS
@@ -697,17 +918,27 @@ function createKimiConversation(
         .next()
         .value;
 
-    if (oldestKey === undefined) {
+    if (
+      oldestKey === undefined
+    ) {
       break;
     }
 
-    kimiConversationStore.delete(oldestKey);
+    deleteKimiConversation(
+      oldestKey
+    );
   }
 
   return entry;
 }
 
-function findKimiConversationByHistory(messages) {
+/* ============================================================
+   FAST HISTORY MATCHING
+============================================================ */
+
+function findKimiConversationByHistory(
+  messages
+) {
   if (
     !Array.isArray(messages) ||
     messages.length === 0
@@ -716,12 +947,56 @@ function findKimiConversationByHistory(messages) {
   }
 
   const fingerprints =
-    getKimiStableFingerprint(messages);
+    getKimiStableFingerprint(
+      messages
+    );
+
+  /*
+   * Instead of scanning all 2,000 conversations,
+   * start with conversations having the same first
+   * user message.
+   */
+  let candidateIds = null;
+
+  if (
+    fingerprints.firstUserFingerprint
+  ) {
+    candidateIds =
+      kimiFirstUserIndex.get(
+        fingerprints.firstUserFingerprint
+      );
+  }
+
+  /*
+   * If there isn't a first-user match,
+   * use the system fingerprint.
+   */
+  if (
+    !candidateIds &&
+    fingerprints.systemFingerprint
+  ) {
+    candidateIds =
+      kimiSystemIndex.get(
+        fingerprints.systemFingerprint
+      );
+  }
+
+  /*
+   * No indexed candidate.
+   *
+   * Preserve the old behavior as a fallback,
+   * but this should be uncommon.
+   */
+  if (!candidateIds) {
+    return null;
+  }
 
   const incomingSignatures =
     new Set();
 
-  for (const message of messages) {
+  for (
+    const message of messages
+  ) {
     incomingSignatures.add(
       kimiMessageSignature(message)
     );
@@ -730,10 +1005,18 @@ function findKimiConversationByHistory(messages) {
   let bestMatch = null;
   let bestScore = 0;
 
-  for (const [
-    conversationId,
-    entry
-  ] of kimiConversationStore) {
+  for (
+    const conversationId of candidateIds
+  ) {
+    const entry =
+      kimiConversationStore.get(
+        conversationId
+      );
+
+    if (!entry) {
+      continue;
+    }
+
     let score = 0;
 
     if (
@@ -755,7 +1038,9 @@ function findKimiConversationByHistory(messages) {
     if (entry.messages.length) {
       let overlap = 0;
 
-      for (const message of entry.messages) {
+      for (
+        const message of entry.messages
+      ) {
         if (
           incomingSignatures.has(
             kimiMessageSignature(message)
@@ -777,6 +1062,7 @@ function findKimiConversationByHistory(messages) {
 
     if (score > bestScore) {
       bestScore = score;
+
       bestMatch = {
         conversationId,
         entry
@@ -792,6 +1078,10 @@ function findKimiConversationByHistory(messages) {
     ? bestMatch
     : null;
 }
+
+/* ============================================================
+   GET OR CREATE KIMI CONVERSATION
+============================================================ */
 
 function getOrCreateKimiConversation(
   req,
@@ -815,10 +1105,11 @@ function getOrCreateKimiConversation(
       );
 
     if (!entry) {
-      entry = createKimiConversation(
-        conversationId,
-        messages
-      );
+      entry =
+        createKimiConversation(
+          conversationId,
+          messages
+        );
     }
 
     touchKimiConversation(
@@ -845,12 +1136,17 @@ function getOrCreateKimiConversation(
   }
 
   const fingerprints =
-    getKimiStableFingerprint(messages);
+    getKimiStableFingerprint(
+      messages
+    );
 
   const seed =
     fingerprints.systemFingerprint +
     "|" +
-    (fingerprints.firstUserFingerprint || "") +
+    (
+      fingerprints.firstUserFingerprint ||
+      ""
+    ) +
     "|" +
     Date.now() +
     "|" +
@@ -872,6 +1168,10 @@ function getOrCreateKimiConversation(
   };
 }
 
+/* ============================================================
+   MERGE KIMI MESSAGES
+============================================================ */
+
 function mergeKimiMessages(
   storedMessages,
   incomingMessages
@@ -879,7 +1179,9 @@ function mergeKimiMessages(
   const result = [];
   const seen = new Set();
 
-  for (const message of storedMessages) {
+  for (
+    const message of storedMessages
+  ) {
     const signature =
       kimiMessageSignature(message);
 
@@ -889,7 +1191,9 @@ function mergeKimiMessages(
     }
   }
 
-  for (const message of incomingMessages) {
+  for (
+    const message of incomingMessages
+  ) {
     const signature =
       kimiMessageSignature(message);
 
@@ -902,6 +1206,10 @@ function mergeKimiMessages(
   return result;
 }
 
+/* ============================================================
+   FIT KIMI CONTEXT
+============================================================ */
+
 function fitKimiContext(messages) {
   if (
     !Array.isArray(messages) ||
@@ -913,7 +1221,9 @@ function fitKimiContext(messages) {
   const pinned = [];
   const normal = [];
 
-  for (const message of messages) {
+  for (
+    const message of messages
+  ) {
     if (
       message?.role === "system" ||
       message?.role === "developer"
@@ -925,23 +1235,34 @@ function fitKimiContext(messages) {
   }
 
   let used =
-    estimateKimiMessagesTokens(pinned);
+    estimateKimiMessagesTokens(
+      pinned
+    );
 
-  if (used >= KIMI_CONTEXT_BUDGET) {
+  if (
+    used >= KIMI_CONTEXT_BUDGET
+  ) {
     return pinned;
   }
 
   const selected = [];
 
+  /*
+   * Walk backwards so the most recent
+   * messages get priority.
+   */
   for (
     let index = normal.length - 1;
     index >= 0;
     index--
   ) {
-    const message = normal[index];
+    const message =
+      normal[index];
 
     const cost =
-      estimateKimiMessageTokens(message);
+      estimateKimiMessageTokens(
+        message
+      );
 
     if (
       used + cost >
@@ -956,8 +1277,14 @@ function fitKimiContext(messages) {
 
   selected.reverse();
 
-  return pinned.concat(selected);
+  return pinned.concat(
+    selected
+  );
 }
+
+/* ============================================================
+   UPDATE KIMI MEMORY
+============================================================ */
 
 function updateKimiMemory(
   conversationId,
@@ -969,10 +1296,11 @@ function updateKimiMemory(
     );
 
   if (!memory) {
-    memory = createKimiConversation(
-      conversationId,
-      incomingMessages
-    );
+    memory =
+      createKimiConversation(
+        conversationId,
+        incomingMessages
+      );
   }
 
   const merged =
@@ -981,8 +1309,11 @@ function updateKimiMemory(
       incomingMessages
     );
 
+  const fitted =
+    fitKimiContext(merged);
+
   memory.messages =
-    fitKimiContext(merged).slice(
+    fitted.slice(
       -KIMI_MAX_STORED_MESSAGES
     );
 
@@ -991,12 +1322,48 @@ function updateKimiMemory(
       memory.messages
     );
 
-  memory.systemFingerprint =
-    fingerprints.systemFingerprint;
+  /*
+   * Update indexes if fingerprints changed.
+   */
+  if (
+    memory.systemFingerprint !==
+    fingerprints.systemFingerprint
+  ) {
+    removeFromIndex(
+      kimiSystemIndex,
+      memory.systemFingerprint,
+      conversationId
+    );
 
-  if (fingerprints.firstUserFingerprint) {
+    memory.systemFingerprint =
+      fingerprints.systemFingerprint;
+
+    addToIndex(
+      kimiSystemIndex,
+      memory.systemFingerprint,
+      conversationId
+    );
+  }
+
+  if (
+    fingerprints.firstUserFingerprint &&
+    memory.firstUserFingerprint !==
+      fingerprints.firstUserFingerprint
+  ) {
+    removeFromIndex(
+      kimiFirstUserIndex,
+      memory.firstUserFingerprint,
+      conversationId
+    );
+
     memory.firstUserFingerprint =
       fingerprints.firstUserFingerprint;
+
+    addToIndex(
+      kimiFirstUserIndex,
+      memory.firstUserFingerprint,
+      conversationId
+    );
   }
 
   memory.updatedAt = Date.now();
@@ -1039,10 +1406,9 @@ function buildKimiMemoryContext(
   };
 }
 
-
 /* ============================================================
    KIMI ASSISTANT MEMORY
-   ============================================================ */
+============================================================ */
 
 function appendKimiAssistantMessage(
   conversationId,
@@ -1071,7 +1437,10 @@ function appendKimiAssistantMessage(
       "assistant"
   };
 
-  if (assistantMessage.content !== undefined) {
+  if (
+    assistantMessage.content !==
+    undefined
+  ) {
     clean.content =
       assistantMessage.content;
   }
@@ -1084,7 +1453,11 @@ function appendKimiAssistantMessage(
       assistantMessage.reasoning_content;
   }
 
-  if (Array.isArray(assistantMessage.tool_calls)) {
+  if (
+    Array.isArray(
+      assistantMessage.tool_calls
+    )
+  ) {
     clean.tool_calls =
       assistantMessage.tool_calls;
   }
@@ -1097,7 +1470,10 @@ function appendKimiAssistantMessage(
       assistantMessage.function_call;
   }
 
-  if (assistantMessage.name !== undefined) {
+  if (
+    assistantMessage.name !==
+    undefined
+  ) {
     clean.name =
       assistantMessage.name;
   }
@@ -1105,24 +1481,27 @@ function appendKimiAssistantMessage(
   const signature =
     kimiMessageSignature(clean);
 
-  let exists = false;
-
-  for (const message of memory.messages) {
+  /*
+   * Since signatures are cached,
+   * this check is cheaper than the original.
+   */
+  for (
+    const message of memory.messages
+  ) {
     if (
       kimiMessageSignature(message) ===
       signature
     ) {
-      exists = true;
-      break;
+      return;
     }
   }
 
-  if (!exists) {
-    memory.messages.push(clean);
-  }
+  memory.messages.push(clean);
 
   memory.messages =
-    fitKimiContext(memory.messages).slice(
+    fitKimiContext(
+      memory.messages
+    ).slice(
       -KIMI_MAX_STORED_MESSAGES
     );
 
@@ -1133,7 +1512,9 @@ function appendKimiAssistantMessage(
   );
 }
 
-function extractKimiAssistantMessage(parsed) {
+function extractKimiAssistantMessage(
+  parsed
+) {
   const message =
     parsed?.choices?.[0]?.message;
 
@@ -1143,24 +1524,29 @@ function extractKimiAssistantMessage(parsed) {
 
   return {
     role:
-      message.role || "assistant",
+      message.role ||
+      "assistant",
+
     content:
       message.content,
+
     reasoning_content:
       message.reasoning_content,
+
     tool_calls:
       message.tool_calls,
+
     function_call:
       message.function_call,
+
     name:
       message.name
   };
 }
 
-
 /* ============================================================
-   KIMI STREAM MEMORY
-   ============================================================ */
+   KIMI STREAM ACCUMULATOR
+============================================================ */
 
 function createKimiStreamAccumulator() {
   return {
@@ -1185,12 +1571,15 @@ function mergeKimiToolCallDelta(
   }
 
   const index =
-    Number.isFinite(Number(toolCall.index))
+    Number.isFinite(
+      Number(toolCall.index)
+    )
       ? Number(toolCall.index)
       : accumulator.toolCalls.length;
 
   while (
-    accumulator.toolCalls.length <= index
+    accumulator.toolCalls.length <=
+    index
   ) {
     accumulator.toolCalls.push({});
   }
@@ -1198,12 +1587,18 @@ function mergeKimiToolCallDelta(
   const target =
     accumulator.toolCalls[index];
 
-  if (toolCall.id !== undefined) {
-    target.id = toolCall.id;
+  if (
+    toolCall.id !== undefined
+  ) {
+    target.id =
+      toolCall.id;
   }
 
-  if (toolCall.type !== undefined) {
-    target.type = toolCall.type;
+  if (
+    toolCall.type !== undefined
+  ) {
+    target.type =
+      toolCall.type;
   }
 
   if (toolCall.function) {
@@ -1224,19 +1619,25 @@ function mergeKimiToolCallDelta(
       undefined
     ) {
       target.function.arguments =
-        (target.function.arguments || "") +
+        (
+          target.function.arguments ||
+          ""
+        ) +
         toolCall.function.arguments;
     }
   }
 
-  for (const key of Object.keys(toolCall)) {
+  for (
+    const key of Object.keys(toolCall)
+  ) {
     if (
       key !== "index" &&
       key !== "id" &&
       key !== "type" &&
       key !== "function"
     ) {
-      target[key] = toolCall[key];
+      target[key] =
+        toolCall[key];
     }
   }
 }
@@ -1245,29 +1646,40 @@ function addKimiSSEToAccumulator(
   accumulator,
   event
 ) {
-  if (!event || !event.trim()) {
+  if (
+    !event ||
+    !event.trim()
+  ) {
     return;
   }
 
   const lines =
     event.split(/\r?\n/);
 
-  for (const line of lines) {
-    if (!line.startsWith("data:")) {
+  for (
+    const line of lines
+  ) {
+    if (
+      !line.startsWith("data:")
+    ) {
       continue;
     }
 
     const data =
       line.slice(5).trim();
 
-    if (!data || data === "[DONE]") {
+    if (
+      !data ||
+      data === "[DONE]"
+    ) {
       continue;
     }
 
     let parsed;
 
     try {
-      parsed = JSON.parse(data);
+      parsed =
+        JSON.parse(data);
     } catch {
       continue;
     }
@@ -1284,7 +1696,10 @@ function addKimiSSEToAccumulator(
         delta.role;
     }
 
-    if (typeof delta.content === "string") {
+    if (
+      typeof delta.content ===
+      "string"
+    ) {
       accumulator.contentParts.push(
         delta.content
       );
@@ -1299,14 +1714,24 @@ function addKimiSSEToAccumulator(
       );
     }
 
-    if (typeof delta.reasoning === "string") {
+    if (
+      typeof delta.reasoning ===
+      "string"
+    ) {
       accumulator.reasoningParts.push(
         delta.reasoning
       );
     }
 
-    if (Array.isArray(delta.tool_calls)) {
-      for (const toolCall of delta.tool_calls) {
+    if (
+      Array.isArray(
+        delta.tool_calls
+      )
+    ) {
+      for (
+        const toolCall of
+          delta.tool_calls
+      ) {
         mergeKimiToolCallDelta(
           accumulator,
           toolCall
@@ -1314,8 +1739,12 @@ function addKimiSSEToAccumulator(
       }
     }
 
-    if (delta.function_call) {
-      if (!accumulator.functionCall) {
+    if (
+      delta.function_call
+    ) {
+      if (
+        !accumulator.functionCall
+      ) {
         accumulator.functionCall = {};
       }
 
@@ -1333,14 +1762,16 @@ function addKimiSSEToAccumulator(
       ) {
         accumulator.functionCall.arguments =
           (
-            accumulator.functionCall.arguments ||
-            ""
+            accumulator.functionCall
+              .arguments || ""
           ) +
           delta.function_call.arguments;
       }
     }
 
-    if (delta.name !== undefined) {
+    if (
+      delta.name !== undefined
+    ) {
       accumulator.name =
         delta.name;
     }
@@ -1352,7 +1783,9 @@ function finalizeKimiStreamAccumulator(
 ) {
   const message = {
     role:
-      accumulator.role || "assistant",
+      accumulator.role ||
+      "assistant",
+
     content:
       accumulator.contentParts.join("")
   };
@@ -1368,7 +1801,8 @@ function finalizeKimiStreamAccumulator(
   const toolCalls =
     accumulator.toolCalls.filter(
       toolCall =>
-        Object.keys(toolCall).length > 0
+        Object.keys(toolCall)
+          .length > 0
     );
 
   if (toolCalls.length) {
@@ -1381,7 +1815,10 @@ function finalizeKimiStreamAccumulator(
       accumulator.functionCall;
   }
 
-  if (accumulator.name !== undefined) {
+  if (
+    accumulator.name !==
+    undefined
+  ) {
     message.name =
       accumulator.name;
   }
@@ -1389,13 +1826,27 @@ function finalizeKimiStreamAccumulator(
   return message;
 }
 
-
 /* ============================================================
    NVIDIA MODEL CACHE
-   ============================================================ */
+============================================================ */
 
-async function fetchNimModels(forceRefresh) {
-  const refresh = forceRefresh === true;
+const MODEL_CACHE_TTL =
+  Number.isFinite(
+    Number(
+      process.env.MODEL_CACHE_TTL_MS
+    )
+  )
+    ? Number(
+        process.env.MODEL_CACHE_TTL_MS
+      )
+    : 300000;
+
+async function fetchNimModels(
+  forceRefresh = false
+) {
+  const refresh =
+    forceRefresh === true;
+
   const now = Date.now();
 
   if (
@@ -1407,7 +1858,13 @@ async function fetchNimModels(forceRefresh) {
     return modelCache;
   }
 
-  if (modelCachePromise && !refresh) {
+  /*
+   * Prevent multiple simultaneous refreshes.
+   */
+  if (
+    modelCachePromise &&
+    !refresh
+  ) {
     return modelCachePromise;
   }
 
@@ -1415,18 +1872,23 @@ async function fetchNimModels(forceRefresh) {
     (async () => {
       try {
         if (!NIM_API_KEY) {
-          return Array.isArray(modelCache)
+          return Array.isArray(
+            modelCache
+          )
             ? modelCache
             : [];
         }
 
         const response =
           await axios.get(
-            NIM_API_BASE + "/models",
+            NIM_API_BASE +
+              "/models",
             {
               headers: {
                 Authorization:
-                  "Bearer " + NIM_API_KEY,
+                  "Bearer " +
+                  NIM_API_KEY,
+
                 Accept:
                   "application/json"
               },
@@ -1461,30 +1923,35 @@ async function fetchNimModels(forceRefresh) {
           return modelCache;
         }
 
-        return Array.isArray(modelCache)
+        return Array.isArray(
+          modelCache
+        )
           ? modelCache
           : [];
       } catch (error) {
         console.warn(
           "Unable to refresh NVIDIA model list:",
-          error?.message || error
+          error?.message ||
+            error
         );
 
-        return Array.isArray(modelCache)
+        return Array.isArray(
+          modelCache
+        )
           ? modelCache
           : [];
       } finally {
-        modelCachePromise = null;
+        modelCachePromise =
+          null;
       }
     })();
 
   return modelCachePromise;
 }
 
-
 /* ============================================================
    MESSAGE NORMALIZATION
-   ============================================================ */
+============================================================ */
 
 function normalizeMessages(messages) {
   if (!Array.isArray(messages)) {
@@ -1493,41 +1960,53 @@ function normalizeMessages(messages) {
 
   const result = [];
 
-  for (const message of messages) {
-    if (!isPlainObject(message)) {
+  for (
+    const message of messages
+  ) {
+    if (
+      !isPlainObject(message)
+    ) {
       continue;
     }
 
     if (
-      typeof message.role !== "string" ||
+      typeof message.role !==
+        "string" ||
       !message.role.trim()
     ) {
       continue;
     }
 
     if (
-      (message.content === undefined ||
-        message.content === null) &&
-      !Array.isArray(message.tool_calls) &&
-      message.reasoning_content === undefined &&
-      message.reasoning === undefined
+      (
+        message.content ===
+          undefined ||
+        message.content === null
+      ) &&
+      !Array.isArray(
+        message.tool_calls
+      ) &&
+      message.reasoning_content ===
+        undefined &&
+      message.reasoning ===
+        undefined
     ) {
       continue;
     }
 
     result.push({
       ...message,
-      role: message.role.trim()
+      role:
+        message.role.trim()
     });
   }
 
   return result;
 }
 
-
 /* ============================================================
    BUILD NVIDIA REQUEST
-   ============================================================ */
+============================================================ */
 
 function buildNimRequest(
   incoming,
@@ -1548,19 +2027,30 @@ function buildNimRequest(
   const request = {
     model,
     messages,
+
     temperature:
-      clampTemperature(incoming.temperature),
+      clampTemperature(
+        incoming.temperature
+      ),
+
     top_p:
-      clampTopP(incoming.top_p),
+      clampTopP(
+        incoming.top_p
+      ),
+
     max_tokens:
       clampMaxTokens(
         incoming.max_tokens,
         modelConfig
       ),
+
     stream
   };
 
-  if (incoming.repetition_penalty !== undefined) {
+  if (
+    incoming.repetition_penalty !==
+    undefined
+  ) {
     request.repetition_penalty =
       numberOrDefault(
         incoming.repetition_penalty,
@@ -1568,7 +2058,10 @@ function buildNimRequest(
       );
   }
 
-  if (incoming.frequency_penalty !== undefined) {
+  if (
+    incoming.frequency_penalty !==
+    undefined
+  ) {
     request.frequency_penalty =
       numberOrDefault(
         incoming.frequency_penalty,
@@ -1576,7 +2069,10 @@ function buildNimRequest(
       );
   }
 
-  if (incoming.presence_penalty !== undefined) {
+  if (
+    incoming.presence_penalty !==
+    undefined
+  ) {
     request.presence_penalty =
       numberOrDefault(
         incoming.presence_penalty,
@@ -1604,8 +2100,14 @@ function buildNimRequest(
     "audio"
   ];
 
-  for (const parameter of optionalParameters) {
-    if (incoming[parameter] !== undefined) {
+  for (
+    const parameter of
+      optionalParameters
+  ) {
+    if (
+      incoming[parameter] !==
+      undefined
+    ) {
       request[parameter] =
         incoming[parameter];
     }
@@ -1621,25 +2123,40 @@ function buildNimRequest(
     };
   }
 
-  if (isPlainObject(incoming.extra_body)) {
+  if (
+    isPlainObject(
+      incoming.extra_body
+    )
+  ) {
     Object.assign(
       request,
       incoming.extra_body
     );
   }
 
+  /*
+   * Unknown models preserve the incoming
+   * reasoning parameters.
+   */
   if (!modelConfig) {
-    if (incoming.reasoning_effort !== undefined) {
+    if (
+      incoming.reasoning_effort !==
+      undefined
+    ) {
       request.reasoning_effort =
         incoming.reasoning_effort;
     } else if (
-      incoming.reasoning_mode !== undefined
+      incoming.reasoning_mode !==
+      undefined
     ) {
       request.reasoning_effort =
         incoming.reasoning_mode;
     }
 
-    if (incoming.reasoning_budget !== undefined) {
+    if (
+      incoming.reasoning_budget !==
+      undefined
+    ) {
       request.reasoning_budget =
         clampReasoningBudget(
           incoming.reasoning_budget
@@ -1650,26 +2167,31 @@ function buildNimRequest(
   }
 
   switch (model) {
-    case "deepseek-ai/deepseek-v4-flash-0731":
+    case "deepseek-ai/deepseek-v4-flash-0731": {
       request.reasoning_effort =
         reasoningEffort;
 
       request.chat_template_kwargs = {
-        ...(request.chat_template_kwargs || {}),
+        ...(request.chat_template_kwargs ||
+          {}),
+
         thinking:
           reasoningEffort !== "none",
+
         reasoning_effort:
           reasoningEffort
       };
 
       break;
+    }
 
     case "deepseek-ai/deepseek-v4-pro-0813":
-    case "moonshotai/kimi-k3":
+    case "moonshotai/kimi-k3": {
       request.reasoning_effort =
         reasoningEffort;
 
       break;
+    }
 
     case "nvidia/nemotron-3-ultra-550b-a55b": {
       const reasoning =
@@ -1682,34 +2204,45 @@ function buildNimRequest(
         reasoning;
 
       request.chat_template_kwargs = {
-        ...(request.chat_template_kwargs || {}),
+        ...(request.chat_template_kwargs ||
+          {}),
+
         enable_thinking:
           reasoning !== "none"
       };
 
-      if (reasoning === "medium") {
-        request.chat_template_kwargs.medium_effort =
-          true;
+      if (
+        reasoning === "medium"
+      ) {
+        request.chat_template_kwargs
+          .medium_effort = true;
       } else {
         delete request
           .chat_template_kwargs
           .medium_effort;
       }
 
-      if (reasoning !== "none") {
+      if (
+        reasoning !== "none"
+      ) {
         request.reasoning_budget =
           clampReasoningBudget(
             incoming.reasoning_budget !==
               undefined
               ? incoming.reasoning_budget
-              : MODEL_REASONING_BUDGETS[model]
+              : MODEL_REASONING_BUDGETS[
+                  model
+                ]
           );
       } else {
-        delete request.reasoning_budget;
+        delete request
+          .reasoning_budget;
       }
 
       if (
-        Array.isArray(request.tools) &&
+        Array.isArray(
+          request.tools
+        ) &&
         request.tools.length > 0 &&
         reasoning !== "none"
       ) {
@@ -1727,48 +2260,69 @@ function buildNimRequest(
   return request;
 }
 
-
 /* ============================================================
    RESPONSE REASONING REMOVAL
-   ============================================================ */
+============================================================ */
 
 function stripReasoning(parsed) {
   if (
     !parsed ||
-    typeof parsed !== "object" ||
-    !Array.isArray(parsed.choices)
+    typeof parsed !==
+      "object" ||
+    !Array.isArray(
+      parsed.choices
+    )
   ) {
     return parsed;
   }
 
-  for (const choice of parsed.choices) {
-    if (!choice || typeof choice !== "object") {
+  for (
+    const choice of
+      parsed.choices
+  ) {
+    if (
+      !choice ||
+      typeof choice !==
+        "object"
+    ) {
       continue;
     }
 
     if (choice.delta) {
-      delete choice.delta.reasoning_content;
-      delete choice.delta.reasoning;
-      delete choice.delta.thinking;
+      delete choice.delta
+        .reasoning_content;
+
+      delete choice.delta
+        .reasoning;
+
+      delete choice.delta
+        .thinking;
     }
 
     if (choice.message) {
-      delete choice.message.reasoning_content;
-      delete choice.message.reasoning;
-      delete choice.message.thinking;
+      delete choice.message
+        .reasoning_content;
+
+      delete choice.message
+        .reasoning;
+
+      delete choice.message
+        .thinking;
     }
   }
 
   return parsed;
 }
 
-
 /* ============================================================
-   SSE
-   ============================================================ */
+   SSE PROCESSING
+============================================================ */
 
 function processSSEEvent(event) {
-  if (!event || !event.trim()) {
+  if (
+    !event ||
+    !event.trim()
+  ) {
     return "";
   }
 
@@ -1777,8 +2331,12 @@ function processSSEEvent(event) {
 
   const output = [];
 
-  for (const line of lines) {
-    if (!line.startsWith("data:")) {
+  for (
+    const line of lines
+  ) {
+    if (
+      !line.startsWith("data:")
+    ) {
       output.push(line);
       continue;
     }
@@ -1792,7 +2350,10 @@ function processSSEEvent(event) {
     }
 
     if (data === "[DONE]") {
-      output.push("data: [DONE]");
+      output.push(
+        "data: [DONE]"
+      );
+
       continue;
     }
 
@@ -1807,19 +2368,23 @@ function processSSEEvent(event) {
         JSON.stringify(parsed)
       );
     } catch {
+      /*
+       * Preserve malformed/non-JSON SSE
+       * instead of destroying the stream.
+       */
       output.push(line);
     }
   }
 
   return output.length
-    ? output.join("\n") + "\n\n"
+    ? output.join("\n") +
+        "\n\n"
     : "";
 }
 
-
 /* ============================================================
    ERROR HANDLING
-   ============================================================ */
+============================================================ */
 
 function readStream(stream) {
   return new Promise(resolve => {
@@ -1835,41 +2400,62 @@ function readStream(stream) {
       resolve(output);
     }
 
-    stream.on("data", chunk => {
-      if (
-        output.length >=
-        MAX_ERROR_BODY_SIZE
-      ) {
-        return;
-      }
+    stream.on(
+      "data",
+      chunk => {
+        if (
+          output.length >=
+          MAX_ERROR_BODY_SIZE
+        ) {
+          return;
+        }
 
-      output +=
-        chunk.toString("utf8");
-
-      if (
-        output.length >
-        MAX_ERROR_BODY_SIZE
-      ) {
-        output =
-          output.slice(
-            0,
-            MAX_ERROR_BODY_SIZE
+        output +=
+          chunk.toString(
+            "utf8"
           );
-      }
-    });
 
-    stream.on("end", finish);
-    stream.on("close", finish);
-    stream.on("error", finish);
+        if (
+          output.length >
+          MAX_ERROR_BODY_SIZE
+        ) {
+          output =
+            output.slice(
+              0,
+              MAX_ERROR_BODY_SIZE
+            );
+        }
+      }
+    );
+
+    stream.on(
+      "end",
+      finish
+    );
+
+    stream.on(
+      "close",
+      finish
+    );
+
+    stream.on(
+      "error",
+      finish
+    );
   });
 }
 
-function extractErrorMessage(data) {
+function extractErrorMessage(
+  data
+) {
   if (!data) {
     return null;
   }
 
-  if (typeof data === "object") {
+  if (
+    typeof data ===
+    "object"
+  ) {
     return (
       data.error?.message ||
       data.message ||
@@ -1924,12 +2510,13 @@ function sendError(
     .json(response);
 }
 
-
 /* ============================================================
    EXPRESS
-   ============================================================ */
+============================================================ */
 
-app.disable("x-powered-by");
+app.disable(
+  "x-powered-by"
+);
 
 app.use(cors());
 
@@ -1939,78 +2526,102 @@ app.use(
   })
 );
 
-
 /* ============================================================
    ROOT
-   ============================================================ */
+============================================================ */
 
-app.get("/", function (req, res) {
-  res.json({
-    status: "online",
-    service:
-      "JanitorAI -> NVIDIA NIM Proxy",
-    default_model:
-      DEFAULT_MODEL,
-    explicitly_configured_models:
-      Object.keys(MODELS),
-    upstream_model_count:
-      Array.isArray(modelCache)
-        ? modelCache.length
-        : 0,
-    unknown_models_allowed:
-      ALLOW_UNKNOWN_MODELS,
-    default_reasoning_effort:
-      DEFAULT_REASONING_EFFORT,
-    default_reasoning_budget:
-      DEFAULT_REASONING_BUDGET,
-    nim_api_base:
-      NIM_API_BASE,
-    timeout_ms:
-      NIM_TIMEOUT,
-    kimi_memory:
-      KIMI_MEMORY_ENABLED,
-    kimi_context_budget:
-      KIMI_CONTEXT_BUDGET,
-    kimi_active_conversations:
-      kimiConversationStore.size
-  });
-});
+app.get(
+  "/",
+  function (req, res) {
+    res.json({
+      status: "online",
 
+      service:
+        "JanitorAI -> NVIDIA NIM Proxy",
+
+      default_model:
+        DEFAULT_MODEL,
+
+      explicitly_configured_models:
+        Object.keys(MODELS),
+
+      upstream_model_count:
+        Array.isArray(modelCache)
+          ? modelCache.length
+          : 0,
+
+      unknown_models_allowed:
+        ALLOW_UNKNOWN_MODELS,
+
+      default_reasoning_effort:
+        DEFAULT_REASONING_EFFORT,
+
+      default_reasoning_budget:
+        DEFAULT_REASONING_BUDGET,
+
+      nim_api_base:
+        NIM_API_BASE,
+
+      timeout_ms:
+        NIM_TIMEOUT,
+
+      kimi_memory:
+        KIMI_MEMORY_ENABLED,
+
+      kimi_context_budget:
+        KIMI_CONTEXT_BUDGET,
+
+      kimi_active_conversations:
+        kimiConversationStore.size
+    });
+  }
+);
 
 /* ============================================================
    HEALTH
-   ============================================================ */
+============================================================ */
 
-app.get("/health", function (req, res) {
-  res.json({
-    ok: true,
-    model:
-      DEFAULT_MODEL,
-    explicitly_configured_models:
-      Object.keys(MODELS),
-    upstream_model_count:
-      Array.isArray(modelCache)
-        ? modelCache.length
-        : 0,
-    unknown_models_allowed:
-      ALLOW_UNKNOWN_MODELS,
-    reasoning:
-      DEFAULT_REASONING_EFFORT,
-    max_tokens:
-      DEFAULT_MAX_TOKENS,
-    kimi_memory:
-      KIMI_MEMORY_ENABLED,
-    kimi_context_budget:
-      KIMI_CONTEXT_BUDGET,
-    kimi_active_conversations:
-      kimiConversationStore.size
-  });
-});
+app.get(
+  "/health",
+  function (req, res) {
+    res.json({
+      ok: true,
 
+      model:
+        DEFAULT_MODEL,
+
+      explicitly_configured_models:
+        Object.keys(MODELS),
+
+      upstream_model_count:
+        Array.isArray(modelCache)
+          ? modelCache.length
+          : 0,
+
+      unknown_models_allowed:
+        ALLOW_UNKNOWN_MODELS,
+
+      reasoning:
+        DEFAULT_REASONING_EFFORT,
+
+      max_tokens:
+        DEFAULT_MAX_TOKENS,
+
+      kimi_memory:
+        KIMI_MEMORY_ENABLED,
+
+      kimi_context_budget:
+        KIMI_CONTEXT_BUDGET,
+
+      kimi_active_conversations:
+        kimiConversationStore.size
+    });
+  }
+);
 
 /* ============================================================
    NVIDIA MODEL LIST
-   ============================================================ */
+============================================================ */
 
 app.get(
   "/v1/models",
@@ -2019,7 +2630,9 @@ app.get(
       const upstreamModels =
         await fetchNimModels();
 
-      if (upstreamModels.length > 0) {
+      if (
+        upstreamModels.length > 0
+      ) {
         return res.json({
           object: "list",
           data: upstreamModels
@@ -2027,18 +2640,24 @@ app.get(
       }
 
       const models =
-        Object.entries(MODELS).map(
+        Object.entries(
+          MODELS
+        ).map(
           ([id, config]) => ({
             id,
             object: "model",
+
             created:
               Math.floor(
                 Date.now() / 1000
               ),
+
             owned_by:
               config.provider,
+
             reasoning_levels:
               config.reasoningLevels,
+
             max_output_tokens:
               config.maxOutputTokens
           })
@@ -2060,17 +2679,18 @@ app.get(
   }
 );
 
-
 /* ============================================================
    FORCE MODEL CACHE REFRESH
-   ============================================================ */
+============================================================ */
 
 app.post(
   "/v1/models/refresh",
   async function (req, res) {
     try {
       const models =
-        await fetchNimModels(true);
+        await fetchNimModels(
+          true
+        );
 
       return res.json({
         object: "list",
@@ -2089,16 +2709,18 @@ app.post(
   }
 );
 
-
 /* ============================================================
    CHAT COMPLETIONS
-   ============================================================ */
+============================================================ */
 
 app.post(
   "/v1/chat/completions",
   async function (req, res) {
-    let kimiConversationId = null;
-    let kimiStreamAccumulator = null;
+    let kimiConversationId =
+      null;
+
+    let kimiStreamAccumulator =
+      null;
 
     try {
       if (!NIM_API_KEY) {
@@ -2115,7 +2737,8 @@ app.post(
           : {};
 
       const requestedModel =
-        typeof incoming.model === "string" &&
+        typeof incoming.model ===
+          "string" &&
         incoming.model.trim()
           ? incoming.model.trim()
           : DEFAULT_MODEL;
@@ -2129,11 +2752,14 @@ app.post(
       const modelConfig =
         getModelConfig(model);
 
-      if (!isSupportedModel(model)) {
+      if (
+        !isSupportedModel(model)
+      ) {
         return sendError(
           res,
           400,
-          "Unsupported model: " + model,
+          "Unsupported model: " +
+            model,
           {
             explicitly_configured_models:
               Object.keys(MODELS)
@@ -2146,13 +2772,19 @@ app.post(
           incoming.messages
         );
 
-      if (!messages.length) {
+      if (
+        !messages.length
+      ) {
         return sendError(
           res,
           400,
           "No valid messages were supplied."
         );
       }
+
+      /* ======================================================
+         KIMI MEMORY
+      ====================================================== */
 
       if (
         normalizedModel ===
@@ -2176,13 +2808,19 @@ app.post(
           console.log(
             "KIMI MEMORY:",
             kimiConversationId,
+            "messages:",
             messages.length,
+            "estimated tokens:",
             estimateKimiMessagesTokens(
               messages
             )
           );
         }
       }
+
+      /* ======================================================
+         STREAM
+      ====================================================== */
 
       const stream =
         parseBoolean(
@@ -2201,16 +2839,25 @@ app.post(
       if (DEBUG_PROXY) {
         console.log(
           "NIM REQUEST:",
-          JSON.stringify(nimRequest)
+          JSON.stringify(
+            nimRequest
+          )
         );
       }
+
+      /* ======================================================
+         NVIDIA REQUEST
+      ====================================================== */
 
       const axiosConfig = {
         headers: {
           Authorization:
-            "Bearer " + NIM_API_KEY,
+            "Bearer " +
+            NIM_API_KEY,
+
           "Content-Type":
             "application/json",
+
           Accept:
             stream
               ? "text/event-stream"
@@ -2231,7 +2878,9 @@ app.post(
         await axios.post(
           NIM_API_BASE +
             "/chat/completions",
+
           nimRequest,
+
           stream
             ? {
                 ...axiosConfig,
@@ -2240,6 +2889,10 @@ app.post(
               }
             : axiosConfig
         );
+
+      /* ======================================================
+         UPSTREAM ERROR
+      ====================================================== */
 
       if (
         response.status < 200 ||
@@ -2271,7 +2924,9 @@ app.post(
               );
           } catch {
             errorBody =
-              String(response.data);
+              String(
+                response.data
+              );
           }
         }
 
@@ -2284,17 +2939,22 @@ app.post(
           "NVIDIA NIM ERROR",
           normalizedModel,
           response.status,
-          upstreamMessage,
-          errorBody
+          upstreamMessage
         );
 
+        /*
+         * Refresh model cache asynchronously.
+         * Don't make the user wait for it.
+         */
         if (
-          response.status === 400 ||
-          response.status === 404
+          response.status ===
+            400 ||
+          response.status ===
+            404
         ) {
-          fetchNimModels(true).catch(
-            () => {}
-          );
+          fetchNimModels(
+            true
+          ).catch(() => {});
         }
 
         const proxyStatus =
@@ -2312,11 +2972,16 @@ app.post(
           {
             upstream_status:
               response.status,
+
             upstream_body:
               errorBody
           }
         );
       }
+
+      /* ======================================================
+         NON-STREAMING RESPONSE
+      ====================================================== */
 
       if (!stream) {
         if (
@@ -2330,7 +2995,9 @@ app.post(
               response.data
             );
 
-          if (assistantMessage) {
+          if (
+            assistantMessage
+          ) {
             appendKimiAssistantMessage(
               kimiConversationId,
               assistantMessage
@@ -2346,6 +3013,10 @@ app.post(
             )
           );
       }
+
+      /* ======================================================
+         STREAMING RESPONSE
+      ====================================================== */
 
       res.status(200);
 
@@ -2403,7 +3074,8 @@ app.post(
 
       let buffer = "";
       let ended = false;
-      let clientDisconnected = false;
+      let clientDisconnected =
+        false;
 
       function destroyUpstream() {
         try {
@@ -2411,17 +3083,34 @@ app.post(
         } catch {}
       }
 
-      req.on("aborted", function () {
-        clientDisconnected = true;
-        destroyUpstream();
-      });
-
-      res.on("close", function () {
-        if (!res.writableEnded) {
-          clientDisconnected = true;
-          destroyUpstream();
+      function disconnect() {
+        if (
+          clientDisconnected
+        ) {
+          return;
         }
-      });
+
+        clientDisconnected =
+          true;
+
+        destroyUpstream();
+      }
+
+      req.on(
+        "aborted",
+        disconnect
+      );
+
+      res.on(
+        "close",
+        function () {
+          if (
+            !res.writableEnded
+          ) {
+            disconnect();
+          }
+        }
+      );
 
       upstream.on(
         "data",
@@ -2434,15 +3123,19 @@ app.post(
           }
 
           buffer +=
-            chunk.toString("utf8");
+            chunk.toString(
+              "utf8"
+            );
 
           let separatorIndex;
 
           while (
-            (separatorIndex =
-              buffer.search(
-                /\r?\n\r?\n/
-              )) !== -1
+            (
+              separatorIndex =
+                buffer.search(
+                  /\r?\n\r?\n/
+                )
+            ) !== -1
           ) {
             const event =
               buffer.slice(
@@ -2450,6 +3143,10 @@ app.post(
                 separatorIndex
               );
 
+            /*
+             * Determine whether separator
+             * was \n\n or \r\n\r\n.
+             */
             const separatorLength =
               buffer[
                 separatorIndex
@@ -2463,6 +3160,10 @@ app.post(
                   separatorLength
               );
 
+            /*
+             * Accumulate Kimi before stripping
+             * reasoning from what the client sees.
+             */
             if (
               kimiStreamAccumulator
             ) {
@@ -2482,10 +3183,11 @@ app.post(
             }
 
             try {
-              res.write(output);
-            } catch (error) {
-              clientDisconnected = true;
-              destroyUpstream();
+              res.write(
+                output
+              );
+            } catch {
+              disconnect();
               break;
             }
           }
@@ -2501,6 +3203,9 @@ app.post(
 
           ended = true;
 
+          /*
+           * Process final partial event.
+           */
           if (
             buffer.trim() &&
             !clientDisconnected
@@ -2521,11 +3226,17 @@ app.post(
 
             if (output) {
               try {
-                res.write(output);
+                res.write(
+                  output
+                );
               } catch {}
             }
           }
 
+          /*
+           * Save complete Kimi assistant
+           * response after stream completion.
+           */
           if (
             kimiStreamAccumulator &&
             kimiConversationId &&
@@ -2539,7 +3250,9 @@ app.post(
             );
           }
 
-          if (!clientDisconnected) {
+          if (
+            !clientDisconnected
+          ) {
             try {
               res.end();
             } catch {}
@@ -2558,15 +3271,19 @@ app.post(
 
           console.error(
             "NVIDIA stream error:",
-            error.message
+            error?.message ||
+              error
           );
 
-          if (!res.headersSent) {
+          if (
+            !res.headersSent
+          ) {
             return sendError(
               res,
               502,
               "NVIDIA streaming connection failed.",
-              error.message
+              error?.message ||
+                String(error)
             );
           }
 
@@ -2583,7 +3300,9 @@ app.post(
           error
       );
 
-      if (res.headersSent) {
+      if (
+        res.headersSent
+      ) {
         try {
           res.end();
         } catch {}
@@ -2629,23 +3348,23 @@ app.post(
   }
 );
 
-
 /* ============================================================
    404
-   ============================================================ */
+============================================================ */
 
-app.use(function (req, res) {
-  return sendError(
-    res,
-    404,
-    "Endpoint not found."
-  );
-});
-
+app.use(
+  function (req, res) {
+    return sendError(
+      res,
+      404,
+      "Endpoint not found."
+    );
+  }
+);
 
 /* ============================================================
    EXPRESS ERROR HANDLER
-   ============================================================ */
+============================================================ */
 
 app.use(
   function (
@@ -2661,7 +3380,9 @@ app.use(
         error
     );
 
-    if (res.headersSent) {
+    if (
+      res.headersSent
+    ) {
       return next(error);
     }
 
@@ -2669,15 +3390,15 @@ app.use(
       res,
       500,
       "Internal proxy error.",
-      error?.message || null
+      error?.message ||
+        null
     );
   }
 );
 
-
 /* ============================================================
    START SERVER
-   ============================================================ */
+============================================================ */
 
 const server =
   app.listen(
@@ -2715,18 +3436,19 @@ const server =
         .catch(error => {
           console.warn(
             "Initial NVIDIA model discovery failed:",
-            error?.message || error
+            error?.message ||
+              error
           );
         });
     }
   );
 
-
 /* ============================================================
    LONG-RUNNING AI REQUEST SETTINGS
-   ============================================================ */
+============================================================ */
 
 server.timeout = 0;
+
 server.requestTimeout = 0;
 
 server.keepAliveTimeout =
@@ -2747,10 +3469,9 @@ server.headersTimeout =
     )
   );
 
-
 /* ============================================================
-   SHUTDOWN
-   ============================================================ */
+   GRACEFUL SHUTDOWN
+============================================================ */
 
 function shutdown(signal) {
   console.log(
@@ -2758,10 +3479,15 @@ function shutdown(signal) {
       " received. Shutting down..."
   );
 
-  server.close(function () {
-    console.log("Server closed.");
-    process.exit(0);
-  });
+  server.close(
+    function () {
+      console.log(
+        "Server closed."
+      );
+
+      process.exit(0);
+    }
+  );
 
   setTimeout(
     function () {
@@ -2775,10 +3501,12 @@ function shutdown(signal) {
   ).unref();
 }
 
-process.on("SIGTERM", () =>
-  shutdown("SIGTERM")
+process.on(
+  "SIGTERM",
+  () => shutdown("SIGTERM")
 );
 
-process.on("SIGINT", () =>
-  shutdown("SIGINT")
+process.on(
+  "SIGINT",
+  () => shutdown("SIGINT")
 );
