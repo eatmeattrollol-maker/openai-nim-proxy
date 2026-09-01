@@ -3415,10 +3415,10 @@ const server =
         DEFAULT_MODEL
       );
 
-      console.log(
+     /* console.log(
         "Kimi memory:",
         KIMI_MEMORY_ENABLED
-      );
+      ); */
 
       console.log(
         "NIM endpoint:",
