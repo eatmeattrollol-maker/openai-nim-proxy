@@ -75,7 +75,7 @@ const DEFAULT_REASONING_BUDGET =
 const MODEL_REASONING_BUDGETS = {
   "deepseek-ai/deepseek-v4-flash-0731": 16384,
   "deepseek-ai/deepseek-v4-pro-0813": 24576,
-  "moonshotai/kimi-k3": 32768,
+  "moonshotai/kimi-k3": 16384,
   "nvidia/nemotron-3-ultra-550b-a55b": 16384
 };
 
