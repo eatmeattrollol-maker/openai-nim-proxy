@@ -165,7 +165,7 @@ const DEBUG_PROXY =
    KIMI MEMORY CONFIGURATION
 ============================================================ */
 
-const KIMI_MEMORY_ENABLED =
+/*const KIMI_MEMORY_ENABLED =
   String(process.env.KIMI_MEMORY_ENABLED || "true")
     .trim()
     .toLowerCase() === "true";
@@ -221,14 +221,14 @@ const KIMI_MAX_CONVERSATIONS =
  *   firstUserFingerprint
  * }
  */
-const kimiConversationStore = new Map();
+/*const kimiConversationStore = new Map();
 
 /*
  * Fast indexes used to avoid scanning every conversation.
  *
  * fingerprint -> Set(conversationId)
  */
-const kimiFirstUserIndex = new Map();
+/*const kimiFirstUserIndex = new Map();
 const kimiSystemIndex = new Map();
 
 let modelCache = null;
