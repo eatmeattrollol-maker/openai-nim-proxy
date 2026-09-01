@@ -23,7 +23,7 @@ const NIM_API_KEY =
 
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
-  "deepseek-ai/deepseek-v4-flash-0731";
+  "moonshotai/kimi-k3";
 
 /* ============================================================
    MODEL CONFIGURATION
