@@ -28,7 +28,7 @@ const MODELS = {
     name: "DeepSeek V4 Flash 0731",
     provider: "DeepSeek AI",
     reasoningLevels: ["none", "low", "high", "max"],
-    defaultReasoningEffort: "max",
+    defaultReasoningEffort: "low",
     maxOutputTokens: 22768
   },
 
