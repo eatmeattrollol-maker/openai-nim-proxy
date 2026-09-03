@@ -57,9 +57,9 @@ const MODELS = {
   "nvidia/nemotron-3-ultra-550b-a55b": {
     name: "NVIDIA Nemotron 3 Ultra 550B",
     provider: "NVIDIA",
-    reasoningLevels: ["none", "medium", "high"],
+    reasoningLevels: ["none", "high"],
     defaultReasoningEffort: "high",
-    maxOutputTokens: 8192
+    maxOutputTokens: 16384
   }
 };
 
@@ -2194,67 +2194,52 @@ function buildNimRequest(
     }
 
     case "nvidia/nemotron-3-ultra-550b-a55b": {
-      const reasoning =
-        normalizeReasoningEffort(
-          reasoningEffort,
-          modelConfig
-        );
+  const enableThinking =
+    incoming.reasoning_effort !== undefined
+      ? !["none", "off", "false", "0"].includes(
+          String(incoming.reasoning_effort)
+            .trim()
+            .toLowerCase()
+        )
+      : incoming.reasoning_mode !== undefined
+        ? !["none", "off", "false", "0"].includes(
+            String(incoming.reasoning_mode)
+              .trim()
+              .toLowerCase()
+          )
+        : true;
 
-      request.reasoning_effort =
-        reasoning;
+  request.chat_template_kwargs = {
+    ...(request.chat_template_kwargs || {}),
+    enable_thinking: enableThinking
+  };
 
-      request.chat_template_kwargs = {
-        ...(request.chat_template_kwargs ||
-          {}),
+  if (enableThinking) {
+    request.reasoning_budget =
+      clampReasoningBudget(
+        incoming.reasoning_budget !== undefined
+          ? incoming.reasoning_budget
+          : MODEL_REASONING_BUDGETS[model]
+      );
+  } else {
+    delete request.reasoning_budget;
+  }
 
-        enable_thinking:
-          reasoning !== "none"
-      };
+  if (
+    Array.isArray(request.tools) &&
+    request.tools.length > 0 &&
+    enableThinking
+  ) {
+    request.chat_template_kwargs.force_nonempty_content = true;
+  }
 
-      if (
-        reasoning === "medium"
-      ) {
-        request.chat_template_kwargs
-          .medium_effort = true;
-      } else {
-        delete request
-          .chat_template_kwargs
-          .medium_effort;
-      }
+  // Nemotron 3 Ultra does not use top-level reasoning_effort.
+  delete request.reasoning_effort;
+  delete request.reasoning_mode;
+  delete request.nvext;
 
-      if (
-        reasoning !== "none"
-      ) {
-        request.reasoning_budget =
-          clampReasoningBudget(
-            incoming.reasoning_budget !==
-              undefined
-              ? incoming.reasoning_budget
-              : MODEL_REASONING_BUDGETS[
-                  model
-                ]
-          );
-      } else {
-        delete request
-          .reasoning_budget;
-      }
-
-      if (
-        Array.isArray(
-          request.tools
-        ) &&
-        request.tools.length > 0 &&
-        reasoning !== "none"
-      ) {
-        request.chat_template_kwargs
-          .force_nonempty_content = true;
-      }
-
-      delete request.nvext;
-      delete request.reasoning_mode;
-
-      break;
-    }
+  break;
+}
   }
 
   return request;
