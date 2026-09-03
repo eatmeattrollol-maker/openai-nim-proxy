@@ -35,7 +35,7 @@ const MODELS = {
     provider: "DeepSeek AI",
     reasoningLevels: ["none", "low", "high", "max"],
     defaultReasoningEffort: "max",
-    maxOutputTokens: 22768
+    maxOutputTokens: 8192
   },
 
   "deepseek-ai/deepseek-v4-pro-0813": {
@@ -43,7 +43,7 @@ const MODELS = {
     provider: "DeepSeek AI",
     reasoningLevels: ["none", "low", "high", "max"],
     defaultReasoningEffort: "max",
-    maxOutputTokens: 16384
+    maxOutputTokens: 8192
   },
 
   "moonshotai/kimi-k3": {
@@ -51,7 +51,7 @@ const MODELS = {
     provider: "Moonshot AI",
     reasoningLevels: ["low", "high", "max"],
     defaultReasoningEffort: "max",
-    maxOutputTokens: 1048576
+    maxOutputTokens: 8192
   },
 
   "nvidia/nemotron-3-ultra-550b-a55b": {
@@ -59,7 +59,7 @@ const MODELS = {
     provider: "NVIDIA",
     reasoningLevels: ["none", "medium", "high"],
     defaultReasoningEffort: "high",
-    maxOutputTokens: 32768
+    maxOutputTokens: 8192
   }
 };
 
@@ -91,7 +91,7 @@ const MODEL_REASONING_BUDGETS = {
 };
 
 const MODEL_REASONING_EFFORTS = {
-  "deepseek-ai/deepseek-v4-flash-0731": "low",
+  "deepseek-ai/deepseek-v4-flash-0731": "max",
   "deepseek-ai/deepseek-v4-pro-0813": "max",
   "moonshotai/kimi-k3": "max",
   "nvidia/nemotron-3-ultra-550b-a55b": "high"
@@ -165,7 +165,7 @@ const DEBUG_PROXY =
    KIMI MEMORY CONFIGURATION
 ============================================================ */
 
-/*const KIMI_MEMORY_ENABLED =
+const KIMI_MEMORY_ENABLED =
   String(process.env.KIMI_MEMORY_ENABLED || "true")
     .trim()
     .toLowerCase() === "true";
@@ -221,14 +221,14 @@ const KIMI_MAX_CONVERSATIONS =
  *   firstUserFingerprint
  * }
  */
-/*const kimiConversationStore = new Map();
+const kimiConversationStore = new Map();
 
 /*
  * Fast indexes used to avoid scanning every conversation.
  *
  * fingerprint -> Set(conversationId)
  */
-/*const kimiFirstUserIndex = new Map();
+const kimiFirstUserIndex = new Map();
 const kimiSystemIndex = new Map();
 
 let modelCache = null;
@@ -584,7 +584,7 @@ function hashKimiValue(value) {
  *
  * for the same message.
  */
-/* function kimiMessageSignature(message) {
+function kimiMessageSignature(message) {
   if (
     message &&
     typeof message === "object" &&
@@ -716,7 +716,7 @@ function getKimiStableFingerprint(messages) {
    KIMI INDEX MANAGEMENT
 ============================================================ */
 
-/* function addToIndex(
+function addToIndex(
   index,
   fingerprint,
   conversationId
@@ -830,7 +830,7 @@ function touchKimiConversation(
   /*
    * Map insertion order is used as a cheap LRU.
    */
- /* kimiConversationStore.delete(
+  kimiConversationStore.delete(
     conversationId
   );
 
@@ -844,7 +844,7 @@ function touchKimiConversation(
    KIMI MEMORY CLEANUP
 ============================================================ */
 
-/* function cleanupKimiMemory() {
+function cleanupKimiMemory() {
   const cutoff =
     Date.now() -
     KIMI_MEMORY_TTL_MS;
@@ -877,7 +877,7 @@ setInterval(
    CREATE CONVERSATION
 ============================================================ */
 
-/* function createKimiConversation(
+function createKimiConversation(
   conversationId,
   messages
 ) {
@@ -908,7 +908,7 @@ setInterval(
   /*
    * Cheap LRU eviction.
    */
-/*  while (
+  while (
     kimiConversationStore.size >
     KIMI_MAX_CONVERSATIONS
   ) {
@@ -936,7 +936,7 @@ setInterval(
    FAST HISTORY MATCHING
 ============================================================ */
 
-/* function findKimiConversationByHistory(
+function findKimiConversationByHistory(
   messages
 ) {
   if (
@@ -956,7 +956,7 @@ setInterval(
    * start with conversations having the same first
    * user message.
    */
-  /* let candidateIds = null;
+  let candidateIds = null;
 
   if (
     fingerprints.firstUserFingerprint
@@ -971,7 +971,7 @@ setInterval(
    * If there isn't a first-user match,
    * use the system fingerprint.
    */
- /* if (
+  if (
     !candidateIds &&
     fingerprints.systemFingerprint
   ) {
@@ -987,7 +987,7 @@ setInterval(
    * Preserve the old behavior as a fallback,
    * but this should be uncommon.
    */
- /* if (!candidateIds) {
+  if (!candidateIds) {
     return null;
   }
 
@@ -1083,7 +1083,7 @@ setInterval(
    GET OR CREATE KIMI CONVERSATION
 ============================================================ */
 
-/* function getOrCreateKimiConversation(
+function getOrCreateKimiConversation(
   req,
   incoming,
   messages
@@ -1172,7 +1172,7 @@ setInterval(
    MERGE KIMI MESSAGES
 ============================================================ */
 
-/* function mergeKimiMessages(
+function mergeKimiMessages(
   storedMessages,
   incomingMessages
 ) {
@@ -1210,7 +1210,7 @@ setInterval(
    FIT KIMI CONTEXT
 ============================================================ */
 
-/* function fitKimiContext(messages) {
+function fitKimiContext(messages) {
   if (
     !Array.isArray(messages) ||
     messages.length === 0
@@ -1251,7 +1251,7 @@ setInterval(
    * Walk backwards so the most recent
    * messages get priority.
    */
- /* for (
+  for (
     let index = normal.length - 1;
     index >= 0;
     index--
@@ -1286,7 +1286,7 @@ setInterval(
    UPDATE KIMI MEMORY
 ============================================================ */
 
-/* function updateKimiMemory(
+function updateKimiMemory(
   conversationId,
   incomingMessages
 ) {
@@ -1325,7 +1325,7 @@ setInterval(
   /*
    * Update indexes if fingerprints changed.
    */
- /* if (
+  if (
     memory.systemFingerprint !==
     fingerprints.systemFingerprint
   ) {
@@ -1410,7 +1410,7 @@ function buildKimiMemoryContext(
    KIMI ASSISTANT MEMORY
 ============================================================ */
 
-/* function appendKimiAssistantMessage(
+function appendKimiAssistantMessage(
   conversationId,
   assistantMessage
 ) {
@@ -1485,7 +1485,7 @@ function buildKimiMemoryContext(
    * Since signatures are cached,
    * this check is cheaper than the original.
    */
- /* for (
+  for (
     const message of memory.messages
   ) {
     if (
@@ -1548,7 +1548,7 @@ function extractKimiAssistantMessage(
    KIMI STREAM ACCUMULATOR
 ============================================================ */
 
-/* function createKimiStreamAccumulator() {
+function createKimiStreamAccumulator() {
   return {
     role: "assistant",
     contentParts: [],
@@ -2565,14 +2565,14 @@ app.get(
       timeout_ms:
         NIM_TIMEOUT,
 
-    /*  kimi_memory:
+      kimi_memory:
         KIMI_MEMORY_ENABLED,
 
       kimi_context_budget:
         KIMI_CONTEXT_BUDGET,
 
       kimi_active_conversations:
-        kimiConversationStore.size */
+        kimiConversationStore.size
     });
   }
 );
@@ -2607,14 +2607,14 @@ app.get(
       max_tokens:
         DEFAULT_MAX_TOKENS,
 
-      /* kimi_memory:
+      kimi_memory:
         KIMI_MEMORY_ENABLED,
 
       kimi_context_budget:
         KIMI_CONTEXT_BUDGET,
 
       kimi_active_conversations:
-        kimiConversationStore.size */
+        kimiConversationStore.size
     });
   }
 );
@@ -2715,7 +2715,7 @@ app.post(
 
 app.post(
   "/v1/chat/completions",
- /* async function (req, res) {
+  async function (req, res) {
     let kimiConversationId =
       null;
 
@@ -2729,7 +2729,7 @@ app.post(
           500,
           "NIM_API_KEY is not configured."
         );
-      } */
+      }
 
       const incoming =
         isPlainObject(req.body)
@@ -2786,7 +2786,7 @@ app.post(
          KIMI MEMORY
       ====================================================== */
 
-     /* if (
+      if (
         normalizedModel ===
           "moonshotai/kimi-k3" &&
         KIMI_MEMORY_ENABLED
@@ -2983,7 +2983,7 @@ app.post(
          NON-STREAMING RESPONSE
       ====================================================== */
 
-      /*if (!stream) {
+      if (!stream) {
         if (
           normalizedModel ===
             "moonshotai/kimi-k3" &&
@@ -3012,13 +3012,13 @@ app.post(
               response.data
             )
           );
-      } */
+      }
 
       /* ======================================================
          STREAMING RESPONSE
       ====================================================== */
 
-     /* res.status(200);
+      res.status(200);
 
       res.setHeader(
         "Content-Type",
@@ -3147,7 +3147,7 @@ app.post(
              * Determine whether separator
              * was \n\n or \r\n\r\n.
              */
-            /* const separatorLength =
+            const separatorLength =
               buffer[
                 separatorIndex
               ] === "\r"
@@ -3164,7 +3164,7 @@ app.post(
              * Accumulate Kimi before stripping
              * reasoning from what the client sees.
              */
-           /* if (
+            if (
               kimiStreamAccumulator
             ) {
               addKimiSSEToAccumulator(
@@ -3206,7 +3206,7 @@ app.post(
           /*
            * Process final partial event.
            */
-         /* if (
+          if (
             buffer.trim() &&
             !clientDisconnected
           ) {
@@ -3237,7 +3237,7 @@ app.post(
            * Save complete Kimi assistant
            * response after stream completion.
            */
-        /*  if (
+          if (
             kimiStreamAccumulator &&
             kimiConversationId &&
             KIMI_MEMORY_ENABLED
@@ -3415,10 +3415,10 @@ const server =
         DEFAULT_MODEL
       );
 
-     /* console.log(
+      console.log(
         "Kimi memory:",
         KIMI_MEMORY_ENABLED
-      ); */
+      );
 
       console.log(
         "NIM endpoint:",
