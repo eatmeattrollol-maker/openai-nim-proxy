@@ -3,13 +3,17 @@
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
-const crypto = require("crypto");
 const http = require("http");
 const https = require("https");
 
 const app = express();
 
-const PORT = Number(process.env.PORT) || 10000;
+/* ============================================================
+   SERVER CONFIGURATION
+============================================================ */
+
+const PORT =
+  Number(process.env.PORT) || 10000;
 
 const NIM_API_BASE = (
   process.env.NIM_API_BASE ||
@@ -27,104 +31,214 @@ const DEFAULT_MODEL =
 
 /* ============================================================
    MODEL CONFIGURATION
+
+   IMPORTANT:
+
+   Kimi does NOT have server-side memory.
+
+   JanitorAI remains responsible for conversation history.
+   Every message Janitor sends is forwarded directly to NIM.
+
+   Nemotron uses chat_template_kwargs.enable_thinking
+   rather than reasoning_effort.
 ============================================================ */
 
 const MODELS = {
   "deepseek-ai/deepseek-v4-flash-0731": {
     name: "DeepSeek V4 Flash 0731",
     provider: "DeepSeek AI",
-    reasoningLevels: ["none", "low", "high", "max"],
+
+    reasoningLevels: [
+      "none",
+      "low",
+      "high",
+      "max"
+    ],
+
     defaultReasoningEffort: "max",
+
     maxOutputTokens: 8192
   },
 
   "deepseek-ai/deepseek-v4-pro-0813": {
     name: "DeepSeek V4 Pro 0813",
     provider: "DeepSeek AI",
-    reasoningLevels: ["none", "low", "high", "max"],
+
+    reasoningLevels: [
+      "none",
+      "low",
+      "high",
+      "max"
+    ],
+
     defaultReasoningEffort: "max",
+
     maxOutputTokens: 8192
   },
 
   "moonshotai/kimi-k3": {
     name: "Kimi K3",
     provider: "Moonshot AI",
-    reasoningLevels: ["low", "high", "max"],
+
+    reasoningLevels: [
+      "low",
+      "high",
+      "max"
+    ],
+
     defaultReasoningEffort: "max",
+
     maxOutputTokens: 8192
   },
 
   "nvidia/nemotron-3-ultra-550b-a55b": {
     name: "NVIDIA Nemotron 3 Ultra 550B",
     provider: "NVIDIA",
-    reasoningLevels: ["none", "high"],
+
+    /*
+     * Nemotron does NOT use reasoning_effort.
+     *
+     * Thinking is controlled through:
+     *
+     * chat_template_kwargs.enable_thinking
+     */
+
+    reasoningLevels: [
+      "none",
+      "high"
+    ],
+
     defaultReasoningEffort: "high",
+
     maxOutputTokens: 16384
   }
 };
 
 const ALLOW_UNKNOWN_MODELS =
-  String(process.env.ALLOW_UNKNOWN_MODELS || "true")
+  String(
+    process.env.ALLOW_UNKNOWN_MODELS || "true"
+  )
     .trim()
     .toLowerCase() === "true";
 
 /* ============================================================
-   REASONING
-   IMPORTANT: VALUES PRESERVED FROM ORIGINAL
+   DEFAULT GENERATION SETTINGS
 ============================================================ */
 
 const DEFAULT_REASONING_EFFORT =
-  String(process.env.DEFAULT_REASONING_EFFORT || "high")
+  String(
+    process.env.DEFAULT_REASONING_EFFORT || "high"
+  )
     .trim()
     .toLowerCase();
 
 const DEFAULT_REASONING_BUDGET =
-  Number.isFinite(Number(process.env.DEFAULT_REASONING_BUDGET))
-    ? Number(process.env.DEFAULT_REASONING_BUDGET)
+  Number.isFinite(
+    Number(
+      process.env.DEFAULT_REASONING_BUDGET
+    )
+  )
+    ? Number(
+        process.env.DEFAULT_REASONING_BUDGET
+      )
     : 16384;
 
 const MODEL_REASONING_BUDGETS = {
-  "deepseek-ai/deepseek-v4-flash-0731": 16384,
-  "deepseek-ai/deepseek-v4-pro-0813": 24576,
-  "moonshotai/kimi-k3": 32768,
-  "nvidia/nemotron-3-ultra-550b-a55b": 16384
+  "deepseek-ai/deepseek-v4-flash-0731":
+    16384,
+
+  "deepseek-ai/deepseek-v4-pro-0813":
+    24576,
+
+  "moonshotai/kimi-k3":
+    32768,
+
+  "nvidia/nemotron-3-ultra-550b-a55b":
+    16384
 };
 
 const MODEL_REASONING_EFFORTS = {
-  "deepseek-ai/deepseek-v4-flash-0731": "max",
-  "deepseek-ai/deepseek-v4-pro-0813": "max",
-  "moonshotai/kimi-k3": "max",
-  "nvidia/nemotron-3-ultra-550b-a55b": "high"
+  "deepseek-ai/deepseek-v4-flash-0731":
+    "max",
+
+  "deepseek-ai/deepseek-v4-pro-0813":
+    "max",
+
+  "moonshotai/kimi-k3":
+    "max",
+
+  /*
+   * Nemotron ignores reasoning_effort.
+   * Its actual setting is enable_thinking.
+   */
+  "nvidia/nemotron-3-ultra-550b-a55b":
+    "high"
 };
 
 const DEFAULT_MAX_TOKENS =
-  Number.isFinite(Number(process.env.DEFAULT_MAX_TOKENS))
-    ? Number(process.env.DEFAULT_MAX_TOKENS)
+  Number.isFinite(
+    Number(
+      process.env.DEFAULT_MAX_TOKENS
+    )
+  )
+    ? Number(
+        process.env.DEFAULT_MAX_TOKENS
+      )
     : 16384;
 
 const DEFAULT_TEMPERATURE =
-  Number.isFinite(Number(process.env.DEFAULT_TEMPERATURE))
-    ? Number(process.env.DEFAULT_TEMPERATURE)
+  Number.isFinite(
+    Number(
+      process.env.DEFAULT_TEMPERATURE
+    )
+  )
+    ? Number(
+        process.env.DEFAULT_TEMPERATURE
+      )
     : 1.0;
 
 const DEFAULT_TOP_P =
-  Number.isFinite(Number(process.env.DEFAULT_TOP_P))
-    ? Number(process.env.DEFAULT_TOP_P)
+  Number.isFinite(
+    Number(
+      process.env.DEFAULT_TOP_P
+    )
+  )
+    ? Number(
+        process.env.DEFAULT_TOP_P
+      )
     : 0.95;
 
 const DEFAULT_REPETITION_PENALTY =
-  Number.isFinite(Number(process.env.DEFAULT_REPETITION_PENALTY))
-    ? Number(process.env.DEFAULT_REPETITION_PENALTY)
+  Number.isFinite(
+    Number(
+      process.env.DEFAULT_REPETITION_PENALTY
+    )
+  )
+    ? Number(
+        process.env.DEFAULT_REPETITION_PENALTY
+      )
     : 1.0;
 
 const DEFAULT_FREQUENCY_PENALTY =
-  Number.isFinite(Number(process.env.DEFAULT_FREQUENCY_PENALTY))
-    ? Number(process.env.DEFAULT_FREQUENCY_PENALTY)
+  Number.isFinite(
+    Number(
+      process.env.DEFAULT_FREQUENCY_PENALTY
+    )
+  )
+    ? Number(
+        process.env.DEFAULT_FREQUENCY_PENALTY
+      )
     : 0.0;
 
 const DEFAULT_PRESENCE_PENALTY =
-  Number.isFinite(Number(process.env.DEFAULT_PRESENCE_PENALTY))
-    ? Number(process.env.DEFAULT_PRESENCE_PENALTY)
+  Number.isFinite(
+    Number(
+      process.env.DEFAULT_PRESENCE_PENALTY
+    )
+  )
+    ? Number(
+        process.env.DEFAULT_PRESENCE_PENALTY
+      )
     : 0.0;
 
 /* ============================================================
@@ -132,108 +246,80 @@ const DEFAULT_PRESENCE_PENALTY =
 ============================================================ */
 
 const NIM_TIMEOUT =
-  Number.isFinite(Number(process.env.NIM_TIMEOUT_MS))
-    ? Number(process.env.NIM_TIMEOUT_MS)
+  Number.isFinite(
+    Number(
+      process.env.NIM_TIMEOUT_MS
+    )
+  )
+    ? Number(
+        process.env.NIM_TIMEOUT_MS
+      )
     : 900000;
 
-const MAX_ERROR_BODY_SIZE = 2 * 1024 * 1024;
+const NIM_MAX_RETRIES =
+  Number.isFinite(
+    Number(
+      process.env.NIM_MAX_RETRIES
+    )
+  )
+    ? Math.max(
+        0,
+        Math.floor(
+          Number(
+            process.env.NIM_MAX_RETRIES
+          )
+        )
+      )
+    : 2;
 
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  scheduling: "lifo"
-});
+const MAX_ERROR_BODY_SIZE =
+  2 * 1024 * 1024;
 
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  scheduling: "lifo"
-});
+const httpAgent =
+  new http.Agent({
+    keepAlive: true,
+    maxSockets: 64,
+    maxFreeSockets: 16,
+    scheduling: "lifo"
+  });
+
+const httpsAgent =
+  new https.Agent({
+    keepAlive: true,
+    maxSockets: 64,
+    maxFreeSockets: 16,
+    scheduling: "lifo"
+  });
 
 /* ============================================================
    DEBUG
 ============================================================ */
 
 const DEBUG_PROXY =
-  String(process.env.DEBUG_PROXY || "false")
+  String(
+    process.env.DEBUG_PROXY || "false"
+  )
     .trim()
     .toLowerCase() === "true";
 
 /* ============================================================
-   KIMI MEMORY CONFIGURATION
+   MODEL CACHE
 ============================================================ */
-
-const KIMI_MEMORY_ENABLED =
-  String(process.env.KIMI_MEMORY_ENABLED || "true")
-    .trim()
-    .toLowerCase() === "true";
-
-const KIMI_CONTEXT_BUDGET =
-  Number.isFinite(Number(process.env.KIMI_CONTEXT_BUDGET))
-    ? Math.min(
-        1048576,
-        Math.max(
-          32768,
-          Math.floor(Number(process.env.KIMI_CONTEXT_BUDGET))
-        )
-      )
-    : 1000000;
-
-const KIMI_CHARS_PER_TOKEN =
-  Number.isFinite(Number(process.env.KIMI_CHARS_PER_TOKEN))
-    ? Math.max(2, Number(process.env.KIMI_CHARS_PER_TOKEN))
-    : 3.5;
-
-const KIMI_MAX_STORED_MESSAGES =
-  Number.isFinite(Number(process.env.KIMI_MAX_STORED_MESSAGES))
-    ? Math.max(
-        100,
-        Math.floor(Number(process.env.KIMI_MAX_STORED_MESSAGES))
-      )
-    : 10000;
-
-const KIMI_MEMORY_TTL_MS =
-  Number.isFinite(Number(process.env.KIMI_MEMORY_TTL_MS))
-    ? Math.max(60000, Number(process.env.KIMI_MEMORY_TTL_MS))
-    : 7 * 24 * 60 * 60 * 1000;
-
-const KIMI_MAX_CONVERSATIONS =
-  Number.isFinite(Number(process.env.KIMI_MAX_CONVERSATIONS))
-    ? Math.max(
-        10,
-        Math.floor(Number(process.env.KIMI_MAX_CONVERSATIONS))
-      )
-    : 2000;
-
-/* ============================================================
-   STATE
-============================================================ */
-
-/*
- * Conversation store:
- *
- * conversationId -> {
- *   messages: [],
- *   updatedAt,
- *   systemFingerprint,
- *   firstUserFingerprint
- * }
- */
-const kimiConversationStore = new Map();
-
-/*
- * Fast indexes used to avoid scanning every conversation.
- *
- * fingerprint -> Set(conversationId)
- */
-const kimiFirstUserIndex = new Map();
-const kimiSystemIndex = new Map();
 
 let modelCache = null;
 let modelCacheTimestamp = 0;
 let modelCachePromise = null;
+
+const MODEL_CACHE_TTL =
+  Number.isFinite(
+    Number(
+      process.env.MODEL_CACHE_TTL_MS
+    )
+  )
+    ? Number(
+        process.env.MODEL_CACHE_TTL_MS
+      )
+    : 300000;
 
 /* ============================================================
    BASIC HELPERS
@@ -248,38 +334,63 @@ function isPlainObject(value) {
 }
 
 function isFiniteNumber(value) {
-  if (typeof value === "number") {
+  if (
+    typeof value === "number"
+  ) {
     return Number.isFinite(value);
   }
 
-  if (typeof value === "string" && value.trim() !== "") {
-    return Number.isFinite(Number(value));
+  if (
+    typeof value === "string" &&
+    value.trim() !== ""
+  ) {
+    return Number.isFinite(
+      Number(value)
+    );
   }
 
   return false;
 }
 
-function numberOrDefault(value, fallback) {
+function numberOrDefault(
+  value,
+  fallback
+) {
   return isFiniteNumber(value)
     ? Number(value)
     : fallback;
 }
 
-function parseBoolean(value, fallback) {
-  if (value === undefined || value === null) {
+function parseBoolean(
+  value,
+  fallback
+) {
+  if (
+    value === undefined ||
+    value === null
+  ) {
     return fallback;
   }
 
-  if (typeof value === "boolean") {
+  if (
+    typeof value === "boolean"
+  ) {
     return value;
   }
 
-  if (typeof value === "number") {
+  if (
+    typeof value === "number"
+  ) {
     return value !== 0;
   }
 
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
+  if (
+    typeof value === "string"
+  ) {
+    const normalized =
+      value
+        .trim()
+        .toLowerCase();
 
     if (
       normalized === "true" ||
@@ -310,11 +421,18 @@ function normalizeModel(model) {
 }
 
 function getModelConfig(model) {
-  return MODELS[normalizeModel(model)] || null;
+  return (
+    MODELS[
+      normalizeModel(model)
+    ] || null
+  );
 }
 
 function isSupportedModel(model) {
-  return !!getModelConfig(model) || ALLOW_UNKNOWN_MODELS;
+  return (
+    !!getModelConfig(model) ||
+    ALLOW_UNKNOWN_MODELS
+  );
 }
 
 function clampTemperature(value) {
@@ -343,26 +461,36 @@ function clampTopP(value) {
   );
 }
 
-function clampMaxTokens(value, modelConfig) {
-  const number = Math.max(
-    1,
-    Math.floor(
-      numberOrDefault(
-        value,
-        DEFAULT_MAX_TOKENS
+function clampMaxTokens(
+  value,
+  modelConfig
+) {
+  const number =
+    Math.max(
+      1,
+      Math.floor(
+        numberOrDefault(
+          value,
+          DEFAULT_MAX_TOKENS
+        )
       )
-    )
-  );
+    );
 
-  return modelConfig?.maxOutputTokens
-    ? Math.min(
-        modelConfig.maxOutputTokens,
-        number
-      )
-    : number;
+  if (
+    modelConfig?.maxOutputTokens
+  ) {
+    return Math.min(
+      modelConfig.maxOutputTokens,
+      number
+    );
+  }
+
+  return number;
 }
 
-function clampReasoningBudget(value) {
+function clampReasoningBudget(
+  value
+) {
   return Math.min(
     65536,
     Math.max(
@@ -378,56 +506,100 @@ function clampReasoningBudget(value) {
 }
 
 /* ============================================================
-   REASONING
-   EXACT BEHAVIOR PRESERVED
+   REASONING HELPERS
 ============================================================ */
 
-function budgetToReasoningEffort(budget, modelConfig) {
-  const value = clampReasoningBudget(budget);
-  const levels = modelConfig?.reasoningLevels || [];
+function budgetToReasoningEffort(
+  budget,
+  modelConfig
+) {
+  const value =
+    clampReasoningBudget(
+      budget
+    );
 
-  if (levels.includes("none") && value <= 0) {
+  const levels =
+    modelConfig?.reasoningLevels ||
+    [];
+
+  if (
+    levels.includes("none") &&
+    value <= 0
+  ) {
     return "none";
   }
 
-  if (levels.includes("low") && value <= 8192) {
+  if (
+    levels.includes("low") &&
+    value <= 8192
+  ) {
     return "low";
   }
 
-  if (levels.includes("medium") && value <= 16384) {
+  if (
+    levels.includes("medium") &&
+    value <= 16384
+  ) {
     return "medium";
   }
 
-  if (levels.includes("high") && value <= 24576) {
+  if (
+    levels.includes("high") &&
+    value <= 24576
+  ) {
     return "high";
   }
 
-  if (levels.includes("max")) {
+  if (
+    levels.includes("max")
+  ) {
     return "max";
   }
 
-  if (levels.includes("high")) {
+  if (
+    levels.includes("high")
+  ) {
     return "high";
   }
 
-  if (levels.includes("medium")) {
+  if (
+    levels.includes("medium")
+  ) {
     return "medium";
   }
 
-  if (levels.includes("low")) {
+  if (
+    levels.includes("low")
+  ) {
     return "low";
   }
 
-  return levels[0] || "none";
+  return (
+    levels[0] || "none"
+  );
 }
 
-function normalizeReasoningEffort(value, modelConfig) {
-  const levels = modelConfig?.reasoningLevels || [];
+function normalizeReasoningEffort(
+  value,
+  modelConfig
+) {
+  const levels =
+    modelConfig?.reasoningLevels ||
+    [];
 
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
+  if (
+    typeof value === "string"
+  ) {
+    const normalized =
+      value
+        .trim()
+        .toLowerCase();
 
-    if (levels.includes(normalized)) {
+    if (
+      levels.includes(
+        normalized
+      )
+    ) {
       return normalized;
     }
 
@@ -455,7 +627,8 @@ function normalizeReasoningEffort(value, modelConfig) {
     if (
       (
         normalized === "maximum" ||
-        normalized === "maximum_reasoning"
+        normalized ===
+          "maximum_reasoning"
       ) &&
       levels.includes("max")
     ) {
@@ -475,7 +648,10 @@ function getRequestedReasoningEffort(
   model,
   modelConfig
 ) {
-  if (incoming.reasoning_effort !== undefined) {
+  if (
+    incoming.reasoning_effort !==
+    undefined
+  ) {
     return modelConfig
       ? normalizeReasoningEffort(
           incoming.reasoning_effort,
@@ -486,7 +662,10 @@ function getRequestedReasoningEffort(
         ).trim();
   }
 
-  if (incoming.reasoning_mode !== undefined) {
+  if (
+    incoming.reasoning_mode !==
+    undefined
+  ) {
     return modelConfig
       ? normalizeReasoningEffort(
           incoming.reasoning_mode,
@@ -497,7 +676,10 @@ function getRequestedReasoningEffort(
         ).trim();
   }
 
-  if (incoming.reasoning_budget !== undefined) {
+  if (
+    incoming.reasoning_budget !==
+    undefined
+  ) {
     return modelConfig
       ? budgetToReasoningEffort(
           incoming.reasoning_budget,
@@ -506,9 +688,15 @@ function getRequestedReasoningEffort(
       : null;
   }
 
-  if (MODEL_REASONING_EFFORTS[model]) {
+  if (
+    MODEL_REASONING_EFFORTS[
+      model
+    ]
+  ) {
     return normalizeReasoningEffort(
-      MODEL_REASONING_EFFORTS[model],
+      MODEL_REASONING_EFFORTS[
+        model
+      ],
       modelConfig
     );
   }
@@ -522,1139 +710,564 @@ function getRequestedReasoningEffort(
 }
 
 /* ============================================================
-   KIMI MEMORY HELPERS
+   NEMOTRON THINKING
 ============================================================ */
-
-function estimateKimiTokens(value) {
-  if (value === undefined || value === null) {
-    return 0;
-  }
-
-  if (typeof value === "string") {
-    return Math.ceil(
-      value.length / KIMI_CHARS_PER_TOKEN
-    );
-  }
-
-  try {
-    return Math.ceil(
-      JSON.stringify(value).length /
-        KIMI_CHARS_PER_TOKEN
-    );
-  } catch {
-    return 0;
-  }
-}
-
-function estimateKimiMessageTokens(message) {
-  return (
-    8 +
-    estimateKimiTokens(message?.content) +
-    estimateKimiTokens(message?.reasoning_content) +
-    estimateKimiTokens(message?.tool_calls) +
-    estimateKimiTokens(message?.function_call) +
-    estimateKimiTokens(message?.name)
-  );
-}
-
-function estimateKimiMessagesTokens(messages) {
-  let total = 0;
-
-  for (const message of messages) {
-    total += estimateKimiMessageTokens(message);
-  }
-
-  return total;
-}
-
-function hashKimiValue(value) {
-  return crypto
-    .createHash("sha256")
-    .update(String(value || ""), "utf8")
-    .digest("hex");
-}
 
 /*
- * Cache the expensive signature directly on the object.
+ * Nemotron 3 Ultra does NOT use reasoning_effort.
+
+ * NVIDIA documents reasoning as:
  *
- * This avoids repeatedly doing:
+ * chat_template_kwargs:
+ * {
+ *   enable_thinking: true/false
+ * }
  *
- * JSON.stringify()
- * SHA-256
- *
- * for the same message.
+ * We intentionally keep this isolated from the other
+ * reasoning models so Nemotron cannot accidentally receive
+ * incompatible reasoning parameters.
  */
-function kimiMessageSignature(message) {
-  if (
-    message &&
-    typeof message === "object" &&
-    typeof message.__kimiSignature === "string"
-  ) {
-    return message.__kimiSignature;
-  }
 
-  const signature = hashKimiValue(
-    JSON.stringify({
-      role: message?.role || "",
-      content: message?.content ?? null,
-      reasoning_content:
-        message?.reasoning_content ?? null,
-      name: message?.name ?? null,
-      tool_calls:
-        message?.tool_calls ?? null,
-      function_call:
-        message?.function_call ?? null
-    })
-  );
-
-  if (
-    message &&
-    typeof message === "object"
-  ) {
-    Object.defineProperty(
-      message,
-      "__kimiSignature",
-      {
-        value: signature,
-        enumerable: false,
-        configurable: true
-      }
-    );
-  }
-
-  return signature;
-}
-
-function getExplicitKimiConversationId(
-  req,
+function getNemotronThinking(
   incoming
 ) {
-  const candidates = [
-    incoming?.conversation_id,
-    incoming?.conversationId,
-    incoming?.session_id,
-    incoming?.sessionId,
-    incoming?.chat_id,
-    incoming?.chatId,
-    req?.headers?.["x-conversation-id"],
-    req?.headers?.["x-session-id"],
-    req?.headers?.["x-chat-id"]
-  ];
-
-  for (const candidate of candidates) {
-    if (
-      typeof candidate === "string" &&
-      candidate.trim()
-    ) {
-      return candidate.trim();
-    }
-
-    if (
-      typeof candidate === "number" &&
-      Number.isFinite(candidate)
-    ) {
-      return String(candidate);
-    }
-  }
-
-  return null;
-}
-
-function getKimiStableFingerprint(messages) {
-  let system = "";
-  let firstUser = "";
-  let systemCount = 0;
-
-  for (const message of messages) {
-    if (
-      (
-        message?.role === "system" ||
-        message?.role === "developer"
-      ) &&
-      systemCount < 3
-    ) {
-      system += JSON.stringify({
-        role: message.role,
-        content: message.content
-      });
-
-      systemCount++;
-
-      continue;
-    }
-
-    if (
-      !firstUser &&
-      message?.role === "user"
-    ) {
-      firstUser = JSON.stringify({
-        role: message.role,
-        content: message.content
-      });
-    }
-
-    if (
-      systemCount >= 3 &&
-      firstUser
-    ) {
-      break;
-    }
-  }
-
-  return {
-    systemFingerprint:
-      hashKimiValue(system),
-
-    firstUserFingerprint:
-      firstUser
-        ? hashKimiValue(firstUser)
-        : null
-  };
-}
-
-/* ============================================================
-   KIMI INDEX MANAGEMENT
-============================================================ */
-
-function addToIndex(
-  index,
-  fingerprint,
-  conversationId
-) {
-  if (!fingerprint) {
-    return;
-  }
-
-  let set = index.get(fingerprint);
-
-  if (!set) {
-    set = new Set();
-    index.set(fingerprint, set);
-  }
-
-  set.add(conversationId);
-}
-
-function removeFromIndex(
-  index,
-  fingerprint,
-  conversationId
-) {
-  if (!fingerprint) {
-    return;
-  }
-
-  const set = index.get(fingerprint);
-
-  if (!set) {
-    return;
-  }
-
-  set.delete(conversationId);
-
-  if (set.size === 0) {
-    index.delete(fingerprint);
-  }
-}
-
-function indexConversation(
-  conversationId,
-  entry
-) {
-  addToIndex(
-    kimiFirstUserIndex,
-    entry.firstUserFingerprint,
-    conversationId
-  );
-
-  addToIndex(
-    kimiSystemIndex,
-    entry.systemFingerprint,
-    conversationId
-  );
-}
-
-function unindexConversation(
-  conversationId,
-  entry
-) {
-  removeFromIndex(
-    kimiFirstUserIndex,
-    entry.firstUserFingerprint,
-    conversationId
-  );
-
-  removeFromIndex(
-    kimiSystemIndex,
-    entry.systemFingerprint,
-    conversationId
-  );
-}
-
-function deleteKimiConversation(
-  conversationId
-) {
-  const entry =
-    kimiConversationStore.get(
-      conversationId
-    );
-
-  if (!entry) {
-    return;
-  }
-
-  unindexConversation(
-    conversationId,
-    entry
-  );
-
-  kimiConversationStore.delete(
-    conversationId
-  );
-}
-
-function touchKimiConversation(
-  conversationId
-) {
-  const entry =
-    kimiConversationStore.get(
-      conversationId
-    );
-
-  if (!entry) {
-    return;
-  }
-
-  entry.updatedAt = Date.now();
-
-  /*
-   * Map insertion order is used as a cheap LRU.
-   */
-  kimiConversationStore.delete(
-    conversationId
-  );
-
-  kimiConversationStore.set(
-    conversationId,
-    entry
-  );
-}
-
-/* ============================================================
-   KIMI MEMORY CLEANUP
-============================================================ */
-
-function cleanupKimiMemory() {
-  const cutoff =
-    Date.now() -
-    KIMI_MEMORY_TTL_MS;
-
-  for (
-    const [
-      conversationId,
-      entry
-    ] of kimiConversationStore
+  if (
+    incoming.chat_template_kwargs &&
+    typeof incoming.chat_template_kwargs
+      .enable_thinking ===
+      "boolean"
   ) {
-    if (
-      entry.updatedAt < cutoff
-    ) {
-      deleteKimiConversation(
-        conversationId
-      );
-    }
-  }
-}
-
-setInterval(
-  cleanupKimiMemory,
-  Math.min(
-    KIMI_MEMORY_TTL_MS,
-    60 * 60 * 1000
-  )
-).unref();
-
-/* ============================================================
-   CREATE CONVERSATION
-============================================================ */
-
-function createKimiConversation(
-  conversationId,
-  messages
-) {
-  const fingerprints =
-    getKimiStableFingerprint(
-      messages
+    return (
+      incoming.chat_template_kwargs
+        .enable_thinking
     );
+  }
 
-  const entry = {
-    messages: [],
-    updatedAt: Date.now(),
-    systemFingerprint:
-      fingerprints.systemFingerprint,
-    firstUserFingerprint:
-      fingerprints.firstUserFingerprint
-  };
-
-  kimiConversationStore.set(
-    conversationId,
-    entry
-  );
-
-  indexConversation(
-    conversationId,
-    entry
-  );
-
-  /*
-   * Cheap LRU eviction.
-   */
-  while (
-    kimiConversationStore.size >
-    KIMI_MAX_CONVERSATIONS
+  if (
+    incoming.reasoning_effort !==
+    undefined
   ) {
-    const oldestKey =
-      kimiConversationStore
-        .keys()
-        .next()
-        .value;
+    const value =
+      String(
+        incoming.reasoning_effort
+      )
+        .trim()
+        .toLowerCase();
 
-    if (
-      oldestKey === undefined
-    ) {
-      break;
-    }
-
-    deleteKimiConversation(
-      oldestKey
-    );
+    return ![
+      "none",
+      "off",
+      "false",
+      "0"
+    ].includes(value);
   }
 
-  return entry;
+  if (
+    incoming.reasoning_mode !==
+    undefined
+  ) {
+    const value =
+      String(
+        incoming.reasoning_mode
+      )
+        .trim()
+        .toLowerCase();
+
+    return ![
+      "none",
+      "off",
+      "false",
+      "0"
+    ].includes(value);
+  }
+
+  return true;
 }
 
 /* ============================================================
-   FAST HISTORY MATCHING
+   MESSAGE NORMALIZATION
+
+   IMPORTANT:
+
+   We DO NOT alter or store Janitor's conversation.
+
+   Janitor's messages are forwarded as-is wherever possible.
+
+   This preserves:
+   - system prompts
+   - character cards
+   - lore
+   - previous dialogue
+   - user messages
+   - assistant messages
+   - tool calls
+   - names
+   - reasoning content if Janitor sends it
 ============================================================ */
 
-function findKimiConversationByHistory(
+function normalizeMessages(
   messages
 ) {
   if (
-    !Array.isArray(messages) ||
-    messages.length === 0
+    !Array.isArray(messages)
   ) {
-    return null;
+    return [];
   }
 
-  const fingerprints =
-    getKimiStableFingerprint(
-      messages
-    );
-
-  /*
-   * Instead of scanning all 2,000 conversations,
-   * start with conversations having the same first
-   * user message.
-   */
-  let candidateIds = null;
-
-  if (
-    fingerprints.firstUserFingerprint
-  ) {
-    candidateIds =
-      kimiFirstUserIndex.get(
-        fingerprints.firstUserFingerprint
-      );
-  }
-
-  /*
-   * If there isn't a first-user match,
-   * use the system fingerprint.
-   */
-  if (
-    !candidateIds &&
-    fingerprints.systemFingerprint
-  ) {
-    candidateIds =
-      kimiSystemIndex.get(
-        fingerprints.systemFingerprint
-      );
-  }
-
-  /*
-   * No indexed candidate.
-   *
-   * Preserve the old behavior as a fallback,
-   * but this should be uncommon.
-   */
-  if (!candidateIds) {
-    return null;
-  }
-
-  const incomingSignatures =
-    new Set();
+  const result = [];
 
   for (
     const message of messages
   ) {
-    incomingSignatures.add(
-      kimiMessageSignature(message)
-    );
-  }
-
-  let bestMatch = null;
-  let bestScore = 0;
-
-  for (
-    const conversationId of candidateIds
-  ) {
-    const entry =
-      kimiConversationStore.get(
-        conversationId
-      );
-
-    if (!entry) {
+    if (
+      !isPlainObject(message)
+    ) {
       continue;
     }
 
-    let score = 0;
-
     if (
-      fingerprints.firstUserFingerprint &&
-      entry.firstUserFingerprint ===
-        fingerprints.firstUserFingerprint
+      typeof message.role !==
+        "string" ||
+      !message.role.trim()
     ) {
-      score += 1000;
+      continue;
     }
 
-    if (
-      fingerprints.systemFingerprint &&
-      entry.systemFingerprint ===
-        fingerprints.systemFingerprint
-    ) {
-      score += 100;
-    }
+    /*
+     * Keep the original message object
+     * rather than reconstructing it.
+     *
+     * This is important for compatibility
+     * with JanitorAI.
+     */
+    result.push({
+      ...message,
 
-    if (entry.messages.length) {
-      let overlap = 0;
-
-      for (
-        const message of entry.messages
-      ) {
-        if (
-          incomingSignatures.has(
-            kimiMessageSignature(message)
-          )
-        ) {
-          overlap++;
-
-          if (overlap >= 50) {
-            break;
-          }
-        }
-      }
-
-      score += Math.min(
-        overlap * 10,
-        500
-      );
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-
-      bestMatch = {
-        conversationId,
-        entry
-      };
-
-      if (score >= 1600) {
-        break;
-      }
-    }
-  }
-
-  return bestScore >= 10
-    ? bestMatch
-    : null;
-}
-
-/* ============================================================
-   GET OR CREATE KIMI CONVERSATION
-============================================================ */
-
-function getOrCreateKimiConversation(
-  req,
-  incoming,
-  messages
-) {
-  const explicitId =
-    getExplicitKimiConversationId(
-      req,
-      incoming
-    );
-
-  if (explicitId) {
-    const conversationId =
-      "explicit:" +
-      hashKimiValue(explicitId);
-
-    let entry =
-      kimiConversationStore.get(
-        conversationId
-      );
-
-    if (!entry) {
-      entry =
-        createKimiConversation(
-          conversationId,
-          messages
-        );
-    }
-
-    touchKimiConversation(
-      conversationId
-    );
-
-    return {
-      conversationId,
-      entry
-    };
-  }
-
-  const matched =
-    findKimiConversationByHistory(
-      messages
-    );
-
-  if (matched) {
-    touchKimiConversation(
-      matched.conversationId
-    );
-
-    return matched;
-  }
-
-  const fingerprints =
-    getKimiStableFingerprint(
-      messages
-    );
-
-  const seed =
-    fingerprints.systemFingerprint +
-    "|" +
-    (
-      fingerprints.firstUserFingerprint ||
-      ""
-    ) +
-    "|" +
-    Date.now() +
-    "|" +
-    Math.random();
-
-  const conversationId =
-    "derived:" +
-    hashKimiValue(seed);
-
-  const entry =
-    createKimiConversation(
-      conversationId,
-      messages
-    );
-
-  return {
-    conversationId,
-    entry
-  };
-}
-
-/* ============================================================
-   MERGE KIMI MESSAGES
-============================================================ */
-
-function mergeKimiMessages(
-  storedMessages,
-  incomingMessages
-) {
-  const result = [];
-  const seen = new Set();
-
-  for (
-    const message of storedMessages
-  ) {
-    const signature =
-      kimiMessageSignature(message);
-
-    if (!seen.has(signature)) {
-      seen.add(signature);
-      result.push(message);
-    }
-  }
-
-  for (
-    const message of incomingMessages
-  ) {
-    const signature =
-      kimiMessageSignature(message);
-
-    if (!seen.has(signature)) {
-      seen.add(signature);
-      result.push(message);
-    }
+      role:
+        message.role.trim()
+    });
   }
 
   return result;
 }
 
 /* ============================================================
-   FIT KIMI CONTEXT
+   BUILD NIM REQUEST
 ============================================================ */
 
-function fitKimiContext(messages) {
+function buildNimRequest(
+  incoming,
+  model,
+  messages,
+  stream
+) {
+  const normalizedModel =
+    normalizeModel(model);
+
+  const modelConfig =
+    getModelConfig(model);
+
+  const request = {
+    model,
+
+    messages,
+
+    temperature:
+      clampTemperature(
+        incoming.temperature
+      ),
+
+    top_p:
+      clampTopP(
+        incoming.top_p
+      ),
+
+    max_tokens:
+      clampMaxTokens(
+        incoming.max_tokens,
+        modelConfig
+      ),
+
+    stream
+  };
+
+  /*
+   * Generic sampling parameters.
+   */
+
   if (
-    !Array.isArray(messages) ||
-    messages.length === 0
+    incoming.repetition_penalty !==
+    undefined
   ) {
-    return [];
+    request.repetition_penalty =
+      numberOrDefault(
+        incoming.repetition_penalty,
+        DEFAULT_REPETITION_PENALTY
+      );
   }
 
-  const pinned = [];
-  const normal = [];
+  if (
+    incoming.frequency_penalty !==
+    undefined
+  ) {
+    request.frequency_penalty =
+      numberOrDefault(
+        incoming.frequency_penalty,
+        DEFAULT_FREQUENCY_PENALTY
+      );
+  }
+
+  if (
+    incoming.presence_penalty !==
+    undefined
+  ) {
+    request.presence_penalty =
+      numberOrDefault(
+        incoming.presence_penalty,
+        DEFAULT_PRESENCE_PENALTY
+      );
+  }
+
+  /*
+   * Safe OpenAI-compatible parameters.
+   */
+
+  const optionalParameters = [
+    "stop",
+    "seed",
+    "tools",
+    "tool_choice",
+    "response_format",
+    "logprobs",
+    "top_k",
+    "min_tokens",
+    "ignore_eos",
+    "logit_bias",
+    "user",
+    "parallel_tool_calls",
+    "stream_options",
+    "n",
+    "service_tier",
+    "modalities",
+    "audio"
+  ];
 
   for (
-    const message of messages
+    const parameter of
+      optionalParameters
   ) {
     if (
-      message?.role === "system" ||
-      message?.role === "developer"
+      incoming[parameter] !==
+      undefined
     ) {
-      pinned.push(message);
-    } else {
-      normal.push(message);
+      request[parameter] =
+        incoming[parameter];
     }
   }
 
-  let used =
-    estimateKimiMessagesTokens(
-      pinned
-    );
+  /*
+   * Preserve chat_template_kwargs supplied
+   * by Janitor or another client.
+   */
 
   if (
-    used >= KIMI_CONTEXT_BUDGET
+    isPlainObject(
+      incoming.chat_template_kwargs
+    )
   ) {
-    return pinned;
+    request.chat_template_kwargs = {
+      ...incoming.chat_template_kwargs
+    };
   }
 
-  const selected = [];
-
   /*
-   * Walk backwards so the most recent
-   * messages get priority.
+   * extra_body remains supported.
+   *
+   * This allows clients to send NIM-specific
+   * parameters without us needing to know
+   * every possible parameter.
    */
-  for (
-    let index = normal.length - 1;
-    index >= 0;
-    index--
-  ) {
-    const message =
-      normal[index];
 
-    const cost =
-      estimateKimiMessageTokens(
-        message
+  if (
+    isPlainObject(
+      incoming.extra_body
+    )
+  ) {
+    Object.assign(
+      request,
+      incoming.extra_body
+    );
+  }
+
+  /* ==========================================================
+     NEMOTRON
+  ========================================================== */
+
+  if (
+    normalizedModel ===
+    "nvidia/nemotron-3-ultra-550b-a55b"
+  ) {
+    const enableThinking =
+      getNemotronThinking(
+        incoming
       );
 
+    request.chat_template_kwargs = {
+      ...(request.chat_template_kwargs ||
+        {}),
+
+      enable_thinking:
+        enableThinking
+    };
+
+    /*
+     * NVIDIA's Nemotron examples use a
+     * reasoning_budget alongside the
+     * chat template configuration.
+     */
+
+    const requestedBudget =
+      incoming.reasoning_budget !==
+      undefined
+        ? incoming.reasoning_budget
+        : MODEL_REASONING_BUDGETS[
+            normalizedModel
+          ];
+
     if (
-      used + cost >
-      KIMI_CONTEXT_BUDGET
+      enableThinking &&
+      requestedBudget !== undefined
+    ) {
+      request.reasoning_budget =
+        clampReasoningBudget(
+          requestedBudget
+        );
+    } else {
+      delete request.reasoning_budget;
+    }
+
+    /*
+     * NVIDIA specifically requires
+     * force_nonempty_content for tool
+     * calling with reasoning enabled.
+     */
+
+    if (
+      enableThinking &&
+      Array.isArray(
+        request.tools
+      ) &&
+      request.tools.length > 0
+    ) {
+      request.chat_template_kwargs
+        .force_nonempty_content =
+        true;
+    }
+
+    /*
+     * Nemotron does NOT use these.
+     *
+     * Never let them leak into the
+     * request from Janitor.
+     */
+
+    delete request.reasoning_effort;
+
+    delete request.reasoning_mode;
+
+    delete request.nvext;
+
+    return request;
+  }
+
+  /* ==========================================================
+     DEEPSEEK
+  ========================================================== */
+
+  if (
+    normalizedModel ===
+    "deepseek-ai/deepseek-v4-flash-0731"
+  ) {
+    const reasoningEffort =
+      getRequestedReasoningEffort(
+        incoming,
+        model,
+        modelConfig
+      );
+
+    request.reasoning_effort =
+      reasoningEffort;
+
+    request.chat_template_kwargs = {
+      ...(request.chat_template_kwargs ||
+        {}),
+
+      thinking:
+        reasoningEffort !== "none",
+
+      reasoning_effort:
+        reasoningEffort
+    };
+
+    return request;
+  }
+
+  if (
+    normalizedModel ===
+    "deepseek-ai/deepseek-v4-pro-0813"
+  ) {
+    const reasoningEffort =
+      getRequestedReasoningEffort(
+        incoming,
+        model,
+        modelConfig
+      );
+
+    request.reasoning_effort =
+      reasoningEffort;
+
+    return request;
+  }
+
+  /* ==========================================================
+     KIMI K3
+  ========================================================== */
+
+  if (
+    normalizedModel ===
+    "moonshotai/kimi-k3"
+  ) {
+    const reasoningEffort =
+      getRequestedReasoningEffort(
+        incoming,
+        model,
+        modelConfig
+      );
+
+    request.reasoning_effort =
+      reasoningEffort;
+
+    /*
+     * NO MEMORY.
+     *
+     * The messages array here is exactly
+     * the context supplied by JanitorAI.
+     *
+     * Nothing is stored server-side.
+     */
+
+    return request;
+  }
+
+  /* ==========================================================
+     UNKNOWN MODELS
+  ========================================================== */
+
+  if (!modelConfig) {
+    if (
+      incoming.reasoning_effort !==
+      undefined
+    ) {
+      request.reasoning_effort =
+        incoming.reasoning_effort;
+    }
+
+    if (
+      incoming.reasoning_mode !==
+      undefined
+    ) {
+      request.reasoning_mode =
+        incoming.reasoning_mode;
+    }
+
+    if (
+      incoming.reasoning_budget !==
+      undefined
+    ) {
+      request.reasoning_budget =
+        clampReasoningBudget(
+          incoming.reasoning_budget
+        );
+    }
+
+    return request;
+  }
+
+  return request;
+}
+
+/* ============================================================
+   REMOVE REASONING FROM CLIENT RESPONSE
+============================================================ */
+
+function stripReasoning(
+  parsed
+) {
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !Array.isArray(
+      parsed.choices
+    )
+  ) {
+    return parsed;
+  }
+
+  for (
+    const choice of
+      parsed.choices
+  ) {
+    if (
+      !choice ||
+      typeof choice !== "object"
     ) {
       continue;
     }
 
-    selected.push(message);
-    used += cost;
+    if (choice.delta) {
+      delete choice.delta
+        .reasoning_content;
+
+      delete choice.delta
+        .reasoning;
+
+      delete choice.delta
+        .thinking;
+    }
+
+    if (choice.message) {
+      delete choice.message
+        .reasoning_content;
+
+      delete choice.message
+        .reasoning;
+
+      delete choice.message
+        .thinking;
+    }
   }
 
-  selected.reverse();
-
-  return pinned.concat(
-    selected
-  );
+  return parsed;
 }
 
 /* ============================================================
-   UPDATE KIMI MEMORY
+   SSE PROCESSING
 ============================================================ */
 
-function updateKimiMemory(
-  conversationId,
-  incomingMessages
-) {
-  let memory =
-    kimiConversationStore.get(
-      conversationId
-    );
-
-  if (!memory) {
-    memory =
-      createKimiConversation(
-        conversationId,
-        incomingMessages
-      );
-  }
-
-  const merged =
-    mergeKimiMessages(
-      memory.messages,
-      incomingMessages
-    );
-
-  const fitted =
-    fitKimiContext(merged);
-
-  memory.messages =
-    fitted.slice(
-      -KIMI_MAX_STORED_MESSAGES
-    );
-
-  const fingerprints =
-    getKimiStableFingerprint(
-      memory.messages
-    );
-
-  /*
-   * Update indexes if fingerprints changed.
-   */
-  if (
-    memory.systemFingerprint !==
-    fingerprints.systemFingerprint
-  ) {
-    removeFromIndex(
-      kimiSystemIndex,
-      memory.systemFingerprint,
-      conversationId
-    );
-
-    memory.systemFingerprint =
-      fingerprints.systemFingerprint;
-
-    addToIndex(
-      kimiSystemIndex,
-      memory.systemFingerprint,
-      conversationId
-    );
-  }
-
-  if (
-    fingerprints.firstUserFingerprint &&
-    memory.firstUserFingerprint !==
-      fingerprints.firstUserFingerprint
-  ) {
-    removeFromIndex(
-      kimiFirstUserIndex,
-      memory.firstUserFingerprint,
-      conversationId
-    );
-
-    memory.firstUserFingerprint =
-      fingerprints.firstUserFingerprint;
-
-    addToIndex(
-      kimiFirstUserIndex,
-      memory.firstUserFingerprint,
-      conversationId
-    );
-  }
-
-  memory.updatedAt = Date.now();
-
-  touchKimiConversation(
-    conversationId
-  );
-
-  return memory.messages;
-}
-
-function buildKimiMemoryContext(
-  req,
-  incoming,
-  incomingMessages
-) {
-  if (!KIMI_MEMORY_ENABLED) {
-    return {
-      conversationId: null,
-      messages: incomingMessages
-    };
-  }
-
-  const conversation =
-    getOrCreateKimiConversation(
-      req,
-      incoming,
-      incomingMessages
-    );
-
-  return {
-    conversationId:
-      conversation.conversationId,
-
-    messages:
-      updateKimiMemory(
-        conversation.conversationId,
-        incomingMessages
-      )
-  };
-}
-
-/* ============================================================
-   KIMI ASSISTANT MEMORY
-============================================================ */
-
-function appendKimiAssistantMessage(
-  conversationId,
-  assistantMessage
-) {
-  if (
-    !KIMI_MEMORY_ENABLED ||
-    !conversationId ||
-    !assistantMessage
-  ) {
-    return;
-  }
-
-  const memory =
-    kimiConversationStore.get(
-      conversationId
-    );
-
-  if (!memory) {
-    return;
-  }
-
-  const clean = {
-    role:
-      assistantMessage.role ||
-      "assistant"
-  };
-
-  if (
-    assistantMessage.content !==
-    undefined
-  ) {
-    clean.content =
-      assistantMessage.content;
-  }
-
-  if (
-    assistantMessage.reasoning_content !==
-    undefined
-  ) {
-    clean.reasoning_content =
-      assistantMessage.reasoning_content;
-  }
-
-  if (
-    Array.isArray(
-      assistantMessage.tool_calls
-    )
-  ) {
-    clean.tool_calls =
-      assistantMessage.tool_calls;
-  }
-
-  if (
-    assistantMessage.function_call !==
-    undefined
-  ) {
-    clean.function_call =
-      assistantMessage.function_call;
-  }
-
-  if (
-    assistantMessage.name !==
-    undefined
-  ) {
-    clean.name =
-      assistantMessage.name;
-  }
-
-  const signature =
-    kimiMessageSignature(clean);
-
-  /*
-   * Since signatures are cached,
-   * this check is cheaper than the original.
-   */
-  for (
-    const message of memory.messages
-  ) {
-    if (
-      kimiMessageSignature(message) ===
-      signature
-    ) {
-      return;
-    }
-  }
-
-  memory.messages.push(clean);
-
-  memory.messages =
-    fitKimiContext(
-      memory.messages
-    ).slice(
-      -KIMI_MAX_STORED_MESSAGES
-    );
-
-  memory.updatedAt = Date.now();
-
-  touchKimiConversation(
-    conversationId
-  );
-}
-
-function extractKimiAssistantMessage(
-  parsed
-) {
-  const message =
-    parsed?.choices?.[0]?.message;
-
-  if (!message) {
-    return null;
-  }
-
-  return {
-    role:
-      message.role ||
-      "assistant",
-
-    content:
-      message.content,
-
-    reasoning_content:
-      message.reasoning_content,
-
-    tool_calls:
-      message.tool_calls,
-
-    function_call:
-      message.function_call,
-
-    name:
-      message.name
-  };
-}
-
-/* ============================================================
-   KIMI STREAM ACCUMULATOR
-============================================================ */
-
-function createKimiStreamAccumulator() {
-  return {
-    role: "assistant",
-    contentParts: [],
-    reasoningParts: [],
-    toolCalls: [],
-    functionCall: null,
-    name: undefined
-  };
-}
-
-function mergeKimiToolCallDelta(
-  accumulator,
-  toolCall
-) {
-  if (
-    !toolCall ||
-    typeof toolCall !== "object"
-  ) {
-    return;
-  }
-
-  const index =
-    Number.isFinite(
-      Number(toolCall.index)
-    )
-      ? Number(toolCall.index)
-      : accumulator.toolCalls.length;
-
-  while (
-    accumulator.toolCalls.length <=
-    index
-  ) {
-    accumulator.toolCalls.push({});
-  }
-
-  const target =
-    accumulator.toolCalls[index];
-
-  if (
-    toolCall.id !== undefined
-  ) {
-    target.id =
-      toolCall.id;
-  }
-
-  if (
-    toolCall.type !== undefined
-  ) {
-    target.type =
-      toolCall.type;
-  }
-
-  if (toolCall.function) {
-    if (!target.function) {
-      target.function = {};
-    }
-
-    if (
-      toolCall.function.name !==
-      undefined
-    ) {
-      target.function.name =
-        toolCall.function.name;
-    }
-
-    if (
-      toolCall.function.arguments !==
-      undefined
-    ) {
-      target.function.arguments =
-        (
-          target.function.arguments ||
-          ""
-        ) +
-        toolCall.function.arguments;
-    }
-  }
-
-  for (
-    const key of Object.keys(toolCall)
-  ) {
-    if (
-      key !== "index" &&
-      key !== "id" &&
-      key !== "type" &&
-      key !== "function"
-    ) {
-      target[key] =
-        toolCall[key];
-    }
-  }
-}
-
-function addKimiSSEToAccumulator(
-  accumulator,
+function processSSEEvent(
   event
 ) {
   if (
     !event ||
     !event.trim()
   ) {
-    return;
+    return "";
   }
 
   const lines =
     event.split(/\r?\n/);
+
+  const output = [];
 
   for (
     const line of lines
@@ -1662,195 +1275,201 @@ function addKimiSSEToAccumulator(
     if (
       !line.startsWith("data:")
     ) {
+      output.push(line);
       continue;
     }
 
     const data =
       line.slice(5).trim();
 
+    if (!data) {
+      output.push(line);
+      continue;
+    }
+
     if (
-      !data ||
       data === "[DONE]"
     ) {
+      output.push(
+        "data: [DONE]"
+      );
+
       continue;
     }
-
-    let parsed;
 
     try {
-      parsed =
+      const parsed =
         JSON.parse(data);
+
+      stripReasoning(
+        parsed
+      );
+
+      output.push(
+        "data: " +
+          JSON.stringify(parsed)
+      );
     } catch {
-      continue;
-    }
-
-    const delta =
-      parsed?.choices?.[0]?.delta;
-
-    if (!delta) {
-      continue;
-    }
-
-    if (delta.role) {
-      accumulator.role =
-        delta.role;
-    }
-
-    if (
-      typeof delta.content ===
-      "string"
-    ) {
-      accumulator.contentParts.push(
-        delta.content
-      );
-    }
-
-    if (
-      typeof delta.reasoning_content ===
-      "string"
-    ) {
-      accumulator.reasoningParts.push(
-        delta.reasoning_content
-      );
-    }
-
-    if (
-      typeof delta.reasoning ===
-      "string"
-    ) {
-      accumulator.reasoningParts.push(
-        delta.reasoning
-      );
-    }
-
-    if (
-      Array.isArray(
-        delta.tool_calls
-      )
-    ) {
-      for (
-        const toolCall of
-          delta.tool_calls
-      ) {
-        mergeKimiToolCallDelta(
-          accumulator,
-          toolCall
-        );
-      }
-    }
-
-    if (
-      delta.function_call
-    ) {
-      if (
-        !accumulator.functionCall
-      ) {
-        accumulator.functionCall = {};
-      }
-
-      if (
-        delta.function_call.name !==
-        undefined
-      ) {
-        accumulator.functionCall.name =
-          delta.function_call.name;
-      }
-
-      if (
-        delta.function_call.arguments !==
-        undefined
-      ) {
-        accumulator.functionCall.arguments =
-          (
-            accumulator.functionCall
-              .arguments || ""
-          ) +
-          delta.function_call.arguments;
-      }
-    }
-
-    if (
-      delta.name !== undefined
-    ) {
-      accumulator.name =
-        delta.name;
+      /*
+       * Preserve malformed SSE rather
+       * than destroying the stream.
+       */
+      output.push(line);
     }
   }
-}
 
-function finalizeKimiStreamAccumulator(
-  accumulator
-) {
-  const message = {
-    role:
-      accumulator.role ||
-      "assistant",
-
-    content:
-      accumulator.contentParts.join("")
-  };
-
-  const reasoning =
-    accumulator.reasoningParts.join("");
-
-  if (reasoning) {
-    message.reasoning_content =
-      reasoning;
-  }
-
-  const toolCalls =
-    accumulator.toolCalls.filter(
-      toolCall =>
-        Object.keys(toolCall)
-          .length > 0
-    );
-
-  if (toolCalls.length) {
-    message.tool_calls =
-      toolCalls;
-  }
-
-  if (accumulator.functionCall) {
-    message.function_call =
-      accumulator.functionCall;
-  }
-
-  if (
-    accumulator.name !==
-    undefined
-  ) {
-    message.name =
-      accumulator.name;
-  }
-
-  return message;
+  return output.length
+    ? output.join("\n") +
+        "\n\n"
+    : "";
 }
 
 /* ============================================================
-   NVIDIA MODEL CACHE
+   ERROR HELPERS
 ============================================================ */
 
-const MODEL_CACHE_TTL =
-  Number.isFinite(
-    Number(
-      process.env.MODEL_CACHE_TTL_MS
-    )
-  )
-    ? Number(
-        process.env.MODEL_CACHE_TTL_MS
-      )
-    : 300000;
+function readStream(
+  stream
+) {
+  return new Promise(
+    resolve => {
+      let output = "";
+      let finished = false;
+
+      function finish() {
+        if (finished) {
+          return;
+        }
+
+        finished = true;
+
+        resolve(output);
+      }
+
+      stream.on(
+        "data",
+        chunk => {
+          if (
+            output.length >=
+            MAX_ERROR_BODY_SIZE
+          ) {
+            return;
+          }
+
+          output +=
+            chunk.toString(
+              "utf8"
+            );
+
+          if (
+            output.length >
+            MAX_ERROR_BODY_SIZE
+          ) {
+            output =
+              output.slice(
+                0,
+                MAX_ERROR_BODY_SIZE
+              );
+          }
+        }
+      );
+
+      stream.on(
+        "end",
+        finish
+      );
+
+      stream.on(
+        "close",
+        finish
+      );
+
+      stream.on(
+        "error",
+        finish
+      );
+    }
+  );
+}
+
+function extractErrorMessage(
+  data
+) {
+  if (!data) {
+    return null;
+  }
+
+  if (
+    typeof data === "object"
+  ) {
+    return (
+      data.error?.message ||
+      data.message ||
+      null
+    );
+  }
+
+  try {
+    const parsed =
+      JSON.parse(data);
+
+    return (
+      parsed?.error?.message ||
+      parsed?.message ||
+      null
+    );
+  } catch {
+    return String(data);
+  }
+}
+
+function sendError(
+  res,
+  status,
+  message,
+  details
+) {
+  if (
+    res.headersSent
+  ) {
+    try {
+      res.end();
+    } catch {}
+
+    return;
+  }
+
+  const response = {
+    error: {
+      message:
+        String(message)
+    }
+  };
+
+  if (
+    details !== null &&
+    details !== undefined
+  ) {
+    response.error.details =
+      details;
+  }
+
+  return res
+    .status(status)
+    .json(response);
+}
+
+/* ============================================================
+   NIM MODEL DISCOVERY
+============================================================ */
 
 async function fetchNimModels(
   forceRefresh = false
 ) {
-  const refresh =
-    forceRefresh === true;
-
   const now = Date.now();
 
   if (
-    !refresh &&
+    !forceRefresh &&
     Array.isArray(modelCache) &&
     now - modelCacheTimestamp <
       MODEL_CACHE_TTL
@@ -1858,12 +1477,9 @@ async function fetchNimModels(
     return modelCache;
   }
 
-  /*
-   * Prevent multiple simultaneous refreshes.
-   */
   if (
     modelCachePromise &&
-    !refresh
+    !forceRefresh
   ) {
     return modelCachePromise;
   }
@@ -1923,6 +1539,11 @@ async function fetchNimModels(
           return modelCache;
         }
 
+        console.warn(
+          "NVIDIA /models returned HTTP",
+          response.status
+        );
+
         return Array.isArray(
           modelCache
         )
@@ -1950,549 +1571,219 @@ async function fetchNimModels(
 }
 
 /* ============================================================
-   MESSAGE NORMALIZATION
+   HTTP REQUEST
 ============================================================ */
 
-function normalizeMessages(messages) {
-  if (!Array.isArray(messages)) {
-    return [];
-  }
-
-  const result = [];
-
-  for (
-    const message of messages
-  ) {
-    if (
-      !isPlainObject(message)
-    ) {
-      continue;
-    }
-
-    if (
-      typeof message.role !==
-        "string" ||
-      !message.role.trim()
-    ) {
-      continue;
-    }
-
-    if (
-      (
-        message.content ===
-          undefined ||
-        message.content === null
-      ) &&
-      !Array.isArray(
-        message.tool_calls
-      ) &&
-      message.reasoning_content ===
-        undefined &&
-      message.reasoning ===
-        undefined
-    ) {
-      continue;
-    }
-
-    result.push({
-      ...message,
-      role:
-        message.role.trim()
-    });
-  }
-
-  return result;
-}
-
-/* ============================================================
-   BUILD NVIDIA REQUEST
-============================================================ */
-
-function buildNimRequest(
-  incoming,
-  model,
-  messages,
+function createNimAxiosConfig(
   stream
 ) {
-  const modelConfig =
-    getModelConfig(model);
+  return {
+    headers: {
+      Authorization:
+        "Bearer " +
+        NIM_API_KEY,
 
-  const reasoningEffort =
-    getRequestedReasoningEffort(
-      incoming,
-      model,
-      modelConfig
-    );
+      "Content-Type":
+        "application/json",
 
-  const request = {
-    model,
-    messages,
+      Accept:
+        stream
+          ? "text/event-stream"
+          : "application/json"
+    },
 
-    temperature:
-      clampTemperature(
-        incoming.temperature
-      ),
+    timeout:
+      NIM_TIMEOUT,
 
-    top_p:
-      clampTopP(
-        incoming.top_p
-      ),
+    httpAgent,
+    httpsAgent,
 
-    max_tokens:
-      clampMaxTokens(
-        incoming.max_tokens,
-        modelConfig
-      ),
-
-    stream
+    validateStatus:
+      () => true
   };
+}
 
-  if (
-    incoming.repetition_penalty !==
-    undefined
-  ) {
-    request.repetition_penalty =
-      numberOrDefault(
-        incoming.repetition_penalty,
-        DEFAULT_REPETITION_PENALTY
-      );
-  }
+/* ============================================================
+   TRANSIENT ERROR DETECTION
+============================================================ */
 
-  if (
-    incoming.frequency_penalty !==
-    undefined
-  ) {
-    request.frequency_penalty =
-      numberOrDefault(
-        incoming.frequency_penalty,
-        DEFAULT_FREQUENCY_PENALTY
-      );
-  }
+function isRetryableStatus(
+  status
+) {
+  return (
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  );
+}
 
-  if (
-    incoming.presence_penalty !==
-    undefined
-  ) {
-    request.presence_penalty =
-      numberOrDefault(
-        incoming.presence_penalty,
-        DEFAULT_PRESENCE_PENALTY
-      );
-  }
+function isRetryableNetworkError(
+  error
+) {
+  const code =
+    error?.code;
 
-  const optionalParameters = [
-    "stop",
-    "seed",
-    "tools",
-    "tool_choice",
-    "response_format",
-    "logprobs",
-    "top_k",
-    "min_tokens",
-    "ignore_eos",
-    "logit_bias",
-    "user",
-    "parallel_tool_calls",
-    "stream_options",
-    "n",
-    "service_tier",
-    "modalities",
-    "audio"
-  ];
+  return [
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "ECONNABORTED",
+    "EPIPE",
+    "EAI_AGAIN"
+  ].includes(code);
+}
+
+function sleep(ms) {
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  );
+}
+
+/* ============================================================
+   NIM REQUEST WITH RETRIES
+
+   Retries only happen BEFORE a successful
+   streaming response is handed to the client.
+
+   We never retry halfway through a stream.
+============================================================ */
+
+async function requestNim(
+  nimRequest,
+  stream
+) {
+  let lastError = null;
 
   for (
-    const parameter of
-      optionalParameters
+    let attempt = 0;
+    attempt <= NIM_MAX_RETRIES;
+    attempt++
   ) {
-    if (
-      incoming[parameter] !==
-      undefined
-    ) {
-      request[parameter] =
-        incoming[parameter];
-    }
-  }
+    try {
+      const response =
+        await axios.post(
+          NIM_API_BASE +
+            "/chat/completions",
 
-  if (
-    isPlainObject(
-      incoming.chat_template_kwargs
-    )
-  ) {
-    request.chat_template_kwargs = {
-      ...incoming.chat_template_kwargs
-    };
-  }
+          nimRequest,
 
-  if (
-    isPlainObject(
-      incoming.extra_body
-    )
-  ) {
-    Object.assign(
-      request,
-      incoming.extra_body
-    );
-  }
+          stream
+            ? {
+                ...createNimAxiosConfig(
+                  true
+                ),
 
-  /*
-   * Unknown models preserve the incoming
-   * reasoning parameters.
-   */
-  if (!modelConfig) {
-    if (
-      incoming.reasoning_effort !==
-      undefined
-    ) {
-      request.reasoning_effort =
-        incoming.reasoning_effort;
-    } else if (
-      incoming.reasoning_mode !==
-      undefined
-    ) {
-      request.reasoning_effort =
-        incoming.reasoning_mode;
-    }
-
-    if (
-      incoming.reasoning_budget !==
-      undefined
-    ) {
-      request.reasoning_budget =
-        clampReasoningBudget(
-          incoming.reasoning_budget
+                responseType:
+                  "stream"
+              }
+            : createNimAxiosConfig(
+                false
+              )
         );
-    }
 
-    return request;
-  }
+      if (
+        response.status >= 200 &&
+        response.status < 300
+      ) {
+        return response;
+      }
 
-  switch (model) {
-    case "deepseek-ai/deepseek-v4-flash-0731": {
-      request.reasoning_effort =
-        reasoningEffort;
-
-      request.chat_template_kwargs = {
-        ...(request.chat_template_kwargs ||
-          {}),
-
-        thinking:
-          reasoningEffort !== "none",
-
-        reasoning_effort:
-          reasoningEffort
-      };
-
-      break;
-    }
-
-    case "deepseek-ai/deepseek-v4-pro-0813":
-    case "moonshotai/kimi-k3": {
-      request.reasoning_effort =
-        reasoningEffort;
-
-      break;
-    }
-
-    case "nvidia/nemotron-3-ultra-550b-a55b": {
-  const enableThinking =
-    incoming.reasoning_effort !== undefined
-      ? !["none", "off", "false", "0"].includes(
-          String(incoming.reasoning_effort)
-            .trim()
-            .toLowerCase()
-        )
-      : incoming.reasoning_mode !== undefined
-        ? !["none", "off", "false", "0"].includes(
-            String(incoming.reasoning_mode)
-              .trim()
-              .toLowerCase()
-          )
-        : true;
-
-  request.chat_template_kwargs = {
-    ...(request.chat_template_kwargs || {}),
-    enable_thinking: enableThinking
-  };
-
-  if (enableThinking) {
-    request.reasoning_budget =
-      clampReasoningBudget(
-        incoming.reasoning_budget !== undefined
-          ? incoming.reasoning_budget
-          : MODEL_REASONING_BUDGETS[model]
-      );
-  } else {
-    delete request.reasoning_budget;
-  }
-
-  if (
-    Array.isArray(request.tools) &&
-    request.tools.length > 0 &&
-    enableThinking
-  ) {
-    request.chat_template_kwargs.force_nonempty_content = true;
-  }
-
-  // Nemotron 3 Ultra does not use top-level reasoning_effort.
-  delete request.reasoning_effort;
-  delete request.reasoning_mode;
-  delete request.nvext;
-
-  break;
-}
-  }
-
-  return request;
-}
-
-/* ============================================================
-   RESPONSE REASONING REMOVAL
-============================================================ */
-
-function stripReasoning(parsed) {
-  if (
-    !parsed ||
-    typeof parsed !==
-      "object" ||
-    !Array.isArray(
-      parsed.choices
-    )
-  ) {
-    return parsed;
-  }
-
-  for (
-    const choice of
-      parsed.choices
-  ) {
-    if (
-      !choice ||
-      typeof choice !==
-        "object"
-    ) {
-      continue;
-    }
-
-    if (choice.delta) {
-      delete choice.delta
-        .reasoning_content;
-
-      delete choice.delta
-        .reasoning;
-
-      delete choice.delta
-        .thinking;
-    }
-
-    if (choice.message) {
-      delete choice.message
-        .reasoning_content;
-
-      delete choice.message
-        .reasoning;
-
-      delete choice.message
-        .thinking;
-    }
-  }
-
-  return parsed;
-}
-
-/* ============================================================
-   SSE PROCESSING
-============================================================ */
-
-function processSSEEvent(event) {
-  if (
-    !event ||
-    !event.trim()
-  ) {
-    return "";
-  }
-
-  const lines =
-    event.split(/\r?\n/);
-
-  const output = [];
-
-  for (
-    const line of lines
-  ) {
-    if (
-      !line.startsWith("data:")
-    ) {
-      output.push(line);
-      continue;
-    }
-
-    const data =
-      line.slice(5).trim();
-
-    if (!data) {
-      output.push(line);
-      continue;
-    }
-
-    if (data === "[DONE]") {
-      output.push(
-        "data: [DONE]"
-      );
-
-      continue;
-    }
-
-    try {
-      const parsed =
-        JSON.parse(data);
-
-      stripReasoning(parsed);
-
-      output.push(
-        "data: " +
-        JSON.stringify(parsed)
-      );
-    } catch {
       /*
-       * Preserve malformed/non-JSON SSE
-       * instead of destroying the stream.
+       * Don't retry client errors such as
+       * invalid parameters or invalid model.
        */
-      output.push(line);
-    }
-  }
 
-  return output.length
-    ? output.join("\n") +
-        "\n\n"
-    : "";
-}
-
-/* ============================================================
-   ERROR HANDLING
-============================================================ */
-
-function readStream(stream) {
-  return new Promise(resolve => {
-    let output = "";
-    let finished = false;
-
-    function finish() {
-      if (finished) {
-        return;
+      if (
+        !isRetryableStatus(
+          response.status
+        ) ||
+        attempt >=
+          NIM_MAX_RETRIES
+      ) {
+        return response;
       }
 
-      finished = true;
-      resolve(output);
-    }
-
-    stream.on(
-      "data",
-      chunk => {
-        if (
-          output.length >=
-          MAX_ERROR_BODY_SIZE
-        ) {
-          return;
-        }
-
-        output +=
-          chunk.toString(
-            "utf8"
-          );
-
-        if (
-          output.length >
-          MAX_ERROR_BODY_SIZE
-        ) {
-          output =
-            output.slice(
-              0,
-              MAX_ERROR_BODY_SIZE
-            );
-        }
+      /*
+       * Consume the error stream before retrying.
+       */
+      if (
+        stream &&
+        response.data &&
+        typeof response.data.on ===
+          "function"
+      ) {
+        await readStream(
+          response.data
+        );
       }
-    );
 
-    stream.on(
-      "end",
-      finish
-    );
+      const delay =
+        Math.min(
+          1000 *
+            Math.pow(
+              2,
+              attempt
+            ),
+          8000
+        );
 
-    stream.on(
-      "close",
-      finish
-    );
+      console.warn(
+        `NVIDIA returned HTTP ${response.status}. ` +
+          `Retrying in ${delay}ms ` +
+          `(attempt ${attempt + 1}/${NIM_MAX_RETRIES}).`
+      );
 
-    stream.on(
-      "error",
-      finish
-    );
-  });
-}
+      await sleep(delay);
+    } catch (error) {
+      lastError =
+        error;
 
-function extractErrorMessage(
-  data
-) {
-  if (!data) {
-    return null;
-  }
+      if (
+        attempt >=
+        NIM_MAX_RETRIES ||
+        !isRetryableNetworkError(
+          error
+        )
+      ) {
+        throw error;
+      }
 
-  if (
-    typeof data ===
-    "object"
-  ) {
-    return (
-      data.error?.message ||
-      data.message ||
-      null
-    );
-  }
+      const delay =
+        Math.min(
+          1000 *
+            Math.pow(
+              2,
+              attempt
+            ),
+          8000
+        );
 
-  try {
-    const parsed =
-      JSON.parse(data);
+      console.warn(
+        "Transient NVIDIA connection error:",
+        error?.code ||
+          error?.message,
 
-    return (
-      parsed?.error?.message ||
-      parsed?.message ||
-      null
-    );
-  } catch {
-    return String(data);
-  }
-}
+        `Retrying in ${delay}ms.`
+      );
 
-function sendError(
-  res,
-  status,
-  message,
-  details
-) {
-  if (res.headersSent) {
-    try {
-      res.end();
-    } catch {}
-
-    return;
-  }
-
-  const response = {
-    error: {
-      message: String(message)
+      await sleep(delay);
     }
-  };
-
-  if (
-    details !== null &&
-    details !== undefined
-  ) {
-    response.error.details =
-      details;
   }
 
-  return res
-    .status(status)
-    .json(response);
+  throw (
+    lastError ||
+    new Error(
+      "NVIDIA request failed."
+    )
+  );
 }
 
 /* ============================================================
@@ -2503,7 +1794,9 @@ app.disable(
   "x-powered-by"
 );
 
-app.use(cors());
+app.use(
+  cors()
+);
 
 app.use(
   express.json({
@@ -2517,7 +1810,10 @@ app.use(
 
 app.get(
   "/",
-  function (req, res) {
+  function (
+    req,
+    res
+  ) {
     res.json({
       status: "online",
 
@@ -2551,13 +1847,10 @@ app.get(
         NIM_TIMEOUT,
 
       kimi_memory:
-        KIMI_MEMORY_ENABLED,
+        false,
 
-      kimi_context_budget:
-        KIMI_CONTEXT_BUDGET,
-
-      kimi_active_conversations:
-        kimiConversationStore.size
+      janitor_context_passthrough:
+        true
     });
   }
 );
@@ -2568,7 +1861,10 @@ app.get(
 
 app.get(
   "/health",
-  function (req, res) {
+  function (
+    req,
+    res
+  ) {
     res.json({
       ok: true,
 
@@ -2593,13 +1889,16 @@ app.get(
         DEFAULT_MAX_TOKENS,
 
       kimi_memory:
-        KIMI_MEMORY_ENABLED,
+        false,
 
-      kimi_context_budget:
-        KIMI_CONTEXT_BUDGET,
+      janitor_context_passthrough:
+        true,
 
-      kimi_active_conversations:
-        kimiConversationStore.size
+      nim_timeout_ms:
+        NIM_TIMEOUT,
+
+      nim_max_retries:
+        NIM_MAX_RETRIES
     });
   }
 );
@@ -2610,7 +1909,10 @@ app.get(
 
 app.get(
   "/v1/models",
-  async function (req, res) {
+  async function (
+    req,
+    res
+  ) {
     try {
       const upstreamModels =
         await fetchNimModels();
@@ -2620,7 +1922,8 @@ app.get(
       ) {
         return res.json({
           object: "list",
-          data: upstreamModels
+          data:
+            upstreamModels
         });
       }
 
@@ -2628,13 +1931,21 @@ app.get(
         Object.entries(
           MODELS
         ).map(
-          ([id, config]) => ({
+          (
+            [
+              id,
+              config
+            ]
+          ) => ({
             id,
-            object: "model",
+
+            object:
+              "model",
 
             created:
               Math.floor(
-                Date.now() / 1000
+                Date.now() /
+                  1000
               ),
 
             owned_by:
@@ -2657,6 +1968,7 @@ app.get(
         res,
         502,
         "Unable to retrieve NVIDIA NIM models.",
+
         error?.message ||
           String(error)
       );
@@ -2670,7 +1982,10 @@ app.get(
 
 app.post(
   "/v1/models/refresh",
-  async function (req, res) {
+  async function (
+    req,
+    res
+  ) {
     try {
       const models =
         await fetchNimModels(
@@ -2679,14 +1994,19 @@ app.post(
 
       return res.json({
         object: "list",
-        data: models,
-        count: models.length
+
+        data:
+          models,
+
+        count:
+          models.length
       });
     } catch (error) {
       return sendError(
         res,
         502,
         "Unable to refresh NVIDIA NIM model list.",
+
         error?.message ||
           String(error)
       );
@@ -2700,13 +2020,10 @@ app.post(
 
 app.post(
   "/v1/chat/completions",
-  async function (req, res) {
-    let kimiConversationId =
-      null;
-
-    let kimiStreamAccumulator =
-      null;
-
+  async function (
+    req,
+    res
+  ) {
     try {
       if (!NIM_API_KEY) {
         return sendError(
@@ -2717,13 +2034,15 @@ app.post(
       }
 
       const incoming =
-        isPlainObject(req.body)
+        isPlainObject(
+          req.body
+        )
           ? req.body
           : {};
 
       const requestedModel =
         typeof incoming.model ===
-          "string" &&
+            "string" &&
         incoming.model.trim()
           ? incoming.model.trim()
           : DEFAULT_MODEL;
@@ -2732,27 +2051,62 @@ app.post(
         requestedModel;
 
       const normalizedModel =
-        normalizeModel(model);
+        normalizeModel(
+          model
+        );
 
       const modelConfig =
-        getModelConfig(model);
+        getModelConfig(
+          model
+        );
+
+      /* ======================================================
+         MODEL VALIDATION
+      ====================================================== */
 
       if (
-        !isSupportedModel(model)
+        !isSupportedModel(
+          model
+        )
       ) {
         return sendError(
           res,
           400,
           "Unsupported model: " +
             model,
+
           {
             explicitly_configured_models:
-              Object.keys(MODELS)
+              Object.keys(
+                MODELS
+              )
           }
         );
       }
 
-      let messages =
+      /* ======================================================
+         JANITOR CONTEXT
+      ====================================================== */
+
+      /*
+       * This is deliberately simple.
+       *
+       * JanitorAI sends the conversation.
+       *
+       * We forward that conversation.
+       *
+       * We do NOT:
+       *
+       * - save it
+       * - hash it
+       * - merge it
+       * - infer a session
+       * - create a server-side conversation
+       * - append assistant replies
+       * - maintain Kimi memory
+       */
+
+      const messages =
         normalizeMessages(
           incoming.messages
         );
@@ -2767,40 +2121,28 @@ app.post(
         );
       }
 
-      /* ======================================================
-         KIMI MEMORY
-      ====================================================== */
+      if (DEBUG_PROXY) {
+        console.log(
+          "MODEL:",
+          model
+        );
 
-      if (
-        normalizedModel ===
-          "moonshotai/kimi-k3" &&
-        KIMI_MEMORY_ENABLED
-      ) {
-        const kimiContext =
-          buildKimiMemoryContext(
-            req,
-            incoming,
-            messages
-          );
+        console.log(
+          "JANITOR MESSAGES:",
+          messages.length
+        );
 
-        kimiConversationId =
-          kimiContext.conversationId;
+        console.log(
+          "FIRST MESSAGE ROLE:",
+          messages[0]?.role
+        );
 
-        messages =
-          kimiContext.messages;
-
-        if (DEBUG_PROXY) {
-          console.log(
-            "KIMI MEMORY:",
-            kimiConversationId,
-            "messages:",
-            messages.length,
-            "estimated tokens:",
-            estimateKimiMessagesTokens(
-              messages
-            )
-          );
-        }
+        console.log(
+          "LAST MESSAGE ROLE:",
+          messages[
+            messages.length - 1
+          ]?.role
+        );
       }
 
       /* ======================================================
@@ -2813,6 +2155,10 @@ app.post(
           true
         );
 
+      /* ======================================================
+         BUILD NIM REQUEST
+      ====================================================== */
+
       const nimRequest =
         buildNimRequest(
           incoming,
@@ -2822,11 +2168,50 @@ app.post(
         );
 
       if (DEBUG_PROXY) {
+        /*
+         * Do NOT print the entire prompt.
+         *
+         * Janitor conversations may contain
+         * private/user-generated content.
+         */
+
         console.log(
-          "NIM REQUEST:",
-          JSON.stringify(
-            nimRequest
-          )
+          "NIM REQUEST SUMMARY:",
+          {
+            model:
+              nimRequest.model,
+
+            message_count:
+              Array.isArray(
+                nimRequest.messages
+              )
+                ? nimRequest
+                    .messages
+                    .length
+                : 0,
+
+            temperature:
+              nimRequest.temperature,
+
+            top_p:
+              nimRequest.top_p,
+
+            max_tokens:
+              nimRequest.max_tokens,
+
+            stream:
+              nimRequest.stream,
+
+            reasoning_effort:
+              nimRequest.reasoning_effort,
+
+            reasoning_budget:
+              nimRequest.reasoning_budget,
+
+            chat_template_kwargs:
+              nimRequest
+                .chat_template_kwargs
+          }
         );
       }
 
@@ -2834,45 +2219,10 @@ app.post(
          NVIDIA REQUEST
       ====================================================== */
 
-      const axiosConfig = {
-        headers: {
-          Authorization:
-            "Bearer " +
-            NIM_API_KEY,
-
-          "Content-Type":
-            "application/json",
-
-          Accept:
-            stream
-              ? "text/event-stream"
-              : "application/json"
-        },
-
-        timeout:
-          NIM_TIMEOUT,
-
-        httpAgent,
-        httpsAgent,
-
-        validateStatus:
-          () => true
-      };
-
       const response =
-        await axios.post(
-          NIM_API_BASE +
-            "/chat/completions",
-
+        await requestNim(
           nimRequest,
-
           stream
-            ? {
-                ...axiosConfig,
-                responseType:
-                  "stream"
-              }
-            : axiosConfig
         );
 
       /* ======================================================
@@ -2921,16 +2271,42 @@ app.post(
           );
 
         console.error(
-          "NVIDIA NIM ERROR",
-          normalizedModel,
-          response.status,
+          "=================================================="
+        );
+
+        console.error(
+          "NVIDIA NIM ERROR"
+        );
+
+        console.error(
+          "Model:",
+          normalizedModel
+        );
+
+        console.error(
+          "HTTP:",
+          response.status
+        );
+
+        console.error(
+          "Message:",
           upstreamMessage
         );
 
+        console.error(
+          "Body:",
+          errorBody
+        );
+
+        console.error(
+          "=================================================="
+        );
+
         /*
-         * Refresh model cache asynchronously.
-         * Don't make the user wait for it.
+         * Refresh the model cache for
+         * model-related errors.
          */
+
         if (
           response.status ===
             400 ||
@@ -2939,11 +2315,14 @@ app.post(
         ) {
           fetchNimModels(
             true
-          ).catch(() => {});
+          ).catch(
+            () => {}
+          );
         }
 
         const proxyStatus =
-          response.status >= 500
+          response.status >=
+          500
             ? 502
             : response.status;
 
@@ -2954,6 +2333,7 @@ app.post(
             "NVIDIA NIM returned HTTP " +
               response.status +
               ".",
+
           {
             upstream_status:
               response.status,
@@ -2969,27 +2349,6 @@ app.post(
       ====================================================== */
 
       if (!stream) {
-        if (
-          normalizedModel ===
-            "moonshotai/kimi-k3" &&
-          kimiConversationId &&
-          KIMI_MEMORY_ENABLED
-        ) {
-          const assistantMessage =
-            extractKimiAssistantMessage(
-              response.data
-            );
-
-          if (
-            assistantMessage
-          ) {
-            appendKimiAssistantMessage(
-              kimiConversationId,
-              assistantMessage
-            );
-          }
-        }
-
         return res
           .status(200)
           .json(
@@ -3047,16 +2406,6 @@ app.post(
         );
       }
 
-      if (
-        normalizedModel ===
-          "moonshotai/kimi-k3" &&
-        kimiConversationId &&
-        KIMI_MEMORY_ENABLED
-      ) {
-        kimiStreamAccumulator =
-          createKimiStreamAccumulator();
-      }
-
       let buffer = "";
       let ended = false;
       let clientDisconnected =
@@ -3097,9 +2446,15 @@ app.post(
         }
       );
 
+      /* ======================================================
+         STREAM DATA
+      ====================================================== */
+
       upstream.on(
         "data",
-        function (chunk) {
+        function (
+          chunk
+        ) {
           if (
             ended ||
             clientDisconnected
@@ -3128,10 +2483,6 @@ app.post(
                 separatorIndex
               );
 
-            /*
-             * Determine whether separator
-             * was \n\n or \r\n\r\n.
-             */
             const separatorLength =
               buffer[
                 separatorIndex
@@ -3144,19 +2495,6 @@ app.post(
                 separatorIndex +
                   separatorLength
               );
-
-            /*
-             * Accumulate Kimi before stripping
-             * reasoning from what the client sees.
-             */
-            if (
-              kimiStreamAccumulator
-            ) {
-              addKimiSSEToAccumulator(
-                kimiStreamAccumulator,
-                event
-              );
-            }
 
             const output =
               processSSEEvent(
@@ -3179,6 +2517,10 @@ app.post(
         }
       );
 
+      /* ======================================================
+         STREAM END
+      ====================================================== */
+
       upstream.on(
         "end",
         function () {
@@ -3189,21 +2531,13 @@ app.post(
           ended = true;
 
           /*
-           * Process final partial event.
+           * Process a final partial event.
            */
+
           if (
             buffer.trim() &&
             !clientDisconnected
           ) {
-            if (
-              kimiStreamAccumulator
-            ) {
-              addKimiSSEToAccumulator(
-                kimiStreamAccumulator,
-                buffer
-              );
-            }
-
             const output =
               processSSEEvent(
                 buffer
@@ -3218,23 +2552,6 @@ app.post(
             }
           }
 
-          /*
-           * Save complete Kimi assistant
-           * response after stream completion.
-           */
-          if (
-            kimiStreamAccumulator &&
-            kimiConversationId &&
-            KIMI_MEMORY_ENABLED
-          ) {
-            appendKimiAssistantMessage(
-              kimiConversationId,
-              finalizeKimiStreamAccumulator(
-                kimiStreamAccumulator
-              )
-            );
-          }
-
           if (
             !clientDisconnected
           ) {
@@ -3245,9 +2562,15 @@ app.post(
         }
       );
 
+      /* ======================================================
+         STREAM ERROR
+      ====================================================== */
+
       upstream.on(
         "error",
-        function (error) {
+        function (
+          error
+        ) {
           if (ended) {
             return;
           }
@@ -3267,6 +2590,7 @@ app.post(
               res,
               502,
               "NVIDIA streaming connection failed.",
+
               error?.message ||
                 String(error)
             );
@@ -3277,12 +2601,25 @@ app.post(
           } catch {}
         }
       );
-    } catch (error) {
+    } catch (
+      error
+    ) {
       console.error(
-        "PROXY ERROR:",
+        "=================================================="
+      );
+
+      console.error(
+        "PROXY ERROR"
+      );
+
+      console.error(
         error?.stack ||
           error?.message ||
           error
+      );
+
+      console.error(
+        "=================================================="
       );
 
       if (
@@ -3303,6 +2640,7 @@ app.post(
           res,
           504,
           "NVIDIA NIM request timed out.",
+
           {
             timeout_ms:
               NIM_TIMEOUT
@@ -3318,6 +2656,20 @@ app.post(
           res,
           502,
           "Connection to NVIDIA NIM was reset.",
+
+          error.message
+        );
+      }
+
+      if (
+        error?.code ===
+        "ETIMEDOUT"
+      ) {
+        return sendError(
+          res,
+          504,
+          "Connection to NVIDIA NIM timed out.",
+
           error.message
         );
       }
@@ -3326,6 +2678,7 @@ app.post(
         res,
         500,
         "Proxy request failed.",
+
         error?.message ||
           String(error)
       );
@@ -3338,7 +2691,10 @@ app.post(
 ============================================================ */
 
 app.use(
-  function (req, res) {
+  function (
+    req,
+    res
+  ) {
     return sendError(
       res,
       404,
@@ -3375,6 +2731,7 @@ app.use(
       res,
       500,
       "Internal proxy error.",
+
       error?.message ||
         null
     );
@@ -3391,7 +2748,15 @@ const server =
     "0.0.0.0",
     function () {
       console.log(
-        "JanitorAI -> NVIDIA NIM Proxy listening on 0.0.0.0:" +
+        "=================================================="
+      );
+
+      console.log(
+        "JanitorAI -> NVIDIA NIM Proxy"
+      );
+
+      console.log(
+        "Listening on 0.0.0.0:" +
           PORT
       );
 
@@ -3401,30 +2766,52 @@ const server =
       );
 
       console.log(
-        "Kimi memory:",
-        KIMI_MEMORY_ENABLED
-      );
-
-      console.log(
         "NIM endpoint:",
         NIM_API_BASE
       );
 
+      console.log(
+        "NIM timeout:",
+        NIM_TIMEOUT + "ms"
+      );
+
+      console.log(
+        "NIM retries:",
+        NIM_MAX_RETRIES
+      );
+
+      console.log(
+        "Kimi server memory: DISABLED"
+      );
+
+      console.log(
+        "Janitor context passthrough: ENABLED"
+      );
+
+      console.log(
+        "=================================================="
+      );
+
       fetchNimModels()
-        .then(models => {
-          console.log(
-            "NVIDIA reports",
-            models.length,
-            "available model(s)."
-          );
-        })
-        .catch(error => {
-          console.warn(
-            "Initial NVIDIA model discovery failed:",
-            error?.message ||
-              error
-          );
-        });
+        .then(
+          models => {
+            console.log(
+              "NVIDIA reports",
+              models.length,
+              "available model(s)."
+            );
+          }
+        )
+        .catch(
+          error => {
+            console.warn(
+              "Initial NVIDIA model discovery failed:",
+
+              error?.message ||
+                error
+            );
+          }
+        );
     }
   );
 
@@ -3439,6 +2826,7 @@ server.requestTimeout = 0;
 server.keepAliveTimeout =
   Math.max(
     65000,
+
     Math.min(
       NIM_TIMEOUT + 5000,
       120000
@@ -3448,6 +2836,7 @@ server.keepAliveTimeout =
 server.headersTimeout =
   Math.max(
     66000,
+
     Math.min(
       NIM_TIMEOUT + 10000,
       125000
@@ -3458,7 +2847,9 @@ server.headersTimeout =
    GRACEFUL SHUTDOWN
 ============================================================ */
 
-function shutdown(signal) {
+function shutdown(
+  signal
+) {
   console.log(
     signal +
       " received. Shutting down..."
@@ -3488,10 +2879,16 @@ function shutdown(signal) {
 
 process.on(
   "SIGTERM",
-  () => shutdown("SIGTERM")
+  () =>
+    shutdown(
+      "SIGTERM"
+    )
 );
 
 process.on(
   "SIGINT",
-  () => shutdown("SIGINT")
+  () =>
+    shutdown(
+      "SIGINT"
+    )
 );
