@@ -30,22 +30,88 @@ const DEFAULT_MODEL =
   "moonshotai/kimi-k3";
 
 /* ============================================================
+   BASIC HELPERS
+============================================================ */
+
+function isPlainObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
+function isFiniteNumber(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+
+  if (
+    typeof value === "string" &&
+    value.trim() !== ""
+  ) {
+    return Number.isFinite(Number(value));
+  }
+
+  return false;
+}
+
+function numberOrDefault(value, fallback) {
+  return isFiniteNumber(value)
+    ? Number(value)
+    : fallback;
+}
+
+function parseBoolean(value, fallback) {
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized =
+      value.trim().toLowerCase();
+
+    if (
+      normalized === "true" ||
+      normalized === "1" ||
+      normalized === "yes" ||
+      normalized === "on"
+    ) {
+      return true;
+    }
+
+    if (
+      normalized === "false" ||
+      normalized === "0" ||
+      normalized === "no" ||
+      normalized === "off"
+    ) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeModel(model) {
+  return String(model || "")
+    .trim()
+    .toLowerCase();
+}
+
+/* ============================================================
    MODEL CONFIGURATION
-
-   IMPORTANT:
-
-   - JanitorAI remains responsible for conversation history.
-   - This proxy does NOT maintain conversation memory.
-   - Every valid JanitorAI completion request produces exactly
-     ONE NVIDIA /chat/completions request.
-   - NO RETRIES are performed.
-
-   Nemotron 3 Ultra:
-     chat_template_kwargs.enable_thinking controls reasoning.
-
-   Kimi K3:
-     Reasoning remains enabled permanently.
-     There is intentionally NO "none" option for Kimi.
 ============================================================ */
 
 const MODELS = {
@@ -86,8 +152,8 @@ const MODELS = {
     provider: "Moonshot AI",
 
     /*
-     * Kimi reasoning is intentionally ALWAYS enabled.
-     * Do not add "none".
+     * Kimi reasoning is ALWAYS enabled.
+     * There is intentionally no "none" option.
      */
     reasoningLevels: [
       "low",
@@ -105,8 +171,9 @@ const MODELS = {
     provider: "NVIDIA",
 
     /*
-     * Nemotron uses enable_thinking rather than
-     * reasoning_effort.
+     * Nemotron controls reasoning through:
+     *
+     * chat_template_kwargs.enable_thinking
      */
     reasoningLevels: [
       "none",
@@ -152,6 +219,11 @@ const DEFAULT_REASONING_BUDGET =
       )
     : 16384;
 
+/*
+ * IMPORTANT:
+ *
+ * These model IDs must exactly match MODELS above.
+ */
 const MODEL_REASONING_BUDGETS = {
   "deepseek-ai/deepseek-v4-flash-0731":
     16384,
@@ -162,7 +234,7 @@ const MODEL_REASONING_BUDGETS = {
   "moonshotai/kimi-k3":
     32768,
 
-  "nvidia/ron-3-ultra-550b-a55b":
+  "nvidia/nemotron-3-ultra-550b-a55b":
     16384
 };
 
@@ -176,7 +248,7 @@ const MODEL_REASONING_EFFORTS = {
   "moonshotai/kimi-k3":
     "max",
 
-  "nvidia/ron-3-ultra-550b-a55b":
+  "nvidia/nemotron-3-ultra-550b-a55b":
     "high"
 };
 
@@ -244,27 +316,11 @@ const DEFAULT_PRESENCE_PENALTY =
     ? Number(
         process.env.DEFAULT_PRESENCE_PENALTY
       )
+    )
     : 0.0;
 
 /* ============================================================
    NEMOTRON THINKING DEFAULT
-
-   Set:
-
-     NEMOTRON_ENABLE_THINKING=true
-
-   or:
-
-     NEMOTRON_ENABLE_THINKING=false
-
-   A request can explicitly override this with:
-
-     chat_template_kwargs.enable_thinking
-
-   or:
-
-     reasoning_effort
-     reasoning_mode
 ============================================================ */
 
 const DEFAULT_NEMOTRON_THINKING =
@@ -275,15 +331,6 @@ const DEFAULT_NEMOTRON_THINKING =
 
 /* ============================================================
    RESPONSE REASONING VISIBILITY
-
-   true:
-     Remove reasoning fields before sending responses to
-     JanitorAI.
-
-   false:
-     Preserve them.
-
-   Default is true.
 ============================================================ */
 
 const STRIP_REASONING_FROM_RESPONSE =
@@ -341,10 +388,6 @@ const DEBUG_PROXY =
 
 /* ============================================================
    MODEL CACHE
-
-   This cache is ONLY for /models discovery.
-
-   It is NEVER used to retry chat completions.
 ============================================================ */
 
 let modelCache = null;
@@ -360,107 +403,11 @@ const MODEL_CACHE_TTL =
     ? Number(
         process.env.MODEL_CACHE_TTL_MS
       )
-    )
     : 300000;
 
 /* ============================================================
-   BASIC HELPERS
+   MODEL HELPERS
 ============================================================ */
-
-function isPlainObject(value) {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value)
-  );
-}
-
-function isFiniteNumber(value) {
-  if (
-    typeof value === "number"
-  ) {
-    return Number.isFinite(value);
-  }
-
-  if (
-    typeof value === "string" &&
-    value.trim() !== ""
-  ) {
-    return Number.isFinite(
-      Number(value)
-    );
-  }
-
-  return false;
-}
-
-function numberOrDefault(
-  value,
-  fallback
-) {
-  return isFiniteNumber(value)
-    ? Number(value)
-    : fallback;
-}
-
-function parseBoolean(
-  value,
-  fallback
-) {
-  if (
-    value === undefined ||
-    value === null
-  ) {
-    return fallback;
-  }
-
-  if (
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-
-  if (
-    typeof value === "number"
-  ) {
-    return value !== 0;
-  }
-
-  if (
-    typeof value === "string"
-  ) {
-    const normalized =
-      value
-        .trim()
-        .toLowerCase();
-
-    if (
-      normalized === "true" ||
-      normalized === "1" ||
-      normalized === "yes" ||
-      normalized === "on"
-    ) {
-      return true;
-    }
-
-    if (
-      normalized === "false" ||
-      normalized === "0" ||
-      normalized === "no" ||
-      normalized === "off"
-    ) {
-      return false;
-    }
-  }
-
-  return fallback;
-}
-
-function normalizeModel(model) {
-  return String(model || "")
-    .trim()
-    .toLowerCase();
-}
 
 function getModelConfig(model) {
   return (
@@ -477,9 +424,22 @@ function isSupportedModel(model) {
   );
 }
 
-function clampTemperature(value) {
+/* ============================================================
+   GENERATION HELPERS
+============================================================ */
+
+function clampTemperature(
+  value,
+  model
+) {
+  const maximum =
+    normalizeModel(model) ===
+    "moonshotai/kimi-k3"
+      ? 1
+      : 2;
+
   return Math.min(
-    2,
+    maximum,
     Math.max(
       0,
       numberOrDefault(
@@ -519,7 +479,8 @@ function clampMaxTokens(
     );
 
   if (
-    modelConfig?.maxOutputTokens
+    modelConfig &&
+    modelConfig.maxOutputTokens
   ) {
     return Math.min(
       modelConfig.maxOutputTokens,
@@ -598,33 +559,23 @@ function budgetToReasoningEffort(
     return "high";
   }
 
-  if (
-    levels.includes("max")
-  ) {
+  if (levels.includes("max")) {
     return "max";
   }
 
-  if (
-    levels.includes("high")
-  ) {
+  if (levels.includes("high")) {
     return "high";
   }
 
-  if (
-    levels.includes("medium")
-  ) {
+  if (levels.includes("medium")) {
     return "medium";
   }
 
-  if (
-    levels.includes("low")
-  ) {
+  if (levels.includes("low")) {
     return "low";
   }
 
-  return (
-    levels[0] || "none"
-  );
+  return levels[0] || "none";
 }
 
 function normalizeReasoningEffort(
@@ -635,18 +586,12 @@ function normalizeReasoningEffort(
     modelConfig?.reasoningLevels ||
     [];
 
-  if (
-    typeof value === "string"
-  ) {
+  if (typeof value === "string") {
     const normalized =
-      value
-        .trim()
-        .toLowerCase();
+      value.trim().toLowerCase();
 
     if (
-      levels.includes(
-        normalized
-      )
+      levels.includes(normalized)
     ) {
       return normalized;
     }
@@ -696,17 +641,16 @@ function getRequestedReasoningEffort(
   model,
   modelConfig
 ) {
+  const normalizedModel =
+    normalizeModel(model);
+
   /*
-   * Kimi is intentionally always reasoning.
+   * Kimi K3:
    *
-   * Even if a caller tries:
-   *
-   *   reasoning_effort: "none"
-   *
-   * we normalize it back to a valid Kimi level.
+   * NEVER disable reasoning.
    */
   if (
-    normalizeModel(model) ===
+    normalizedModel ===
     "moonshotai/kimi-k3"
   ) {
     if (
@@ -719,13 +663,9 @@ function getRequestedReasoningEffort(
           modelConfig
         );
 
-      if (
-        requested === "none"
-      ) {
-        return "max";
-      }
-
-      return requested;
+      return requested === "none"
+        ? "max"
+        : requested;
     }
 
     if (
@@ -738,13 +678,9 @@ function getRequestedReasoningEffort(
           modelConfig
         );
 
-      if (
-        requested === "none"
-      ) {
-        return "max";
-      }
-
-      return requested;
+      return requested === "none"
+        ? "max"
+        : requested;
     }
 
     return "max";
@@ -792,12 +728,12 @@ function getRequestedReasoningEffort(
 
   if (
     MODEL_REASONING_EFFORTS[
-      model
+      normalizedModel
     ]
   ) {
     return normalizeReasoningEffort(
       MODEL_REASONING_EFFORTS[
-        model
+        normalizedModel
       ],
       modelConfig
     );
@@ -828,12 +764,27 @@ function getNemotronThinking(
     isPlainObject(
       incoming.chat_template_kwargs
     ) &&
-    typeof incoming.chat_template_kwargs
+    typeof incoming
+      .chat_template_kwargs
       .enable_thinking === "boolean"
   ) {
     return (
-      incoming.chat_template_kwargs
+      incoming
+        .chat_template_kwargs
         .enable_thinking
+    );
+  }
+
+  /*
+   * Optional top-level convenience flag.
+   */
+  if (
+    incoming.enable_thinking !==
+    undefined
+  ) {
+    return parseBoolean(
+      incoming.enable_thinking,
+      DEFAULT_NEMOTRON_THINKING
     );
   }
 
@@ -848,15 +799,11 @@ function getNemotronThinking(
     const value =
       incoming.reasoning_effort;
 
-    if (
-      typeof value === "boolean"
-    ) {
+    if (typeof value === "boolean") {
       return value;
     }
 
-    if (
-      typeof value === "number"
-    ) {
+    if (typeof value === "number") {
       return value !== 0;
     }
 
@@ -907,15 +854,11 @@ function getNemotronThinking(
     const value =
       incoming.reasoning_mode;
 
-    if (
-      typeof value === "boolean"
-    ) {
+    if (typeof value === "boolean") {
       return value;
     }
 
-    if (
-      typeof value === "number"
-    ) {
+    if (typeof value === "number") {
       return value !== 0;
     }
 
@@ -962,29 +905,20 @@ function getNemotronThinking(
    MESSAGE NORMALIZATION
 ============================================================ */
 
-function normalizeMessages(
-  messages
-) {
-  if (
-    !Array.isArray(messages)
-  ) {
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) {
     return [];
   }
 
   const result = [];
 
-  for (
-    const message of messages
-  ) {
-    if (
-      !isPlainObject(message)
-    ) {
+  for (const message of messages) {
+    if (!isPlainObject(message)) {
       continue;
     }
 
     if (
-      typeof message.role !==
-        "string" ||
+      typeof message.role !== "string" ||
       !message.role.trim()
     ) {
       continue;
@@ -992,9 +926,7 @@ function normalizeMessages(
 
     result.push({
       ...message,
-
-      role:
-        message.role.trim()
+      role: message.role.trim()
     });
   }
 
@@ -1017,19 +949,21 @@ function buildNimRequest(
   const modelConfig =
     getModelConfig(model);
 
+  /*
+   * Kimi has more restricted sampling parameters.
+   */
+  const isKimi =
+    normalizedModel ===
+    "moonshotai/kimi-k3";
+
   const request = {
     model,
-
     messages,
 
     temperature:
       clampTemperature(
-        incoming.temperature
-      ),
-
-    top_p:
-      clampTopP(
-        incoming.top_p
+        incoming.temperature,
+        model
       ),
 
     max_tokens:
@@ -1041,13 +975,25 @@ function buildNimRequest(
     stream
   };
 
+  /*
+   * Do not send unsupported/default sampling
+   * parameters to Kimi.
+   */
+  if (!isKimi) {
+    request.top_p =
+      clampTopP(
+        incoming.top_p
+      );
+  }
+
   /* ==========================================================
      OPTIONAL GENERATION PARAMETERS
   ========================================================== */
 
   if (
+    !isKimi &&
     incoming.repetition_penalty !==
-    undefined
+      undefined
   ) {
     request.repetition_penalty =
       numberOrDefault(
@@ -1057,8 +1003,9 @@ function buildNimRequest(
   }
 
   if (
+    !isKimi &&
     incoming.frequency_penalty !==
-    undefined
+      undefined
   ) {
     request.frequency_penalty =
       numberOrDefault(
@@ -1068,8 +1015,9 @@ function buildNimRequest(
   }
 
   if (
+    !isKimi &&
     incoming.presence_penalty !==
-    undefined
+      undefined
   ) {
     request.presence_penalty =
       numberOrDefault(
@@ -1092,12 +1040,15 @@ function buildNimRequest(
     "user",
     "parallel_tool_calls",
     "stream_options",
-    "n",
     "service_tier",
     "modalities",
     "audio"
   ];
 
+  /*
+   * "n" is deliberately excluded because Kimi
+   * does not expose it as a configurable parameter.
+   */
   for (
     const parameter of
       optionalParameters
@@ -1153,10 +1104,6 @@ function buildNimRequest(
         incoming
       );
 
-    /*
-     * Nemotron uses this field to control
-     * reasoning.
-     */
     request.chat_template_kwargs = {
       ...(request.chat_template_kwargs ||
         {}),
@@ -1165,13 +1112,7 @@ function buildNimRequest(
         enableThinking
     };
 
-    /*
-     * reasoning_budget only exists when
-     * reasoning is enabled.
-     */
-    if (
-      enableThinking
-    ) {
+    if (enableThinking) {
       const requestedBudget =
         incoming.reasoning_budget !==
         undefined
@@ -1190,14 +1131,12 @@ function buildNimRequest(
     }
 
     /*
-     * NVIDIA recommends this for tool/coding
-     * use when thinking is enabled.
+     * NVIDIA recommends force_nonempty_content
+     * for tool/coding scenarios when thinking is on.
      */
     if (
       enableThinking &&
-      Array.isArray(
-        request.tools
-      ) &&
+      Array.isArray(request.tools) &&
       request.tools.length > 0
     ) {
       request.chat_template_kwargs = {
@@ -1209,10 +1148,12 @@ function buildNimRequest(
     }
 
     /*
-     * These are NOT sent to Nemotron.
+     * These parameters must not be sent to
+     * Nemotron as reasoning controls.
      */
     delete request.reasoning_effort;
     delete request.reasoning_mode;
+    delete request.enable_thinking;
     delete request.nvext;
 
     return request;
@@ -1273,28 +1214,15 @@ function buildNimRequest(
 
   /* ==========================================================
      KIMI K3
-
-     IMPORTANT:
-
-     Kimi reasoning is ALWAYS enabled.
-
-     The client cannot turn it off through:
-       reasoning_effort: none
-       reasoning_mode: none
-       reasoning_effort: off
-       reasoning_mode: off
-       reasoning_effort: false
-       reasoning_mode: false
-       reasoning_effort: 0
-       reasoning_mode: 0
-
-     They are normalized to "max".
   ========================================================== */
 
   if (
     normalizedModel ===
     "moonshotai/kimi-k3"
   ) {
+    /*
+     * Kimi reasoning is NEVER disabled.
+     */
     const reasoningEffort =
       getRequestedReasoningEffort(
         incoming,
@@ -1306,6 +1234,23 @@ function buildNimRequest(
       reasoningEffort === "none"
         ? "max"
         : reasoningEffort;
+
+    /*
+     * Prevent callers from injecting a false
+     * reasoning-off configuration through extra_body
+     * or chat_template_kwargs.
+     */
+    if (
+      isPlainObject(
+        request.chat_template_kwargs
+      )
+    ) {
+      delete request
+        .chat_template_kwargs
+        .enable_thinking;
+    }
+
+    delete request.reasoning_mode;
 
     return request;
   }
@@ -1340,8 +1285,6 @@ function buildNimRequest(
           incoming.reasoning_budget
         );
     }
-
-    return request;
   }
 
   return request;
@@ -1351,24 +1294,17 @@ function buildNimRequest(
    REMOVE REASONING FROM CLIENT RESPONSE
 ============================================================ */
 
-function stripReasoning(
-  parsed
-) {
+function stripReasoning(parsed) {
   if (
     !STRIP_REASONING_FROM_RESPONSE ||
     !parsed ||
     typeof parsed !== "object" ||
-    !Array.isArray(
-      parsed.choices
-    )
+    !Array.isArray(parsed.choices)
   ) {
     return parsed;
   }
 
-  for (
-    const choice of
-      parsed.choices
-  ) {
+  for (const choice of parsed.choices) {
     if (
       !choice ||
       typeof choice !== "object"
@@ -1406,13 +1342,8 @@ function stripReasoning(
    SSE PROCESSING
 ============================================================ */
 
-function processSSEEvent(
-  event
-) {
-  if (
-    !event ||
-    !event.trim()
-  ) {
+function processSSEEvent(event) {
+  if (!event || !event.trim()) {
     return "";
   }
 
@@ -1421,12 +1352,8 @@ function processSSEEvent(
 
   const output = [];
 
-  for (
-    const line of lines
-  ) {
-    if (
-      !line.startsWith("data:")
-    ) {
+  for (const line of lines) {
+    if (!line.startsWith("data:")) {
       output.push(line);
       continue;
     }
@@ -1439,13 +1366,8 @@ function processSSEEvent(
       continue;
     }
 
-    if (
-      data === "[DONE]"
-    ) {
-      output.push(
-        "data: [DONE]"
-      );
-
+    if (data === "[DONE]") {
+      output.push("data: [DONE]");
       continue;
     }
 
@@ -1453,26 +1375,19 @@ function processSSEEvent(
       const parsed =
         JSON.parse(data);
 
-      stripReasoning(
-        parsed
-      );
+      stripReasoning(parsed);
 
       output.push(
         "data: " +
           JSON.stringify(parsed)
       );
     } catch {
-      /*
-       * If an upstream SSE data line is not JSON,
-       * pass it through unchanged.
-       */
       output.push(line);
     }
   }
 
   return output.length
-    ? output.join("\n") +
-        "\n\n"
+    ? output.join("\n") + "\n\n"
     : "";
 }
 
@@ -1480,88 +1395,68 @@ function processSSEEvent(
    ERROR HELPERS
 ============================================================ */
 
-function readStream(
-  stream
-) {
-  return new Promise(
-    resolve => {
-      let output = "";
-      let finished = false;
+function readStream(stream) {
+  return new Promise(resolve => {
+    let output = "";
+    let finished = false;
 
-      function finish() {
-        if (finished) {
+    function finish() {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      resolve(output);
+    }
+
+    stream.on(
+      "data",
+      chunk => {
+        if (
+          output.length >=
+          MAX_ERROR_BODY_SIZE
+        ) {
           return;
         }
 
-        finished = true;
+        output += chunk.toString("utf8");
 
-        resolve(output);
-      }
-
-      stream.on(
-        "data",
-        chunk => {
-          if (
-            output.length >=
-            MAX_ERROR_BODY_SIZE
-          ) {
-            return;
-          }
-
-          output +=
-            chunk.toString(
-              "utf8"
+        if (
+          output.length >
+          MAX_ERROR_BODY_SIZE
+        ) {
+          output =
+            output.slice(
+              0,
+              MAX_ERROR_BODY_SIZE
             );
-
-          if (
-            output.length >
-            MAX_ERROR_BODY_SIZE
-          ) {
-            output =
-              output.slice(
-                0,
-                MAX_ERROR_BODY_SIZE
-              );
-          }
         }
-      );
+      }
+    );
 
-      stream.on(
-        "end",
-        finish
-      );
+    stream.on("end", finish);
+    stream.on("close", finish);
 
-      stream.on(
-        "close",
-        finish
-      );
+    stream.on(
+      "error",
+      error => {
+        console.error(
+          "Error while reading NVIDIA error response:",
+          error?.message || error
+        );
 
-      stream.on(
-        "error",
-        function (error) {
-          console.error(
-            "Error while reading NVIDIA error response:",
-            error?.message ||
-              error
-          );
-
-          finish();
-        }
-      );
-    }
-  );
+        finish();
+      }
+    );
+  });
 }
 
-function extractErrorMessage(
-  data
-) {
+function extractErrorMessage(data) {
   if (!data) {
     return null;
   }
 
-  if (
-    typeof data === "object"
-  ) {
+  if (typeof data === "object") {
     return (
       data.error?.message ||
       data.message ||
@@ -1589,9 +1484,7 @@ function sendError(
   message,
   details
 ) {
-  if (
-    res.headersSent
-  ) {
+  if (res.headersSent) {
     try {
       res.end();
     } catch {}
@@ -1601,8 +1494,7 @@ function sendError(
 
   const response = {
     error: {
-      message:
-        String(message)
+      message: String(message)
     }
   };
 
@@ -1620,13 +1512,7 @@ function sendError(
 }
 
 /* ============================================================
-   NIM MODEL DISCOVERY
-
-   IMPORTANT:
-
-   This endpoint is separate from chat completion.
-
-   It does NOT retry failed chat requests.
+   NVIDIA MODEL DISCOVERY
 ============================================================ */
 
 async function fetchNimModels(
@@ -1654,9 +1540,7 @@ async function fetchNimModels(
     (async () => {
       try {
         if (!NIM_API_KEY) {
-          return Array.isArray(
-            modelCache
-          )
+          return Array.isArray(modelCache)
             ? modelCache
             : [];
         }
@@ -1710,26 +1594,20 @@ async function fetchNimModels(
           response.status
         );
 
-        return Array.isArray(
-          modelCache
-        )
+        return Array.isArray(modelCache)
           ? modelCache
           : [];
       } catch (error) {
         console.warn(
           "Unable to refresh NVIDIA model list:",
-          error?.message ||
-            error
+          error?.message || error
         );
 
-        return Array.isArray(
-          modelCache
-        )
+        return Array.isArray(modelCache)
           ? modelCache
           : [];
       } finally {
-        modelCachePromise =
-          null;
+        modelCachePromise = null;
       }
     })();
 
@@ -1740,9 +1618,7 @@ async function fetchNimModels(
    HTTP REQUEST CONFIG
 ============================================================ */
 
-function createNimAxiosConfig(
-  stream
-) {
+function createNimAxiosConfig(stream) {
   return {
     headers: {
       Authorization:
@@ -1759,14 +1635,11 @@ function createNimAxiosConfig(
     },
 
     /*
-     * Axios does NOT retry requests by itself.
+     * STRICT NO-RETRY POLICY.
      *
-     * No retry adapter.
-     * No retry interceptor.
-     * No retry loop.
+     * Axios does not retry automatically.
      */
-    timeout:
-      NIM_TIMEOUT,
+    timeout: NIM_TIMEOUT,
 
     httpAgent,
     httpsAgent,
@@ -1779,18 +1652,7 @@ function createNimAxiosConfig(
 /* ============================================================
    NIM REQUEST
 
-   STRICT NO-RETRY POLICY
-
-   Every call to requestNim() performs exactly ONE:
-
-       POST /chat/completions
-
-   There is intentionally:
-     - no retry loop
-     - no axios-retry
-     - no interceptor
-     - no recursive request
-     - no second completion request
+   EXACTLY ONE POST /chat/completions
 ============================================================ */
 
 async function requestNim(
@@ -1819,23 +1681,12 @@ async function requestNim(
             )
       );
 
-    /*
-     * Successful upstream response.
-     */
     if (
       response.status >= 200 &&
       response.status < 300
     ) {
       return response;
     }
-
-    /*
-     * Upstream returned an HTTP error.
-     *
-     * We capture it and return it.
-     *
-     * We DO NOT send another completion request.
-     */
 
     let errorBody = "";
 
@@ -1862,9 +1713,7 @@ async function requestNim(
           );
       } catch {
         errorBody =
-          String(
-            response.data
-          );
+          String(response.data);
       }
     }
 
@@ -1897,6 +1746,10 @@ async function requestNim(
     );
 
     console.error(
+      "NIM RETRY: NONE"
+    );
+
+    console.error(
       "=================================================="
     );
 
@@ -1905,15 +1758,6 @@ async function requestNim(
 
     return response;
   } catch (error) {
-    /*
-     * Network/timeout error.
-     *
-     * IMPORTANT:
-     * This error is thrown back to the caller.
-     *
-     * There is NO retry.
-     */
-
     console.error(
       "=================================================="
     );
@@ -1948,6 +1792,10 @@ async function requestNim(
     );
 
     console.error(
+      "NIM RETRY: NONE"
+    );
+
+    console.error(
       "=================================================="
     );
 
@@ -1959,13 +1807,9 @@ async function requestNim(
    EXPRESS
 ============================================================ */
 
-app.disable(
-  "x-powered-by"
-);
+app.disable("x-powered-by");
 
-app.use(
-  cors()
-);
+app.use(cors());
 
 app.use(
   express.json({
@@ -1977,121 +1821,106 @@ app.use(
    ROOT
 ============================================================ */
 
-app.get(
-  "/",
-  function (
-    req,
-    res
-  ) {
-    res.json({
-      status: "online",
+app.get("/", function (req, res) {
+  res.json({
+    status: "online",
 
-      service:
-        "JanitorAI -> NVIDIA NIM Proxy",
+    service:
+      "JanitorAI -> NVIDIA NIM Proxy",
 
-      default_model:
-        DEFAULT_MODEL,
+    default_model:
+      DEFAULT_MODEL,
 
-      explicitly_configured_models:
-        Object.keys(MODELS),
+    explicitly_configured_models:
+      Object.keys(MODELS),
 
-      upstream_model_count:
-        Array.isArray(modelCache)
-          ? modelCache.length
-          : 0,
+    upstream_model_count:
+      Array.isArray(modelCache)
+        ? modelCache.length
+        : 0,
 
-      unknown_models_allowed:
-        ALLOW_UNKNOWN_MODELS,
+    unknown_models_allowed:
+      ALLOW_UNKNOWN_MODELS,
 
-      default_reasoning_effort:
-        DEFAULT_REASONING_EFFORT,
+    default_reasoning_effort:
+      DEFAULT_REASONING_EFFORT,
 
-      default_reasoning_budget:
-        DEFAULT_REASONING_BUDGET,
+    default_reasoning_budget:
+      DEFAULT_REASONING_BUDGET,
 
-      nemotron_thinking_default:
-        DEFAULT_NEMOTRON_THINKING,
+    nemotron_thinking_default:
+      DEFAULT_NEMOTRON_THINKING,
 
-      reasoning_stripped_from_response:
-        STRIP_REASONING_FROM_RESPONSE,
+    reasoning_stripped_from_response:
+      STRIP_REASONING_FROM_RESPONSE,
 
-      kimi_reasoning:
-        "always_enabled",
+    kimi_reasoning:
+      "always_enabled",
 
-      nim_api_base:
-        NIM_API_BASE,
+    nim_api_base:
+      NIM_API_BASE,
 
-      timeout_ms:
-        NIM_TIMEOUT,
+    timeout_ms:
+      NIM_TIMEOUT,
 
-      nim_retries:
-        "disabled",
+    nim_retries:
+      "disabled",
 
-      kimi_memory:
-        false,
+    kimi_memory: false,
 
-      janitor_context_passthrough:
-        true
-    });
-  }
-);
+    janitor_context_passthrough:
+      true
+  });
+});
 
 /* ============================================================
    HEALTH
 ============================================================ */
 
-app.get(
-  "/health",
-  function (
-    req,
-    res
-  ) {
-    res.json({
-      ok: true,
+app.get("/health", function (req, res) {
+  res.json({
+    ok: true,
 
-      model:
-        DEFAULT_MODEL,
+    model:
+      DEFAULT_MODEL,
 
-      explicitly_configured_models:
-        Object.keys(MODELS),
+    explicitly_configured_models:
+      Object.keys(MODELS),
 
-      upstream_model_count:
-        Array.isArray(modelCache)
-          ? modelCache.length
-          : 0,
+    upstream_model_count:
+      Array.isArray(modelCache)
+        ? modelCache.length
+        : 0,
 
-      unknown_models_allowed:
-        ALLOW_UNKNOWN_MODELS,
+    unknown_models_allowed:
+      ALLOW_UNKNOWN_MODELS,
 
-      reasoning:
-        DEFAULT_REASONING_EFFORT,
+    reasoning:
+      DEFAULT_REASONING_EFFORT,
 
-      nemotron_thinking:
-        DEFAULT_NEMOTRON_THINKING,
+    nemotron_thinking:
+      DEFAULT_NEMOTRON_THINKING,
 
-      kimi_reasoning:
-        "always_enabled",
+    kimi_reasoning:
+      "always_enabled",
 
-      max_tokens:
-        DEFAULT_MAX_TOKENS,
+    max_tokens:
+      DEFAULT_MAX_TOKENS,
 
-      reasoning_response_stripping:
-        STRIP_REASONING_FROM_RESPONSE,
+    reasoning_response_stripping:
+      STRIP_REASONING_FROM_RESPONSE,
 
-      kimi_memory:
-        false,
+    kimi_memory: false,
 
-      janitor_context_passthrough:
-        true,
+    janitor_context_passthrough:
+      true,
 
-      nim_timeout_ms:
-        NIM_TIMEOUT,
+    nim_timeout_ms:
+      NIM_TIMEOUT,
 
-      nim_retries:
-        false
-    });
-  }
-);
+    nim_retries: false
+  });
+});
 
 /* ============================================================
    NVIDIA MODEL LIST
@@ -2099,10 +1928,7 @@ app.get(
 
 app.get(
   "/v1/models",
-  async function (
-    req,
-    res
-  ) {
+  async function (req, res) {
     try {
       const upstreamModels =
         await fetchNimModels();
@@ -2112,8 +1938,7 @@ app.get(
       ) {
         return res.json({
           object: "list",
-          data:
-            upstreamModels
+          data: upstreamModels
         });
       }
 
@@ -2121,16 +1946,10 @@ app.get(
         Object.entries(
           MODELS
         ).map(
-          (
-            [
-              id,
-              config
-            ]
-          ) => ({
+          ([id, config]) => ({
             id,
 
-            object:
-              "model",
+            object: "model",
 
             created:
               Math.floor(
@@ -2158,7 +1977,6 @@ app.get(
         res,
         502,
         "Unable to retrieve NVIDIA NIM models.",
-
         error?.message ||
           String(error)
       );
@@ -2168,19 +1986,11 @@ app.get(
 
 /* ============================================================
    FORCE MODEL CACHE REFRESH
-
-   This is an explicit administrative endpoint.
-
-   It is NOT called automatically after a failed
-   chat completion.
 ============================================================ */
 
 app.post(
   "/v1/models/refresh",
-  async function (
-    req,
-    res
-  ) {
+  async function (req, res) {
     try {
       const models =
         await fetchNimModels(
@@ -2190,18 +2000,15 @@ app.post(
       return res.json({
         object: "list",
 
-        data:
-          models,
+        data: models,
 
-        count:
-          models.length
+        count: models.length
       });
     } catch (error) {
       return sendError(
         res,
         502,
         "Unable to refresh NVIDIA NIM model list.",
-
         error?.message ||
           String(error)
       );
@@ -2215,10 +2022,7 @@ app.post(
 
 app.post(
   "/v1/chat/completions",
-  async function (
-    req,
-    res
-  ) {
+  async function (req, res) {
     try {
       if (!NIM_API_KEY) {
         return sendError(
@@ -2229,9 +2033,7 @@ app.post(
       }
 
       const incoming =
-        isPlainObject(
-          req.body
-        )
+        isPlainObject(req.body)
           ? req.body
           : {};
 
@@ -2246,26 +2048,19 @@ app.post(
         requestedModel;
 
       const normalizedModel =
-        normalizeModel(
-          model
-        );
+        normalizeModel(model);
 
       const modelConfig =
-        getModelConfig(
-          model
-        );
+        getModelConfig(model);
 
       if (
-        !isSupportedModel(
-          model
-        )
+        !isSupportedModel(model)
       ) {
         return sendError(
           res,
           400,
           "Unsupported model: " +
             model,
-
           {
             explicitly_configured_models:
               Object.keys(
@@ -2280,9 +2075,7 @@ app.post(
           incoming.messages
         );
 
-      if (
-        !messages.length
-      ) {
+      if (!messages.length) {
         return sendError(
           res,
           400,
@@ -2376,10 +2169,6 @@ app.post(
           }
         );
 
-        /*
-         * Useful for verifying exactly what gets sent
-         * to NIM without logging the conversation itself.
-         */
         console.log(
           "NIM REQUEST KEYS:",
           Object.keys(
@@ -2402,8 +2191,6 @@ app.post(
 
       /*
        * EXACTLY ONE completion request.
-       *
-       * There is deliberately no retry.
        */
       const response =
         await requestNim(
@@ -2476,18 +2263,8 @@ app.post(
           "=================================================="
         );
 
-        /*
-         * IMPORTANT:
-         *
-         * Do NOT refresh /models here.
-         *
-         * A failed completion must not cause another
-         * NVIDIA request.
-         */
-
         const proxyStatus =
-          response.status >=
-          500
+          response.status >= 500
             ? 502
             : response.status;
 
@@ -2498,7 +2275,6 @@ app.post(
             "NVIDIA NIM returned HTTP " +
               response.status +
               ".",
-
           {
             upstream_status:
               response.status,
@@ -2525,7 +2301,24 @@ app.post(
 
       /* ======================================================
          STREAMING
+
+         Validate upstream BEFORE sending headers.
       ====================================================== */
+
+      const upstream =
+        response.data;
+
+      if (
+        !upstream ||
+        typeof upstream.on !==
+          "function"
+      ) {
+        return sendError(
+          res,
+          502,
+          "NVIDIA returned an invalid streaming response."
+        );
+      }
 
       res.status(200);
 
@@ -2556,21 +2349,6 @@ app.post(
         res.flushHeaders();
       }
 
-      const upstream =
-        response.data;
-
-      if (
-        !upstream ||
-        typeof upstream.on !==
-          "function"
-      ) {
-        return sendError(
-          res,
-          502,
-          "NVIDIA returned an invalid streaming response."
-        );
-      }
-
       let buffer = "";
       let ended = false;
       let clientDisconnected =
@@ -2583,23 +2361,18 @@ app.post(
       }
 
       function disconnect() {
-        if (
-          clientDisconnected
-        ) {
+        if (clientDisconnected) {
           return;
         }
 
-        clientDisconnected =
-          true;
+        clientDisconnected = true;
 
         destroyUpstream();
       }
 
       /*
-       * If JanitorAI disconnects, stop the upstream
-       * request. This is cancellation, NOT retrying.
+       * Client cancellation is NOT a retry.
        */
-
       req.on(
         "aborted",
         disconnect
@@ -2608,9 +2381,7 @@ app.post(
       res.on(
         "close",
         function () {
-          if (
-            !res.writableEnded
-          ) {
+          if (!res.writableEnded) {
             disconnect();
           }
         }
@@ -2618,9 +2389,7 @@ app.post(
 
       upstream.on(
         "data",
-        function (
-          chunk
-        ) {
+        function (chunk) {
           if (
             ended ||
             clientDisconnected
@@ -2649,10 +2418,13 @@ app.post(
                 separatorIndex
               );
 
-            const separatorLength =
+            const separator =
               buffer[
                 separatorIndex
-              ] === "\r"
+              ];
+
+            const separatorLength =
+              separator === "\r"
                 ? 4
                 : 2;
 
@@ -2672,9 +2444,7 @@ app.post(
             }
 
             try {
-              res.write(
-                output
-              );
+              res.write(output);
             } catch {
               disconnect();
               break;
@@ -2692,10 +2462,6 @@ app.post(
 
           ended = true;
 
-          /*
-           * Process a final incomplete SSE event
-           * if one exists.
-           */
           if (
             buffer.trim() &&
             !clientDisconnected
@@ -2707,9 +2473,7 @@ app.post(
 
             if (output) {
               try {
-                res.write(
-                  output
-                );
+                res.write(output);
               } catch {}
             }
           }
@@ -2726,9 +2490,7 @@ app.post(
 
       upstream.on(
         "error",
-        function (
-          error
-        ) {
+        function (error) {
           if (ended) {
             return;
           }
@@ -2745,14 +2507,11 @@ app.post(
            * Never start another request.
            */
 
-          if (
-            !res.headersSent
-          ) {
+          if (!res.headersSent) {
             return sendError(
               res,
               502,
               "NVIDIA streaming connection failed.",
-
               error?.message ||
                 String(error)
             );
@@ -2763,9 +2522,7 @@ app.post(
           } catch {}
         }
       );
-    } catch (
-      error
-    ) {
+    } catch (error) {
       console.error(
         "=================================================="
       );
@@ -2788,9 +2545,7 @@ app.post(
         "=================================================="
       );
 
-      if (
-        res.headersSent
-      ) {
+      if (res.headersSent) {
         try {
           res.end();
         } catch {}
@@ -2806,7 +2561,6 @@ app.post(
           res,
           504,
           "NVIDIA NIM request timed out.",
-
           {
             timeout_ms:
               NIM_TIMEOUT
@@ -2822,7 +2576,6 @@ app.post(
           res,
           502,
           "Connection to NVIDIA NIM was reset.",
-
           error.message
         );
       }
@@ -2835,7 +2588,6 @@ app.post(
           res,
           504,
           "Connection to NVIDIA NIM timed out.",
-
           error.message
         );
       }
@@ -2844,7 +2596,6 @@ app.post(
         res,
         500,
         "Proxy request failed.",
-
         error?.message ||
           String(error)
       );
@@ -2857,10 +2608,7 @@ app.post(
 ============================================================ */
 
 app.use(
-  function (
-    req,
-    res
-  ) {
+  function (req, res) {
     return sendError(
       res,
       404,
@@ -2887,9 +2635,7 @@ app.use(
         error
     );
 
-    if (
-      res.headersSent
-    ) {
+    if (res.headersSent) {
       return next(error);
     }
 
@@ -2897,9 +2643,7 @@ app.use(
       res,
       500,
       "Internal proxy error.",
-
-      error?.message ||
-        null
+      error?.message || null
     );
   }
 );
@@ -2976,9 +2720,8 @@ const server =
       );
 
       /*
-       * This is model discovery only.
-       *
-       * It does not retry chat completions.
+       * Model discovery only.
+       * This is NOT a completion retry.
        */
       fetchNimModels()
         .then(
@@ -2994,7 +2737,6 @@ const server =
           error => {
             console.warn(
               "Initial NVIDIA model discovery failed:",
-
               error?.message ||
                 error
             );
@@ -3014,7 +2756,6 @@ server.requestTimeout = 0;
 server.keepAliveTimeout =
   Math.max(
     65000,
-
     Math.min(
       NIM_TIMEOUT + 5000,
       120000
@@ -3024,7 +2765,6 @@ server.keepAliveTimeout =
 server.headersTimeout =
   Math.max(
     66000,
-
     Math.min(
       NIM_TIMEOUT + 10000,
       125000
@@ -3035,9 +2775,7 @@ server.headersTimeout =
    GRACEFUL SHUTDOWN
 ============================================================ */
 
-function shutdown(
-  signal
-) {
+function shutdown(signal) {
   console.log(
     signal +
       " received. Shutting down..."
@@ -3067,16 +2805,10 @@ function shutdown(
 
 process.on(
   "SIGTERM",
-  () =>
-    shutdown(
-      "SIGTERM"
-    )
+  () => shutdown("SIGTERM")
 );
 
 process.on(
   "SIGINT",
-  () =>
-    shutdown(
-      "SIGINT"
-    )
+  () => shutdown("SIGINT")
 );
