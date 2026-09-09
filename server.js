@@ -316,7 +316,6 @@ const DEFAULT_PRESENCE_PENALTY =
     ? Number(
         process.env.DEFAULT_PRESENCE_PENALTY
       )
-    )
     : 0.0;
 
 /* ============================================================
