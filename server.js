@@ -95,14 +95,6 @@ const MODELS = {
     name: "NVIDIA Nemotron 3 Ultra 550B",
     provider: "NVIDIA",
 
-    /*
-     * Nemotron does NOT use reasoning_effort.
-     *
-     * Thinking is controlled through:
-     *
-     * chat_template_kwargs.enable_thinking
-     */
-
     reasoningLevels: [
       "none",
       "high"
@@ -167,10 +159,6 @@ const MODEL_REASONING_EFFORTS = {
   "moonshotai/kimi-k3":
     "max",
 
-  /*
-   * Nemotron ignores reasoning_effort.
-   * Its actual setting is enable_thinking.
-   */
   "nvidia/nemotron-3-ultra-550b-a55b":
     "high"
 };
@@ -255,8 +243,6 @@ const NIM_TIMEOUT =
         process.env.NIM_TIMEOUT_MS
       )
     : 900000;
-
-const NIM_MAX_RETRIES = 0;
 
 const MAX_ERROR_BODY_SIZE =
   2 * 1024 * 1024;
@@ -1280,7 +1266,15 @@ function readStream(
 
       stream.on(
         "error",
-        finish
+        function (error) {
+          console.error(
+            "Error while reading NVIDIA error response:",
+            error?.message ||
+              error
+          );
+
+          finish();
+        }
       );
     }
   );
@@ -1498,343 +1492,158 @@ function createNimAxiosConfig(
 }
 
 /* ============================================================
-   TRANSIENT ERROR DETECTION
-============================================================ */
-
-function isRetryableStatus(
-  status
-) {
-  return (
-    status === 408 ||
-    status === 409 ||
-    status === 425 ||
-    status === 429 ||
-    status === 500 ||
-    status === 502 ||
-    status === 503 ||
-    status === 504
-  );
-}
-
-function isRetryableNetworkError(
-  error
-) {
-  const code =
-    error?.code;
-
-  return [
-    "ECONNRESET",
-    "ETIMEDOUT",
-    "ECONNABORTED",
-    "EPIPE",
-    "EAI_AGAIN"
-  ].includes(code);
-}
-
-function sleep(ms) {
-  return new Promise(
-    resolve =>
-      setTimeout(
-        resolve,
-        ms
-      )
-  );
-}
-
-/* ============================================================
    NIM REQUEST
 
-   Retries only happen BEFORE a successful
-   streaming response is handed to the client.
+   NO RETRIES.
 
-   We never retry halfway through a stream.
+   Every Janitor request produces exactly one NVIDIA
+   /chat/completions request.
 
-   IMPORTANT DEBUG CHANGE:
-
-   For non-2xx responses, especially streamed 503
-   responses, the upstream response body is consumed
-   HERE and immediately logged.
-
-   This prevents the error body from disappearing
-   before the Express handler gets to inspect it.
+   If NVIDIA returns an error, the actual upstream
+   status, headers, and response body are captured
+   before returning the response to the caller.
 ============================================================ */
 
 async function requestNim(
   nimRequest,
   stream
 ) {
-  let lastError = null;
+  try {
+    const response =
+      await axios.post(
+        NIM_API_BASE +
+          "/chat/completions",
 
-  for (
-    let attempt = 0;
-    attempt <= NIM_MAX_RETRIES;
-    attempt++
-  ) {
-    try {
-      const response =
-        await axios.post(
-          NIM_API_BASE +
-            "/chat/completions",
+        nimRequest,
 
-          nimRequest,
-
-          stream
-            ? {
-                ...createNimAxiosConfig(
-                  true
-                ),
-
-                responseType:
-                  "stream"
-              }
-            : createNimAxiosConfig(
-                false
-              )
-        );
-
-      /* ========================================================
-         UPSTREAM ERROR CAPTURE
-
-         This happens immediately after NVIDIA responds.
-
-         DO NOT alter the request here.
-      ======================================================== */
-
-      if (
-        response.status < 200 ||
-        response.status >= 300
-      ) {
-        let errorBody = "";
-
-        if (
-          stream &&
-          response.data &&
-          typeof response.data.on ===
-            "function"
-        ) {
-          errorBody =
-            await readStream(
-              response.data
-            );
-        } else if (
-          typeof response.data ===
-          "string"
-        ) {
-          errorBody =
-            response.data;
-        } else if (
-          response.data !==
-            undefined &&
-          response.data !== null
-        ) {
-          try {
-            errorBody =
-              JSON.stringify(
-                response.data
-              );
-          } catch {
-            errorBody =
-              String(
-                response.data
-              );
-          }
-        }
-
-        /*
-         * Keep the captured body on response.data
-         * so the Express handler below can use it.
-         */
-        response.data =
-          errorBody;
-
-        if (DEBUG_PROXY) {
-          console.error(
-            "=================================================="
-          );
-
-          console.error(
-            "NVIDIA UPSTREAM RESPONSE"
-          );
-
-          console.error(
-            "HTTP STATUS:",
-            response.status
-          );
-
-          console.error(
-            "STATUS TEXT:",
-            response.statusText
-          );
-
-          console.error(
-            "MODEL:",
-            nimRequest.model
-          );
-
-          console.error(
-            "STREAM:",
-            stream
-          );
-
-          console.error(
-            "RESPONSE HEADERS:",
-            response.headers
-          );
-
-          console.error(
-            "NVIDIA RAW ERROR BODY:"
-          );
-
-          console.error(
-            errorBody ||
-              "(empty response body)"
-          );
-
-          console.error(
-            "=================================================="
-          );
-        }
-
-        /*
-         * Don't retry client errors such as
-         * invalid parameters or invalid model.
-         *
-         * NIM_MAX_RETRIES is currently 0,
-         * so this also returns immediately for
-         * the current configuration.
-         */
-
-        if (
-          !isRetryableStatus(
-            response.status
-          ) ||
-          attempt >=
-            NIM_MAX_RETRIES
-        ) {
-          return response;
-        }
-
-        const delay =
-          Math.min(
-            1000 *
-              Math.pow(
-                2,
-                attempt
+        stream
+          ? {
+              ...createNimAxiosConfig(
+                true
               ),
-            8000
-          );
 
-        console.warn(
-          `NVIDIA returned HTTP ${response.status}. ` +
-            `Retrying in ${delay}ms ` +
-            `(attempt ${attempt + 1}/${NIM_MAX_RETRIES}).`
-        );
-
-        await sleep(delay);
-
-        continue;
-      }
-
-      /* ========================================================
-         SUCCESS
-      ======================================================== */
-
-      return response;
-    } catch (error) {
-      lastError =
-        error;
-
-      if (DEBUG_PROXY) {
-        console.error(
-          "=================================================="
-        );
-
-        console.error(
-          "NVIDIA AXIOS REQUEST ERROR"
-        );
-
-        console.error(
-          "CODE:",
-          error?.code
-        );
-
-        console.error(
-          "MESSAGE:",
-          error?.message
-        );
-
-        if (
-          error?.response
-        ) {
-          console.error(
-            "HTTP STATUS:",
-            error.response.status
-          );
-
-          console.error(
-            "STATUS TEXT:",
-            error.response.statusText
-          );
-
-          console.error(
-            "RESPONSE HEADERS:",
-            error.response.headers
-          );
-
-          if (
-            typeof error.response.data ===
-            "string"
-          ) {
-            console.error(
-              "RESPONSE BODY:",
-              error.response.data
-            );
-          }
-        }
-
-        console.error(
-          "=================================================="
-        );
-      }
-
-      if (
-        attempt >=
-          NIM_MAX_RETRIES ||
-        !isRetryableNetworkError(
-          error
-        )
-      ) {
-        throw error;
-      }
-
-      const delay =
-        Math.min(
-          1000 *
-            Math.pow(
-              2,
-              attempt
-            ),
-          8000
-        );
-
-      console.warn(
-        "Transient NVIDIA connection error:",
-        error?.code ||
-          error?.message,
-
-        `Retrying in ${delay}ms.`
+              responseType:
+                "stream"
+            }
+          : createNimAxiosConfig(
+              false
+            )
       );
 
-      await sleep(delay);
+    if (
+      response.status >= 200 &&
+      response.status < 300
+    ) {
+      return response;
     }
-  }
 
-  throw (
-    lastError ||
-    new Error(
-      "NVIDIA request failed."
-    )
-  );
+    let errorBody = "";
+
+    if (
+      response.data &&
+      typeof response.data.on ===
+        "function"
+    ) {
+      errorBody =
+        await readStream(
+          response.data
+        );
+    } else if (
+      typeof response.data ===
+      "string"
+    ) {
+      errorBody =
+        response.data;
+    } else {
+      try {
+        errorBody =
+          JSON.stringify(
+            response.data
+          );
+      } catch {
+        errorBody =
+          String(
+            response.data
+          );
+      }
+    }
+
+    console.error(
+      "=================================================="
+    );
+
+    console.error(
+      "NVIDIA UPSTREAM RESPONSE"
+    );
+
+    console.error(
+      "HTTP STATUS:",
+      response.status
+    );
+
+    console.error(
+      "HEADERS:",
+      response.headers
+    );
+
+    console.error(
+      "BODY:",
+      errorBody
+    );
+
+    console.error(
+      "BODY LENGTH:",
+      errorBody.length
+    );
+
+    console.error(
+      "=================================================="
+    );
+
+    response.data =
+      errorBody;
+
+    return response;
+  } catch (error) {
+    console.error(
+      "=================================================="
+    );
+
+    console.error(
+      "NVIDIA CONNECTION ERROR"
+    );
+
+    console.error(
+      "CODE:",
+      error?.code
+    );
+
+    console.error(
+      "MESSAGE:",
+      error?.message
+    );
+
+    console.error(
+      "STATUS:",
+      error?.response?.status
+    );
+
+    console.error(
+      "RESPONSE HEADERS:",
+      error?.response?.headers
+    );
+
+    console.error(
+      "RESPONSE DATA:",
+      error?.response?.data
+    );
+
+    console.error(
+      "=================================================="
+    );
+
+    throw error;
+  }
 }
 
 /* ============================================================
@@ -1946,10 +1755,7 @@ app.get(
         true,
 
       nim_timeout_ms:
-        NIM_TIMEOUT,
-
-      nim_max_retries:
-        NIM_MAX_RETRIES
+        NIM_TIMEOUT
     });
   }
 );
@@ -2111,10 +1917,6 @@ app.post(
           model
         );
 
-      /* ======================================================
-         MODEL VALIDATION
-      ====================================================== */
-
       if (
         !isSupportedModel(
           model
@@ -2134,10 +1936,6 @@ app.post(
           }
         );
       }
-
-      /* ======================================================
-         JANITOR CONTEXT
-      ====================================================== */
 
       const messages =
         normalizeMessages(
@@ -2178,19 +1976,11 @@ app.post(
         );
       }
 
-      /* ======================================================
-         STREAM
-      ====================================================== */
-
       const stream =
         parseBoolean(
           incoming.stream,
           true
         );
-
-      /* ======================================================
-         BUILD NIM REQUEST
-      ====================================================== */
 
       const nimRequest =
         buildNimRequest(
@@ -2241,53 +2031,31 @@ app.post(
         );
       }
 
-      /* ======================================================
-         NVIDIA REQUEST
-      ====================================================== */
-
       const response =
         await requestNim(
           nimRequest,
           stream
         );
 
-      /* ======================================================
-         UPSTREAM ERROR
-
-         requestNim() has already consumed streamed
-         error responses, so response.data is now
-         the captured raw body string.
-      ====================================================== */
-
       if (
         response.status < 200 ||
         response.status >= 300
       ) {
-        let errorBody = "";
-
-        if (
+        const errorBody =
           typeof response.data ===
           "string"
-        ) {
-          errorBody =
-            response.data;
-        } else if (
-          response.data !==
-            undefined &&
-          response.data !== null
-        ) {
-          try {
-            errorBody =
-              JSON.stringify(
-                response.data
-              );
-          } catch {
-            errorBody =
-              String(
-                response.data
-              );
-          }
-        }
+            ? response.data
+            : (() => {
+                try {
+                  return JSON.stringify(
+                    response.data
+                  );
+                } catch {
+                  return String(
+                    response.data
+                  );
+                }
+              })();
 
         const upstreamMessage =
           extractErrorMessage(
@@ -2319,18 +2087,12 @@ app.post(
 
         console.error(
           "Body:",
-          errorBody ||
-            "(empty response body)"
+          errorBody
         );
 
         console.error(
           "=================================================="
         );
-
-        /*
-         * Refresh the model cache for
-         * model-related errors.
-         */
 
         if (
           response.status ===
@@ -2369,10 +2131,6 @@ app.post(
         );
       }
 
-      /* ======================================================
-         NON-STREAMING RESPONSE
-      ====================================================== */
-
       if (!stream) {
         return res
           .status(200)
@@ -2382,10 +2140,6 @@ app.post(
             )
           );
       }
-
-      /* ======================================================
-         STREAMING RESPONSE
-      ====================================================== */
 
       res.status(200);
 
@@ -2471,10 +2225,6 @@ app.post(
         }
       );
 
-      /* ======================================================
-         STREAM DATA
-      ====================================================== */
-
       upstream.on(
         "data",
         function (
@@ -2542,10 +2292,6 @@ app.post(
         }
       );
 
-      /* ======================================================
-         STREAM END
-      ====================================================== */
-
       upstream.on(
         "end",
         function () {
@@ -2582,10 +2328,6 @@ app.post(
           }
         }
       );
-
-      /* ======================================================
-         STREAM ERROR
-      ====================================================== */
 
       upstream.on(
         "error",
@@ -2797,8 +2539,7 @@ const server =
       );
 
       console.log(
-        "NIM retries:",
-        NIM_MAX_RETRIES
+        "NIM retries: DISABLED"
       );
 
       console.log(
