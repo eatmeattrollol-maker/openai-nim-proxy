@@ -283,7 +283,7 @@ const httpsAgent =
 
 const DEBUG_PROXY =
   String(
-    process.env.DEBUG_PROXY || "false"
+    process.env.DEBUG_PROXY || "true"
   )
     .trim()
     .toLowerCase() === "true";
