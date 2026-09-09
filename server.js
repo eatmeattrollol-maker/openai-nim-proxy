@@ -100,7 +100,7 @@ const MODELS = {
       "high"
     ],
 
-    defaultReasoningEffort: "high",
+    defaultReasoningEffort: "none",
 
     maxOutputTokens: 16384
   }
