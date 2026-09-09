@@ -34,13 +34,18 @@ const DEFAULT_MODEL =
 
    IMPORTANT:
 
-   Kimi does NOT have server-side memory.
+   - JanitorAI remains responsible for conversation history.
+   - This proxy does NOT maintain conversation memory.
+   - Every valid JanitorAI completion request produces exactly
+     ONE NVIDIA /chat/completions request.
+   - NO RETRIES are performed.
 
-   JanitorAI remains responsible for conversation history.
-   Every message Janitor sends is forwarded directly to NIM.
+   Nemotron 3 Ultra:
+     chat_template_kwargs.enable_thinking controls reasoning.
 
-   Nemotron uses chat_template_kwargs.enable_thinking
-   rather than reasoning_effort.
+   Kimi K3:
+     Reasoning remains enabled permanently.
+     There is intentionally NO "none" option for Kimi.
 ============================================================ */
 
 const MODELS = {
@@ -80,6 +85,10 @@ const MODELS = {
     name: "Kimi K3",
     provider: "Moonshot AI",
 
+    /*
+     * Kimi reasoning is intentionally ALWAYS enabled.
+     * Do not add "none".
+     */
     reasoningLevels: [
       "low",
       "high",
@@ -95,12 +104,20 @@ const MODELS = {
     name: "NVIDIA Nemotron 3 Ultra 550B",
     provider: "NVIDIA",
 
+    /*
+     * Nemotron uses enable_thinking rather than
+     * reasoning_effort.
+     */
     reasoningLevels: [
       "none",
       "high"
     ],
 
-    defaultReasoningEffort: "none",
+    defaultReasoningEffort: "high",
+
+    defaultThinking: true,
+
+    maxReasoningBudget: 32768,
 
     maxOutputTokens: 16384
   }
@@ -145,7 +162,7 @@ const MODEL_REASONING_BUDGETS = {
   "moonshotai/kimi-k3":
     32768,
 
-  "nvidia/nemotron-3-ultra-550b-a55b":
+  "nvidia/ron-3-ultra-550b-a55b":
     16384
 };
 
@@ -159,7 +176,7 @@ const MODEL_REASONING_EFFORTS = {
   "moonshotai/kimi-k3":
     "max",
 
-  "nvidia/nemotron-3-ultra-550b-a55b":
+  "nvidia/ron-3-ultra-550b-a55b":
     "high"
 };
 
@@ -227,7 +244,56 @@ const DEFAULT_PRESENCE_PENALTY =
     ? Number(
         process.env.DEFAULT_PRESENCE_PENALTY
       )
+    )
     : 0.0;
+
+/* ============================================================
+   NEMOTRON THINKING DEFAULT
+
+   Set:
+
+     NEMOTRON_ENABLE_THINKING=true
+
+   or:
+
+     NEMOTRON_ENABLE_THINKING=false
+
+   A request can explicitly override this with:
+
+     chat_template_kwargs.enable_thinking
+
+   or:
+
+     reasoning_effort
+     reasoning_mode
+============================================================ */
+
+const DEFAULT_NEMOTRON_THINKING =
+  parseBoolean(
+    process.env.NEMOTRON_ENABLE_THINKING,
+    false
+  );
+
+/* ============================================================
+   RESPONSE REASONING VISIBILITY
+
+   true:
+     Remove reasoning fields before sending responses to
+     JanitorAI.
+
+   false:
+     Preserve them.
+
+   Default is true.
+============================================================ */
+
+const STRIP_REASONING_FROM_RESPONSE =
+  String(
+    process.env.STRIP_REASONING_FROM_RESPONSE ||
+      "true"
+  )
+    .trim()
+    .toLowerCase() === "true";
 
 /* ============================================================
    NETWORK
@@ -276,6 +342,10 @@ const DEBUG_PROXY =
 
 /* ============================================================
    MODEL CACHE
+
+   This cache is ONLY for /models discovery.
+
+   It is NEVER used to retry chat completions.
 ============================================================ */
 
 let modelCache = null;
@@ -291,6 +361,7 @@ const MODEL_CACHE_TTL =
     ? Number(
         process.env.MODEL_CACHE_TTL_MS
       )
+    )
     : 300000;
 
 /* ============================================================
@@ -461,10 +532,15 @@ function clampMaxTokens(
 }
 
 function clampReasoningBudget(
-  value
+  value,
+  modelConfig
 ) {
+  const maximum =
+    modelConfig?.maxReasoningBudget ||
+    65536;
+
   return Math.min(
-    65536,
+    maximum,
     Math.max(
       0,
       Math.floor(
@@ -487,7 +563,8 @@ function budgetToReasoningEffort(
 ) {
   const value =
     clampReasoningBudget(
-      budget
+      budget,
+      modelConfig
     );
 
   const levels =
@@ -620,6 +697,60 @@ function getRequestedReasoningEffort(
   model,
   modelConfig
 ) {
+  /*
+   * Kimi is intentionally always reasoning.
+   *
+   * Even if a caller tries:
+   *
+   *   reasoning_effort: "none"
+   *
+   * we normalize it back to a valid Kimi level.
+   */
+  if (
+    normalizeModel(model) ===
+    "moonshotai/kimi-k3"
+  ) {
+    if (
+      incoming.reasoning_effort !==
+      undefined
+    ) {
+      const requested =
+        normalizeReasoningEffort(
+          incoming.reasoning_effort,
+          modelConfig
+        );
+
+      if (
+        requested === "none"
+      ) {
+        return "max";
+      }
+
+      return requested;
+    }
+
+    if (
+      incoming.reasoning_mode !==
+      undefined
+    ) {
+      const requested =
+        normalizeReasoningEffort(
+          incoming.reasoning_mode,
+          modelConfig
+        );
+
+      if (
+        requested === "none"
+      ) {
+        return "max";
+      }
+
+      return requested;
+    }
+
+    return "max";
+  }
+
   if (
     incoming.reasoning_effort !==
     undefined
@@ -688,11 +819,18 @@ function getRequestedReasoningEffort(
 function getNemotronThinking(
   incoming
 ) {
+  /*
+   * Highest priority:
+   *
+   * chat_template_kwargs.enable_thinking
+   */
+
   if (
-    incoming.chat_template_kwargs &&
+    isPlainObject(
+      incoming.chat_template_kwargs
+    ) &&
     typeof incoming.chat_template_kwargs
-      .enable_thinking ===
-      "boolean"
+      .enable_thinking === "boolean"
   ) {
     return (
       incoming.chat_template_kwargs
@@ -700,45 +838,125 @@ function getNemotronThinking(
     );
   }
 
+  /*
+   * reasoning_effort
+   */
+
   if (
     incoming.reasoning_effort !==
     undefined
   ) {
     const value =
-      String(
-        incoming.reasoning_effort
-      )
+      incoming.reasoning_effort;
+
+    if (
+      typeof value === "boolean"
+    ) {
+      return value;
+    }
+
+    if (
+      typeof value === "number"
+    ) {
+      return value !== 0;
+    }
+
+    const normalized =
+      String(value)
         .trim()
         .toLowerCase();
 
-    return ![
-      "none",
-      "off",
-      "false",
-      "0"
-    ].includes(value);
+    if (
+      [
+        "none",
+        "off",
+        "false",
+        "0",
+        "disabled",
+        "disable"
+      ].includes(normalized)
+    ) {
+      return false;
+    }
+
+    if (
+      [
+        "low",
+        "medium",
+        "high",
+        "max",
+        "maximum",
+        "on",
+        "true",
+        "1",
+        "enabled",
+        "enable"
+      ].includes(normalized)
+    ) {
+      return true;
+    }
   }
+
+  /*
+   * reasoning_mode
+   */
 
   if (
     incoming.reasoning_mode !==
     undefined
   ) {
     const value =
-      String(
-        incoming.reasoning_mode
-      )
+      incoming.reasoning_mode;
+
+    if (
+      typeof value === "boolean"
+    ) {
+      return value;
+    }
+
+    if (
+      typeof value === "number"
+    ) {
+      return value !== 0;
+    }
+
+    const normalized =
+      String(value)
         .trim()
         .toLowerCase();
 
-    return ![
-      "none",
-      "off",
-      "false",
-      "0"
-    ].includes(value);
+    if (
+      [
+        "none",
+        "off",
+        "false",
+        "0",
+        "disabled",
+        "disable"
+      ].includes(normalized)
+    ) {
+      return false;
+    }
+
+    if (
+      [
+        "low",
+        "medium",
+        "high",
+        "max",
+        "maximum",
+        "on",
+        "true",
+        "1",
+        "enabled",
+        "enable"
+      ].includes(normalized)
+    ) {
+      return true;
+    }
   }
 
-  return true;
+  return DEFAULT_NEMOTRON_THINKING;
 }
 
 /* ============================================================
@@ -824,6 +1042,10 @@ function buildNimRequest(
     stream
   };
 
+  /* ==========================================================
+     OPTIONAL GENERATION PARAMETERS
+  ========================================================== */
+
   if (
     incoming.repetition_penalty !==
     undefined
@@ -890,6 +1112,10 @@ function buildNimRequest(
     }
   }
 
+  /* ==========================================================
+     CLIENT CHAT TEMPLATE KWARGS
+  ========================================================== */
+
   if (
     isPlainObject(
       incoming.chat_template_kwargs
@@ -899,6 +1125,10 @@ function buildNimRequest(
       ...incoming.chat_template_kwargs
     };
   }
+
+  /* ==========================================================
+     CLIENT extra_body
+  ========================================================== */
 
   if (
     isPlainObject(
@@ -924,6 +1154,10 @@ function buildNimRequest(
         incoming
       );
 
+    /*
+     * Nemotron uses this field to control
+     * reasoning.
+     */
     request.chat_template_kwargs = {
       ...(request.chat_template_kwargs ||
         {}),
@@ -932,26 +1166,34 @@ function buildNimRequest(
         enableThinking
     };
 
-    const requestedBudget =
-      incoming.reasoning_budget !==
-      undefined
-        ? incoming.reasoning_budget
-        : MODEL_REASONING_BUDGETS[
-            normalizedModel
-          ];
-
+    /*
+     * reasoning_budget only exists when
+     * reasoning is enabled.
+     */
     if (
-      enableThinking &&
-      requestedBudget !== undefined
+      enableThinking
     ) {
+      const requestedBudget =
+        incoming.reasoning_budget !==
+        undefined
+          ? incoming.reasoning_budget
+          : MODEL_REASONING_BUDGETS[
+              normalizedModel
+            ];
+
       request.reasoning_budget =
         clampReasoningBudget(
-          requestedBudget
+          requestedBudget,
+          modelConfig
         );
     } else {
       delete request.reasoning_budget;
     }
 
+    /*
+     * NVIDIA recommends this for tool/coding
+     * use when thinking is enabled.
+     */
     if (
       enableThinking &&
       Array.isArray(
@@ -959,22 +1201,26 @@ function buildNimRequest(
       ) &&
       request.tools.length > 0
     ) {
-      request.chat_template_kwargs
-        .force_nonempty_content =
-        true;
+      request.chat_template_kwargs = {
+        ...request.chat_template_kwargs,
+
+        force_nonempty_content:
+          true
+      };
     }
 
+    /*
+     * These are NOT sent to Nemotron.
+     */
     delete request.reasoning_effort;
-
     delete request.reasoning_mode;
-
     delete request.nvext;
 
     return request;
   }
 
   /* ==========================================================
-     DEEPSEEK
+     DEEPSEEK V4 FLASH
   ========================================================== */
 
   if (
@@ -1005,6 +1251,10 @@ function buildNimRequest(
     return request;
   }
 
+  /* ==========================================================
+     DEEPSEEK V4 PRO
+  ========================================================== */
+
   if (
     normalizedModel ===
     "deepseek-ai/deepseek-v4-pro-0813"
@@ -1024,6 +1274,22 @@ function buildNimRequest(
 
   /* ==========================================================
      KIMI K3
+
+     IMPORTANT:
+
+     Kimi reasoning is ALWAYS enabled.
+
+     The client cannot turn it off through:
+       reasoning_effort: none
+       reasoning_mode: none
+       reasoning_effort: off
+       reasoning_mode: off
+       reasoning_effort: false
+       reasoning_mode: false
+       reasoning_effort: 0
+       reasoning_mode: 0
+
+     They are normalized to "max".
   ========================================================== */
 
   if (
@@ -1038,7 +1304,9 @@ function buildNimRequest(
       );
 
     request.reasoning_effort =
-      reasoningEffort;
+      reasoningEffort === "none"
+        ? "max"
+        : reasoningEffort;
 
     return request;
   }
@@ -1088,6 +1356,7 @@ function stripReasoning(
   parsed
 ) {
   if (
+    !STRIP_REASONING_FROM_RESPONSE ||
     !parsed ||
     typeof parsed !== "object" ||
     !Array.isArray(
@@ -1194,6 +1463,10 @@ function processSSEEvent(
           JSON.stringify(parsed)
       );
     } catch {
+      /*
+       * If an upstream SSE data line is not JSON,
+       * pass it through unchanged.
+       */
       output.push(line);
     }
   }
@@ -1349,6 +1622,12 @@ function sendError(
 
 /* ============================================================
    NIM MODEL DISCOVERY
+
+   IMPORTANT:
+
+   This endpoint is separate from chat completion.
+
+   It does NOT retry failed chat requests.
 ============================================================ */
 
 async function fetchNimModels(
@@ -1459,7 +1738,7 @@ async function fetchNimModels(
 }
 
 /* ============================================================
-   HTTP REQUEST
+   HTTP REQUEST CONFIG
 ============================================================ */
 
 function createNimAxiosConfig(
@@ -1480,6 +1759,13 @@ function createNimAxiosConfig(
           : "application/json"
     },
 
+    /*
+     * Axios does NOT retry requests by itself.
+     *
+     * No retry adapter.
+     * No retry interceptor.
+     * No retry loop.
+     */
     timeout:
       NIM_TIMEOUT,
 
@@ -1494,14 +1780,18 @@ function createNimAxiosConfig(
 /* ============================================================
    NIM REQUEST
 
-   NO RETRIES.
+   STRICT NO-RETRY POLICY
 
-   Every Janitor request produces exactly one NVIDIA
-   /chat/completions request.
+   Every call to requestNim() performs exactly ONE:
 
-   If NVIDIA returns an error, the actual upstream
-   status, headers, and response body are captured
-   before returning the response to the caller.
+       POST /chat/completions
+
+   There is intentionally:
+     - no retry loop
+     - no axios-retry
+     - no interceptor
+     - no recursive request
+     - no second completion request
 ============================================================ */
 
 async function requestNim(
@@ -1530,12 +1820,23 @@ async function requestNim(
             )
       );
 
+    /*
+     * Successful upstream response.
+     */
     if (
       response.status >= 200 &&
       response.status < 300
     ) {
       return response;
     }
+
+    /*
+     * Upstream returned an HTTP error.
+     *
+     * We capture it and return it.
+     *
+     * We DO NOT send another completion request.
+     */
 
     let errorBody = "";
 
@@ -1605,6 +1906,15 @@ async function requestNim(
 
     return response;
   } catch (error) {
+    /*
+     * Network/timeout error.
+     *
+     * IMPORTANT:
+     * This error is thrown back to the caller.
+     *
+     * There is NO retry.
+     */
+
     console.error(
       "=================================================="
     );
@@ -1700,11 +2010,23 @@ app.get(
       default_reasoning_budget:
         DEFAULT_REASONING_BUDGET,
 
+      nemotron_thinking_default:
+        DEFAULT_NEMOTRON_THINKING,
+
+      reasoning_stripped_from_response:
+        STRIP_REASONING_FROM_RESPONSE,
+
+      kimi_reasoning:
+        "always_enabled",
+
       nim_api_base:
         NIM_API_BASE,
 
       timeout_ms:
         NIM_TIMEOUT,
+
+      nim_retries:
+        "disabled",
 
       kimi_memory:
         false,
@@ -1745,8 +2067,17 @@ app.get(
       reasoning:
         DEFAULT_REASONING_EFFORT,
 
+      nemotron_thinking:
+        DEFAULT_NEMOTRON_THINKING,
+
+      kimi_reasoning:
+        "always_enabled",
+
       max_tokens:
         DEFAULT_MAX_TOKENS,
+
+      reasoning_response_stripping:
+        STRIP_REASONING_FROM_RESPONSE,
 
       kimi_memory:
         false,
@@ -1755,7 +2086,10 @@ app.get(
         true,
 
       nim_timeout_ms:
-        NIM_TIMEOUT
+        NIM_TIMEOUT,
+
+      nim_retries:
+        false
     });
   }
 );
@@ -1835,6 +2169,11 @@ app.get(
 
 /* ============================================================
    FORCE MODEL CACHE REFRESH
+
+   This is an explicit administrative endpoint.
+
+   It is NOT called automatically after a failed
+   chat completion.
 ============================================================ */
 
 app.post(
@@ -1954,6 +2293,14 @@ app.post(
 
       if (DEBUG_PROXY) {
         console.log(
+          "=================================================="
+        );
+
+        console.log(
+          "JANITORAI REQUEST"
+        );
+
+        console.log(
           "MODEL:",
           model
         );
@@ -2029,13 +2376,45 @@ app.post(
                 .chat_template_kwargs
           }
         );
+
+        /*
+         * Useful for verifying exactly what gets sent
+         * to NIM without logging the conversation itself.
+         */
+        console.log(
+          "NIM REQUEST KEYS:",
+          Object.keys(
+            nimRequest
+          )
+        );
+
+        console.log(
+          "NIM COMPLETION REQUEST: 1"
+        );
+
+        console.log(
+          "NIM COMPLETION RETRIES: 0"
+        );
+
+        console.log(
+          "=================================================="
+        );
       }
 
+      /*
+       * EXACTLY ONE completion request.
+       *
+       * There is deliberately no retry.
+       */
       const response =
         await requestNim(
           nimRequest,
           stream
         );
+
+      /* ======================================================
+         UPSTREAM ERROR
+      ====================================================== */
 
       if (
         response.status < 200 ||
@@ -2091,21 +2470,21 @@ app.post(
         );
 
         console.error(
+          "NIM RETRY: NONE"
+        );
+
+        console.error(
           "=================================================="
         );
 
-        if (
-          response.status ===
-            400 ||
-          response.status ===
-            404
-        ) {
-          fetchNimModels(
-            true
-          ).catch(
-            () => {}
-          );
-        }
+        /*
+         * IMPORTANT:
+         *
+         * Do NOT refresh /models here.
+         *
+         * A failed completion must not cause another
+         * NVIDIA request.
+         */
 
         const proxyStatus =
           response.status >=
@@ -2131,6 +2510,10 @@ app.post(
         );
       }
 
+      /* ======================================================
+         NON-STREAMING
+      ====================================================== */
+
       if (!stream) {
         return res
           .status(200)
@@ -2140,6 +2523,10 @@ app.post(
             )
           );
       }
+
+      /* ======================================================
+         STREAMING
+      ====================================================== */
 
       res.status(200);
 
@@ -2208,6 +2595,11 @@ app.post(
 
         destroyUpstream();
       }
+
+      /*
+       * If JanitorAI disconnects, stop the upstream
+       * request. This is cancellation, NOT retrying.
+       */
 
       req.on(
         "aborted",
@@ -2301,6 +2693,10 @@ app.post(
 
           ended = true;
 
+          /*
+           * Process a final incomplete SSE event
+           * if one exists.
+           */
           if (
             buffer.trim() &&
             !clientDisconnected
@@ -2346,6 +2742,10 @@ app.post(
               error
           );
 
+          /*
+           * Never start another request.
+           */
+
           if (
             !res.headersSent
           ) {
@@ -2379,6 +2779,10 @@ app.post(
         error?.stack ||
           error?.message ||
           error
+      );
+
+      console.error(
+        "NIM RETRY: NONE"
       );
 
       console.error(
@@ -2543,6 +2947,24 @@ const server =
       );
 
       console.log(
+        "NVIDIA completion retries: 0"
+      );
+
+      console.log(
+        "Kimi reasoning: ALWAYS ENABLED"
+      );
+
+      console.log(
+        "Nemotron default thinking:",
+        DEFAULT_NEMOTRON_THINKING
+      );
+
+      console.log(
+        "Reasoning response stripping:",
+        STRIP_REASONING_FROM_RESPONSE
+      );
+
+      console.log(
         "Kimi server memory: DISABLED"
       );
 
@@ -2554,6 +2976,11 @@ const server =
         "=================================================="
       );
 
+      /*
+       * This is model discovery only.
+       *
+       * It does not retry chat completions.
+       */
       fetchNimModels()
         .then(
           models => {
