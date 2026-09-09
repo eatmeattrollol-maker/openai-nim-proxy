@@ -256,21 +256,7 @@ const NIM_TIMEOUT =
       )
     : 900000;
 
-const NIM_MAX_RETRIES =
-  Number.isFinite(
-    Number(
-      process.env.NIM_MAX_RETRIES
-    )
-  )
-    ? Math.max(
-        0,
-        Math.floor(
-          Number(
-            process.env.NIM_MAX_RETRIES
-          )
-        )
-      )
-    : 0;
+const NIM_MAX_RETRIES = 0;
 
 const MAX_ERROR_BODY_SIZE =
   2 * 1024 * 1024;
