@@ -270,7 +270,7 @@ const NIM_MAX_RETRIES =
           )
         )
       )
-    : 2;
+    : 0;
 
 const MAX_ERROR_BODY_SIZE =
   2 * 1024 * 1024;
