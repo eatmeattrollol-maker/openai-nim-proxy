@@ -1,3 +1,4 @@
+```javascript
 "use strict";
 
 const express = require("express");
@@ -699,21 +700,6 @@ function getRequestedReasoningEffort(
    NEMOTRON THINKING
 ============================================================ */
 
-/*
- * Nemotron 3 Ultra does NOT use reasoning_effort.
-
- * NVIDIA documents reasoning as:
- *
- * chat_template_kwargs:
- * {
- *   enable_thinking: true/false
- * }
- *
- * We intentionally keep this isolated from the other
- * reasoning models so Nemotron cannot accidentally receive
- * incompatible reasoning parameters.
- */
-
 function getNemotronThinking(
   incoming
 ) {
@@ -772,23 +758,6 @@ function getNemotronThinking(
 
 /* ============================================================
    MESSAGE NORMALIZATION
-
-   IMPORTANT:
-
-   We DO NOT alter or store Janitor's conversation.
-
-   Janitor's messages are forwarded as-is wherever possible.
-
-   This preserves:
-   - system prompts
-   - character cards
-   - lore
-   - previous dialogue
-   - user messages
-   - assistant messages
-   - tool calls
-   - names
-   - reasoning content if Janitor sends it
 ============================================================ */
 
 function normalizeMessages(
@@ -819,13 +788,6 @@ function normalizeMessages(
       continue;
     }
 
-    /*
-     * Keep the original message object
-     * rather than reconstructing it.
-     *
-     * This is important for compatibility
-     * with JanitorAI.
-     */
     result.push({
       ...message,
 
@@ -877,10 +839,6 @@ function buildNimRequest(
     stream
   };
 
-  /*
-   * Generic sampling parameters.
-   */
-
   if (
     incoming.repetition_penalty !==
     undefined
@@ -913,10 +871,6 @@ function buildNimRequest(
         DEFAULT_PRESENCE_PENALTY
       );
   }
-
-  /*
-   * Safe OpenAI-compatible parameters.
-   */
 
   const optionalParameters = [
     "stop",
@@ -951,11 +905,6 @@ function buildNimRequest(
     }
   }
 
-  /*
-   * Preserve chat_template_kwargs supplied
-   * by Janitor or another client.
-   */
-
   if (
     isPlainObject(
       incoming.chat_template_kwargs
@@ -965,14 +914,6 @@ function buildNimRequest(
       ...incoming.chat_template_kwargs
     };
   }
-
-  /*
-   * extra_body remains supported.
-   *
-   * This allows clients to send NIM-specific
-   * parameters without us needing to know
-   * every possible parameter.
-   */
 
   if (
     isPlainObject(
@@ -1006,12 +947,6 @@ function buildNimRequest(
         enableThinking
     };
 
-    /*
-     * NVIDIA's Nemotron examples use a
-     * reasoning_budget alongside the
-     * chat template configuration.
-     */
-
     const requestedBudget =
       incoming.reasoning_budget !==
       undefined
@@ -1032,12 +967,6 @@ function buildNimRequest(
       delete request.reasoning_budget;
     }
 
-    /*
-     * NVIDIA specifically requires
-     * force_nonempty_content for tool
-     * calling with reasoning enabled.
-     */
-
     if (
       enableThinking &&
       Array.isArray(
@@ -1049,13 +978,6 @@ function buildNimRequest(
         .force_nonempty_content =
         true;
     }
-
-    /*
-     * Nemotron does NOT use these.
-     *
-     * Never let them leak into the
-     * request from Janitor.
-     */
 
     delete request.reasoning_effort;
 
@@ -1132,15 +1054,6 @@ function buildNimRequest(
 
     request.reasoning_effort =
       reasoningEffort;
-
-    /*
-     * NO MEMORY.
-     *
-     * The messages array here is exactly
-     * the context supplied by JanitorAI.
-     *
-     * Nothing is stored server-side.
-     */
 
     return request;
   }
@@ -1296,10 +1209,6 @@ function processSSEEvent(
           JSON.stringify(parsed)
       );
     } catch {
-      /*
-       * Preserve malformed SSE rather
-       * than destroying the stream.
-       */
       output.push(line);
     }
   }
@@ -1634,12 +1543,21 @@ function sleep(ms) {
 }
 
 /* ============================================================
-   NIM REQUEST WITH RETRIES
+   NIM REQUEST
 
    Retries only happen BEFORE a successful
    streaming response is handed to the client.
 
    We never retry halfway through a stream.
+
+   IMPORTANT DEBUG CHANGE:
+
+   For non-2xx responses, especially streamed 503
+   responses, the upstream response body is consumed
+   HERE and immediately logged.
+
+   This prevents the error body from disappearing
+   before the Express handler gets to inspect it.
 ============================================================ */
 
 async function requestNim(
@@ -1675,66 +1593,214 @@ async function requestNim(
               )
         );
 
-      if (
-        response.status >= 200 &&
-        response.status < 300
-      ) {
-        return response;
-      }
+      /* ========================================================
+         UPSTREAM ERROR CAPTURE
 
-      /*
-       * Don't retry client errors such as
-       * invalid parameters or invalid model.
-       */
+         This happens immediately after NVIDIA responds.
+
+         DO NOT alter the request here.
+      ======================================================== */
 
       if (
-        !isRetryableStatus(
-          response.status
-        ) ||
-        attempt >=
-          NIM_MAX_RETRIES
+        response.status < 200 ||
+        response.status >= 300
       ) {
-        return response;
-      }
+        let errorBody = "";
 
-      /*
-       * Consume the error stream before retrying.
-       */
-      if (
-        stream &&
-        response.data &&
-        typeof response.data.on ===
-          "function"
-      ) {
-        await readStream(
-          response.data
+        if (
+          stream &&
+          response.data &&
+          typeof response.data.on ===
+            "function"
+        ) {
+          errorBody =
+            await readStream(
+              response.data
+            );
+        } else if (
+          typeof response.data ===
+          "string"
+        ) {
+          errorBody =
+            response.data;
+        } else if (
+          response.data !==
+            undefined &&
+          response.data !== null
+        ) {
+          try {
+            errorBody =
+              JSON.stringify(
+                response.data
+              );
+          } catch {
+            errorBody =
+              String(
+                response.data
+              );
+          }
+        }
+
+        /*
+         * Keep the captured body on response.data
+         * so the Express handler below can use it.
+         */
+        response.data =
+          errorBody;
+
+        if (DEBUG_PROXY) {
+          console.error(
+            "=================================================="
+          );
+
+          console.error(
+            "NVIDIA UPSTREAM RESPONSE"
+          );
+
+          console.error(
+            "HTTP STATUS:",
+            response.status
+          );
+
+          console.error(
+            "STATUS TEXT:",
+            response.statusText
+          );
+
+          console.error(
+            "MODEL:",
+            nimRequest.model
+          );
+
+          console.error(
+            "STREAM:",
+            stream
+          );
+
+          console.error(
+            "RESPONSE HEADERS:",
+            response.headers
+          );
+
+          console.error(
+            "NVIDIA RAW ERROR BODY:"
+          );
+
+          console.error(
+            errorBody ||
+              "(empty response body)"
+          );
+
+          console.error(
+            "=================================================="
+          );
+        }
+
+        /*
+         * Don't retry client errors such as
+         * invalid parameters or invalid model.
+         *
+         * NIM_MAX_RETRIES is currently 0,
+         * so this also returns immediately for
+         * the current configuration.
+         */
+
+        if (
+          !isRetryableStatus(
+            response.status
+          ) ||
+          attempt >=
+            NIM_MAX_RETRIES
+        ) {
+          return response;
+        }
+
+        const delay =
+          Math.min(
+            1000 *
+              Math.pow(
+                2,
+                attempt
+              ),
+            8000
+          );
+
+        console.warn(
+          `NVIDIA returned HTTP ${response.status}. ` +
+            `Retrying in ${delay}ms ` +
+            `(attempt ${attempt + 1}/${NIM_MAX_RETRIES}).`
         );
+
+        await sleep(delay);
+
+        continue;
       }
 
-      const delay =
-        Math.min(
-          1000 *
-            Math.pow(
-              2,
-              attempt
-            ),
-          8000
-        );
+      /* ========================================================
+         SUCCESS
+      ======================================================== */
 
-      console.warn(
-        `NVIDIA returned HTTP ${response.status}. ` +
-          `Retrying in ${delay}ms ` +
-          `(attempt ${attempt + 1}/${NIM_MAX_RETRIES}).`
-      );
-
-      await sleep(delay);
+      return response;
     } catch (error) {
       lastError =
         error;
 
+      if (DEBUG_PROXY) {
+        console.error(
+          "=================================================="
+        );
+
+        console.error(
+          "NVIDIA AXIOS REQUEST ERROR"
+        );
+
+        console.error(
+          "CODE:",
+          error?.code
+        );
+
+        console.error(
+          "MESSAGE:",
+          error?.message
+        );
+
+        if (
+          error?.response
+        ) {
+          console.error(
+            "HTTP STATUS:",
+            error.response.status
+          );
+
+          console.error(
+            "STATUS TEXT:",
+            error.response.statusText
+          );
+
+          console.error(
+            "RESPONSE HEADERS:",
+            error.response.headers
+          );
+
+          if (
+            typeof error.response.data ===
+            "string"
+          ) {
+            console.error(
+              "RESPONSE BODY:",
+              error.response.data
+            );
+          }
+        }
+
+        console.error(
+          "=================================================="
+        );
+      }
+
       if (
         attempt >=
-        NIM_MAX_RETRIES ||
+          NIM_MAX_RETRIES ||
         !isRetryableNetworkError(
           error
         )
@@ -2074,24 +2140,6 @@ app.post(
          JANITOR CONTEXT
       ====================================================== */
 
-      /*
-       * This is deliberately simple.
-       *
-       * JanitorAI sends the conversation.
-       *
-       * We forward that conversation.
-       *
-       * We do NOT:
-       *
-       * - save it
-       * - hash it
-       * - merge it
-       * - infer a session
-       * - create a server-side conversation
-       * - append assistant replies
-       * - maintain Kimi memory
-       */
-
       const messages =
         normalizeMessages(
           incoming.messages
@@ -2154,13 +2202,6 @@ app.post(
         );
 
       if (DEBUG_PROXY) {
-        /*
-         * Do NOT print the entire prompt.
-         *
-         * Janitor conversations may contain
-         * private/user-generated content.
-         */
-
         console.log(
           "NIM REQUEST SUMMARY:",
           {
@@ -2213,6 +2254,10 @@ app.post(
 
       /* ======================================================
          UPSTREAM ERROR
+
+         requestNim() has already consumed streamed
+         error responses, so response.data is now
+         the captured raw body string.
       ====================================================== */
 
       if (
@@ -2222,22 +2267,16 @@ app.post(
         let errorBody = "";
 
         if (
-          stream &&
-          response.data &&
-          typeof response.data.on ===
-            "function"
-        ) {
-          errorBody =
-            await readStream(
-              response.data
-            );
-        } else if (
           typeof response.data ===
           "string"
         ) {
           errorBody =
             response.data;
-        } else {
+        } else if (
+          response.data !==
+            undefined &&
+          response.data !== null
+        ) {
           try {
             errorBody =
               JSON.stringify(
@@ -2281,7 +2320,8 @@ app.post(
 
         console.error(
           "Body:",
-          errorBody
+          errorBody ||
+            "(empty response body)"
         );
 
         console.error(
@@ -2515,10 +2555,6 @@ app.post(
           }
 
           ended = true;
-
-          /*
-           * Process a final partial event.
-           */
 
           if (
             buffer.trim() &&
@@ -2878,3 +2914,4 @@ process.on(
       "SIGINT"
     )
 );
+```
