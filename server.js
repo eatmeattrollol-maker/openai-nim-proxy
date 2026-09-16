@@ -9,7 +9,7 @@ const https = require("https");
 const app = express();
 
 /* ============================================================
-   SERVER CONFIGURATION
+   SERVER / NIM CONFIGURATION
 ============================================================ */
 
 const PORT =
@@ -25,176 +25,94 @@ const NIM_API_KEY =
   process.env.NVIDIA_API_KEY ||
   "";
 
+/*
+ * GLM 5.3 is the quality-first default.
+ *
+ * You can still override this in Render with DEFAULT_MODEL.
+ */
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
-  "moonshotai/kimi-k3";
+  "z-ai/glm-5.3";
 
-/* ============================================================
-   BASIC HELPERS
-============================================================ */
-
-function isPlainObject(value) {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value)
-  );
-}
-
-function isFiniteNumber(value) {
-  if (typeof value === "number") {
-    return Number.isFinite(value);
-  }
-
-  if (
-    typeof value === "string" &&
-    value.trim() !== ""
-  ) {
-    return Number.isFinite(Number(value));
-  }
-
-  return false;
-}
-
-function numberOrDefault(value, fallback) {
-  return isFiniteNumber(value)
-    ? Number(value)
-    : fallback;
-}
-
-function parseBoolean(value, fallback) {
-  if (
-    value === undefined ||
-    value === null
-  ) {
-    return fallback;
-  }
-
-  if (typeof value === "boolean") {
-    return value;
-  }
-
-  if (typeof value === "number") {
-    return value !== 0;
-  }
-
-  if (typeof value === "string") {
-    const normalized =
-      value.trim().toLowerCase();
-
-    if (
-      normalized === "true" ||
-      normalized === "1" ||
-      normalized === "yes" ||
-      normalized === "on"
-    ) {
-      return true;
-    }
-
-    if (
-      normalized === "false" ||
-      normalized === "0" ||
-      normalized === "no" ||
-      normalized === "off"
-    ) {
-      return false;
-    }
-  }
-
-  return fallback;
-}
-
-function normalizeModel(model) {
-  return String(model || "")
-    .trim()
-    .toLowerCase();
-}
-
-/* ============================================================
-   MODEL CONFIGURATION
-============================================================ */
-
-const MODELS = {
-  "deepseek-ai/deepseek-v4-flash-0731": {
-    name: "DeepSeek V4 Flash 0731",
-    provider: "DeepSeek AI",
-
-    reasoningLevels: [
-      "none",
-      "low",
-      "high",
-      "max"
-    ],
-
-    defaultReasoningEffort: "max",
-
-    maxOutputTokens: 8192
-  },
-
-  "z-ai/glm-5.3": {
-    name: "GLM 5.3",
-    provider: "Z.ai",
-
-    reasoningLevels: [
-      "low",
-      "high",
-      "max"
-    ],
-
-    defaultReasoningEffort: "high",
-
-    maxOutputTokens: 16384
-  },
-
-  "moonshotai/kimi-k3": {
-    name: "Kimi K3",
-    provider: "Moonshot AI",
-
-    /*
-     * Kimi reasoning is ALWAYS enabled.
-     * There is intentionally no "none" option.
-     */
-    reasoningLevels: [
-      "low",
-      "high",
-      "max"
-    ],
-
-    defaultReasoningEffort: "max",
-
-    maxOutputTokens: 8192
-  },
-
-  "nvidia/nemotron-3-ultra-550b-a55b": {
-    name: "NVIDIA Nemotron 3 Ultra 550B",
-    provider: "NVIDIA",
-
-    /*
-     * Nemotron controls reasoning through:
-     *
-     * chat_template_kwargs.enable_thinking
-     */
-    reasoningLevels: [
-      "none",
-      "high"
-    ],
-
-    defaultReasoningEffort: "high",
-
-    defaultThinking: true,
-
-    maxReasoningBudget: 32768,
-
-    maxOutputTokens: 16384
-  }
-};
-
+/*
+ * IMPORTANT:
+ *
+ * Keep this exactly as permissive as the original proxy.
+ *
+ * Unknown models remain allowed by default.
+ */
 const ALLOW_UNKNOWN_MODELS =
   String(
-    process.env.ALLOW_UNKNOWN_MODELS || "true"
+    process.env.ALLOW_UNKNOWN_MODELS ||
+      "true"
   )
     .trim()
     .toLowerCase() === "true";
+
+/*
+ * Debug logging is intentionally OFF by default.
+ *
+ * Enable DEBUG_PROXY=true when diagnosing the proxy.
+ *
+ * This never logs the actual RP messages.
+ */
+const DEBUG_PROXY =
+  String(
+    process.env.DEBUG_PROXY ||
+      "false"
+  )
+    .trim()
+    .toLowerCase() === "true";
+
+/*
+ * Reasoning is stripped from responses by default.
+ *
+ * This keeps hidden reasoning out of JanitorAI's visible response.
+ */
+const STRIP_REASONING_FROM_RESPONSE =
+  String(
+    process.env.STRIP_REASONING_FROM_RESPONSE ||
+      "true"
+  )
+    .trim()
+    .toLowerCase() === "true";
+
+/*
+ * Long-running request timeout.
+ *
+ * This is deliberately large because reasoning-heavy
+ * GLM requests can take a while.
+ */
+const NIM_TIMEOUT =
+  Number.isFinite(
+    Number(
+      process.env.NIM_TIMEOUT_MS
+    )
+  )
+    ? Number(
+        process.env.NIM_TIMEOUT_MS
+      )
+    : 900000;
+
+/*
+ * Model-list cache.
+ *
+ * This is only for GET /v1/models discovery.
+ * It has NOTHING to do with completion retries.
+ */
+const MODEL_CACHE_TTL =
+  Number.isFinite(
+    Number(
+      process.env.MODEL_CACHE_TTL_MS
+    )
+  )
+    ? Number(
+        process.env.MODEL_CACHE_TTL_MS
+      )
+    : 300000;
+
+const MAX_ERROR_BODY_SIZE =
+  2 * 1024 * 1024;
 
 /* ============================================================
    DEFAULT GENERATION SETTINGS
@@ -202,7 +120,8 @@ const ALLOW_UNKNOWN_MODELS =
 
 const DEFAULT_REASONING_EFFORT =
   String(
-    process.env.DEFAULT_REASONING_EFFORT || "high"
+    process.env.DEFAULT_REASONING_EFFORT ||
+      "high"
   )
     .trim()
     .toLowerCase();
@@ -217,39 +136,6 @@ const DEFAULT_REASONING_BUDGET =
         process.env.DEFAULT_REASONING_BUDGET
       )
     : 16384;
-
-/*
- * IMPORTANT:
- *
- * These model IDs must exactly match MODELS above.
- */
-const MODEL_REASONING_BUDGETS = {
-  "deepseek-ai/deepseek-v4-flash-0731":
-    16384,
-
-  "deepseek-ai/deepseek-v4-pro-0813":
-    24576,
-
-  "moonshotai/kimi-k3":
-    32768,
-
-  "nvidia/nemotron-3-ultra-550b-a55b":
-    16384
-};
-
-const MODEL_REASONING_EFFORTS = {
-  "deepseek-ai/deepseek-v4-flash-0731":
-    "max",
-
-  "deepseek-ai/deepseek-v4-pro-0813":
-    "max",
-
-  "moonshotai/kimi-k3":
-    "max",
-
-  "nvidia/nemotron-3-ultra-550b-a55b":
-    "high"
-};
 
 const DEFAULT_MAX_TOKENS =
   Number.isFinite(
@@ -317,10 +203,9 @@ const DEFAULT_PRESENCE_PENALTY =
       )
     : 0.0;
 
-/* ============================================================
-   NEMOTRON THINKING DEFAULT
-============================================================ */
-
+/*
+ * Preserve the original Nemotron default behavior.
+ */
 const DEFAULT_NEMOTRON_THINKING =
   parseBoolean(
     process.env.NEMOTRON_ENABLE_THINKING,
@@ -328,35 +213,15 @@ const DEFAULT_NEMOTRON_THINKING =
   );
 
 /* ============================================================
-   RESPONSE REASONING VISIBILITY
+   HTTP AGENTS
 ============================================================ */
 
-const STRIP_REASONING_FROM_RESPONSE =
-  String(
-    process.env.STRIP_REASONING_FROM_RESPONSE ||
-      "true"
-  )
-    .trim()
-    .toLowerCase() === "true";
-
-/* ============================================================
-   NETWORK
-============================================================ */
-
-const NIM_TIMEOUT =
-  Number.isFinite(
-    Number(
-      process.env.NIM_TIMEOUT_MS
-    )
-  )
-    ? Number(
-        process.env.NIM_TIMEOUT_MS
-      )
-    : 900000;
-
-const MAX_ERROR_BODY_SIZE =
-  2 * 1024 * 1024;
-
+/*
+ * Persistent connections reduce avoidable connection setup
+ * overhead between Render and NVIDIA.
+ *
+ * These do NOT perform retries.
+ */
 const httpAgent =
   new http.Agent({
     keepAlive: true,
@@ -374,43 +239,447 @@ const httpsAgent =
   });
 
 /* ============================================================
-   DEBUG
+   BASIC HELPERS
 ============================================================ */
 
-const DEBUG_PROXY =
-  String(
-    process.env.DEBUG_PROXY || "true"
-  )
+function isPlainObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
+function isFiniteNumber(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+
+  if (
+    typeof value === "string" &&
+    value.trim() !== ""
+  ) {
+    return Number.isFinite(
+      Number(value)
+    );
+  }
+
+  return false;
+}
+
+function numberOrDefault(
+  value,
+  fallback
+) {
+  return isFiniteNumber(value)
+    ? Number(value)
+    : fallback;
+}
+
+function parseBoolean(
+  value,
+  fallback
+) {
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized =
+      value
+        .trim()
+        .toLowerCase();
+
+    if (
+      [
+        "true",
+        "1",
+        "yes",
+        "on"
+      ].includes(normalized)
+    ) {
+      return true;
+    }
+
+    if (
+      [
+        "false",
+        "0",
+        "no",
+        "off"
+      ].includes(normalized)
+    ) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeModel(model) {
+  return String(model || "")
     .trim()
-    .toLowerCase() === "true";
+    .toLowerCase();
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 
 /* ============================================================
-   MODEL CACHE
+   MODEL CONFIGURATION
 ============================================================ */
 
-let modelCache = null;
-let modelCacheTimestamp = 0;
-let modelCachePromise = null;
+/*
+ * These are the actual NVIDIA model IDs handled specially
+ * by this proxy.
+ *
+ * The model-specific adapter is selected from this table.
+ */
+const MODELS = {
+  "z-ai/glm-5.3": {
+    name: "GLM 5.3",
+    provider: "Z.ai",
 
-const MODEL_CACHE_TTL =
-  Number.isFinite(
-    Number(
-      process.env.MODEL_CACHE_TTL_MS
-    )
-  )
-    ? Number(
-        process.env.MODEL_CACHE_TTL_MS
-      )
-    : 300000;
+    /*
+     * NVIDIA documents these three reasoning levels.
+     */
+    reasoningLevels: [
+      "low",
+      "high",
+      "max"
+    ],
+
+    /*
+     * We intentionally use HIGH as the normal/default
+     * GLM profile because your stated objective is:
+     *
+     *   quality + lower TTFT
+     *
+     * The Deep profile explicitly selects MAX.
+     */
+    defaultReasoningEffort:
+      "high",
+
+    /*
+     * This is the maximum output ceiling exposed by
+     * the proxy when Janitor does not request something
+     * smaller.
+     */
+    maxOutputTokens:
+      32768,
+
+    maxReasoningBudget:
+      null,
+
+    adapter:
+      "glm53",
+
+    /*
+     * NVIDIA documents GLM-5.3 as supporting a 1,048,576
+     * token context window.
+     *
+     * We do NOT attempt to construct or alter Janitor's
+     * context ourselves.
+     */
+    contextTokens:
+      1048576
+  },
+
+  "moonshotai/kimi-k3": {
+    name: "Kimi K3",
+    provider: "Moonshot AI",
+
+    /*
+     * Kimi reasoning is never disabled by this proxy.
+     */
+    reasoningLevels: [
+      "low",
+      "high",
+      "max"
+    ],
+
+    defaultReasoningEffort:
+      "max",
+
+    maxOutputTokens:
+      8192,
+
+    maxReasoningBudget:
+      32768,
+
+    adapter:
+      "kimi-k3"
+  },
+
+  "nvidia/nemotron-3-ultra-550b-a55b": {
+    name:
+      "NVIDIA Nemotron 3 Ultra 550B",
+
+    provider:
+      "NVIDIA",
+
+    /*
+     * Nemotron uses a thinking switch rather than
+     * GLM's reasoning_effort mechanism.
+     */
+    reasoningLevels: [
+      "none",
+      "high"
+    ],
+
+    defaultReasoningEffort:
+      "high",
+
+    defaultThinking:
+      true,
+
+    maxReasoningBudget:
+      32768,
+
+    maxOutputTokens:
+      16384,
+
+    adapter:
+      "nemotron"
+  },
+
+  "deepseek-ai/deepseek-v4-flash-0731": {
+    name:
+      "DeepSeek V4 Flash 0731",
+
+    provider:
+      "DeepSeek AI",
+
+    reasoningLevels: [
+      "none",
+      "low",
+      "high",
+      "max"
+    ],
+
+    defaultReasoningEffort:
+      "max",
+
+    maxOutputTokens:
+      8192,
+
+    maxReasoningBudget:
+      16384,
+
+    adapter:
+      "deepseek-flash"
+  }
+};
 
 /* ============================================================
-   MODEL HELPERS
+   PROXY PROFILES
 ============================================================ */
+
+/*
+ * JanitorAI does not need to understand reasoning profiles.
+ *
+ * These are virtual model IDs exposed by OUR /v1/models
+ * endpoint.
+ *
+ * When Janitor selects one:
+ *
+ *     z-ai/glm-5.3-balanced
+ *
+ * the proxy sends:
+ *
+ *     model = z-ai/glm-5.3
+ *     reasoning_effort = high
+ *
+ * to NVIDIA.
+ *
+ * This means profiles can be selected from Janitor's normal
+ * model selector if Janitor refreshes the model list.
+ */
+
+/* ---------------- GLM 5.3 ---------------- */
+
+const PROFILES = {
+  "z-ai/glm-5.3-fast": {
+    baseModel:
+      "z-ai/glm-5.3",
+    label:
+      "Fast",
+    reasoningEffort:
+      "low"
+  },
+
+  "z-ai/glm-5.3-balanced": {
+    baseModel:
+      "z-ai/glm-5.3",
+    label:
+      "Balanced",
+    reasoningEffort:
+      "high"
+  },
+
+  "z-ai/glm-5.3-deep": {
+    baseModel:
+      "z-ai/glm-5.3",
+    label:
+      "Deep",
+    reasoningEffort:
+      "max"
+  },
+
+  /* ---------------- KIMI K3 ---------------- */
+
+  "moonshotai/kimi-k3-fast": {
+    baseModel:
+      "moonshotai/kimi-k3",
+    label:
+      "Fast",
+    reasoningEffort:
+      "low"
+  },
+
+  "moonshotai/kimi-k3-balanced": {
+    baseModel:
+      "moonshotai/kimi-k3",
+    label:
+      "Balanced",
+    reasoningEffort:
+      "high"
+  },
+
+  "moonshotai/kimi-k3-deep": {
+    baseModel:
+      "moonshotai/kimi-k3",
+    label:
+      "Deep",
+    reasoningEffort:
+      "max"
+  },
+
+  /* ---------------- NEMOTRON ---------------- */
+
+  /*
+   * Nemotron does not use GLM's reasoning_effort.
+   *
+   * Instead:
+   *
+   *   Fast     = thinking disabled
+   *   Balanced = thinking enabled + 16K budget
+   *   Deep     = thinking enabled + 32K budget
+   */
+  "nvidia/nemotron-3-ultra-550b-a55b-fast": {
+    baseModel:
+      "nvidia/nemotron-3-ultra-550b-a55b",
+    label:
+      "Fast",
+    thinking:
+      false
+  },
+
+  "nvidia/nemotron-3-ultra-550b-a55b-balanced": {
+    baseModel:
+      "nvidia/nemotron-3-ultra-550b-a55b",
+    label:
+      "Balanced",
+    thinking:
+      true,
+    reasoningBudget:
+      16384
+  },
+
+  "nvidia/nemotron-3-ultra-550b-a55b-deep": {
+    baseModel:
+      "nvidia/nemotron-3-ultra-550b-a55b",
+    label:
+      "Deep",
+    thinking:
+      true,
+    reasoningBudget:
+      32768
+  },
+
+  /* ---------------- DEEPSEEK ---------------- */
+
+  "deepseek-ai/deepseek-v4-flash-0731-fast": {
+    baseModel:
+      "deepseek-ai/deepseek-v4-flash-0731",
+    label:
+      "Fast",
+    reasoningEffort:
+      "low"
+  },
+
+  "deepseek-ai/deepseek-v4-flash-0731-balanced": {
+    baseModel:
+      "deepseek-ai/deepseek-v4-flash-0731",
+    label:
+      "Balanced",
+    reasoningEffort:
+      "high"
+  },
+
+  "deepseek-ai/deepseek-v4-flash-0731-deep": {
+    baseModel:
+      "deepseek-ai/deepseek-v4-flash-0731",
+    label:
+      "Deep",
+    reasoningEffort:
+      "max"
+  }
+};
+
+function getProfile(model) {
+  return (
+    PROFILES[
+      normalizeModel(model)
+    ] || null
+  );
+}
+
+function resolveModel(model) {
+  const requested =
+    String(model || "").trim();
+
+  const profile =
+    getProfile(requested);
+
+  return {
+    requestedModel:
+      requested,
+
+    baseModel:
+      profile
+        ? profile.baseModel
+        : requested,
+
+    profile
+  };
+}
 
 function getModelConfig(model) {
+  const resolved =
+    resolveModel(model);
+
   return (
     MODELS[
-      normalizeModel(model)
+      normalizeModel(
+        resolved.baseModel
+      )
     ] || null
   );
 }
@@ -423,6 +692,119 @@ function isSupportedModel(model) {
 }
 
 /* ============================================================
+   MODEL LIST HELPERS
+============================================================ */
+
+function publicModelEntry(
+  id,
+  config,
+  extra
+) {
+  return {
+    id,
+
+    object:
+      "model",
+
+    created:
+      Math.floor(
+        Date.now() / 1000
+      ),
+
+    owned_by:
+      config?.provider ||
+      "proxy",
+
+    ...(extra || {})
+  };
+}
+
+function localModelEntries() {
+  const entries = [];
+
+  /*
+   * Real configured models.
+   */
+  for (
+    const [
+      id,
+      config
+    ] of Object.entries(
+      MODELS
+    )
+  ) {
+    entries.push(
+      publicModelEntry(
+        id,
+        config,
+        {
+          reasoning_levels:
+            config.reasoningLevels,
+
+          max_output_tokens:
+            config.maxOutputTokens,
+
+          context_tokens:
+            config.contextTokens ||
+            null,
+
+          proxy_profile:
+            false
+        }
+      )
+    );
+  }
+
+  /*
+   * Virtual profile models.
+   */
+  for (
+    const [
+      id,
+      profile
+    ] of Object.entries(
+      PROFILES
+    )
+  ) {
+    const config =
+      MODELS[
+        profile.baseModel
+      ];
+
+    entries.push(
+      publicModelEntry(
+        id,
+        config,
+        {
+          reasoning_levels:
+            config?.reasoningLevels ||
+            [],
+
+          max_output_tokens:
+            config?.maxOutputTokens ||
+            DEFAULT_MAX_TOKENS,
+
+          context_tokens:
+            config?.contextTokens ||
+            null,
+
+          proxy_profile:
+            true,
+
+          profile:
+            profile.label,
+
+          profile_base_model:
+            profile.baseModel
+        }
+      )
+    );
+  }
+
+  return entries;
+}
+
+/* ============================================================
    GENERATION HELPERS
 ============================================================ */
 
@@ -430,8 +812,13 @@ function clampTemperature(
   value,
   model
 ) {
+  const resolved =
+    resolveModel(model);
+
   const maximum =
-    normalizeModel(model) ===
+    normalizeModel(
+      resolved.baseModel
+    ) ===
     "moonshotai/kimi-k3"
       ? 1
       : 2;
@@ -465,7 +852,7 @@ function clampMaxTokens(
   value,
   modelConfig
 ) {
-  const number =
+  const requested =
     Math.max(
       1,
       Math.floor(
@@ -482,11 +869,11 @@ function clampMaxTokens(
   ) {
     return Math.min(
       modelConfig.maxOutputTokens,
-      number
+      requested
     );
   }
 
-  return number;
+  return requested;
 }
 
 function clampReasoningBudget(
@@ -514,6 +901,72 @@ function clampReasoningBudget(
 /* ============================================================
    REASONING HELPERS
 ============================================================ */
+
+function normalizeReasoningEffort(
+  value,
+  modelConfig
+) {
+  const levels =
+    modelConfig?.reasoningLevels ||
+    [];
+
+  if (
+    typeof value === "string"
+  ) {
+    const normalized =
+      value
+        .trim()
+        .toLowerCase();
+
+    if (
+      levels.includes(
+        normalized
+      )
+    ) {
+      return normalized;
+    }
+
+    if (
+      [
+        "off",
+        "false",
+        "0",
+        "disabled",
+        "disable",
+        "none"
+      ].includes(normalized) &&
+      levels.includes("none")
+    ) {
+      return "none";
+    }
+
+    if (
+      [
+        "med",
+        "medium"
+      ].includes(normalized) &&
+      levels.includes("medium")
+    ) {
+      return "medium";
+    }
+
+    if (
+      [
+        "maximum",
+        "maximum_reasoning"
+      ].includes(normalized) &&
+      levels.includes("max")
+    ) {
+      return "max";
+    }
+  }
+
+  return (
+    modelConfig?.defaultReasoningEffort ||
+    levels[0] ||
+    "none"
+  );
+}
 
 function budgetToReasoningEffort(
   budget,
@@ -557,78 +1010,31 @@ function budgetToReasoningEffort(
     return "high";
   }
 
-  if (levels.includes("max")) {
+  if (
+    levels.includes("max")
+  ) {
     return "max";
   }
 
-  if (levels.includes("high")) {
+  if (
+    levels.includes("high")
+  ) {
     return "high";
   }
 
-  if (levels.includes("medium")) {
+  if (
+    levels.includes("medium")
+  ) {
     return "medium";
   }
 
-  if (levels.includes("low")) {
+  if (
+    levels.includes("low")
+  ) {
     return "low";
   }
 
-  return levels[0] || "none";
-}
-
-function normalizeReasoningEffort(
-  value,
-  modelConfig
-) {
-  const levels =
-    modelConfig?.reasoningLevels ||
-    [];
-
-  if (typeof value === "string") {
-    const normalized =
-      value.trim().toLowerCase();
-
-    if (
-      levels.includes(normalized)
-    ) {
-      return normalized;
-    }
-
-    if (
-      (
-        normalized === "off" ||
-        normalized === "false" ||
-        normalized === "0"
-      ) &&
-      levels.includes("none")
-    ) {
-      return "none";
-    }
-
-    if (
-      (
-        normalized === "med" ||
-        normalized === "medium"
-      ) &&
-      levels.includes("medium")
-    ) {
-      return "medium";
-    }
-
-    if (
-      (
-        normalized === "maximum" ||
-        normalized ===
-          "maximum_reasoning"
-      ) &&
-      levels.includes("max")
-    ) {
-      return "max";
-    }
-  }
-
   return (
-    modelConfig?.defaultReasoningEffort ||
     levels[0] ||
     "none"
   );
@@ -637,15 +1043,30 @@ function normalizeReasoningEffort(
 function getRequestedReasoningEffort(
   incoming,
   model,
-  modelConfig
+  modelConfig,
+  profile
 ) {
+  /*
+   * A selected proxy profile has priority.
+   *
+   * This is how Janitor's model selection becomes
+   * an internal reasoning profile.
+   */
+  if (
+    profile &&
+    profile.reasoningEffort
+  ) {
+    return normalizeReasoningEffort(
+      profile.reasoningEffort,
+      modelConfig
+    );
+  }
+
   const normalizedModel =
     normalizeModel(model);
 
   /*
-   * Kimi K3:
-   *
-   * NEVER disable reasoning.
+   * Kimi reasoning is never disabled.
    */
   if (
     normalizedModel ===
@@ -661,7 +1082,8 @@ function getRequestedReasoningEffort(
           modelConfig
         );
 
-      return requested === "none"
+      return requested ===
+        "none"
         ? "max"
         : requested;
     }
@@ -676,7 +1098,8 @@ function getRequestedReasoningEffort(
           modelConfig
         );
 
-      return requested === "none"
+      return requested ===
+        "none"
         ? "max"
         : requested;
     }
@@ -688,61 +1111,36 @@ function getRequestedReasoningEffort(
     incoming.reasoning_effort !==
     undefined
   ) {
-    return modelConfig
-      ? normalizeReasoningEffort(
-          incoming.reasoning_effort,
-          modelConfig
-        )
-      : String(
-          incoming.reasoning_effort
-        ).trim();
+    return normalizeReasoningEffort(
+      incoming.reasoning_effort,
+      modelConfig
+    );
   }
 
   if (
     incoming.reasoning_mode !==
     undefined
   ) {
-    return modelConfig
-      ? normalizeReasoningEffort(
-          incoming.reasoning_mode,
-          modelConfig
-        )
-      : String(
-          incoming.reasoning_mode
-        ).trim();
+    return normalizeReasoningEffort(
+      incoming.reasoning_mode,
+      modelConfig
+    );
   }
 
   if (
     incoming.reasoning_budget !==
     undefined
   ) {
-    return modelConfig
-      ? budgetToReasoningEffort(
-          incoming.reasoning_budget,
-          modelConfig
-        )
-      : null;
-  }
-
-  if (
-    MODEL_REASONING_EFFORTS[
-      normalizedModel
-    ]
-  ) {
-    return normalizeReasoningEffort(
-      MODEL_REASONING_EFFORTS[
-        normalizedModel
-      ],
+    return budgetToReasoningEffort(
+      incoming.reasoning_budget,
       modelConfig
     );
   }
 
-  return modelConfig
-    ? normalizeReasoningEffort(
-        DEFAULT_REASONING_EFFORT,
-        modelConfig
-      )
-    : null;
+  return normalizeReasoningEffort(
+    DEFAULT_REASONING_EFFORT,
+    modelConfig
+  );
 }
 
 /* ============================================================
@@ -750,21 +1148,32 @@ function getRequestedReasoningEffort(
 ============================================================ */
 
 function getNemotronThinking(
-  incoming
+  incoming,
+  profile
 ) {
   /*
-   * Highest priority:
-   *
-   * chat_template_kwargs.enable_thinking
+   * Profile wins first.
    */
+  if (
+    profile &&
+    typeof profile.thinking ===
+      "boolean"
+  ) {
+    return profile.thinking;
+  }
 
+  /*
+   * Explicit chat_template_kwargs wins next.
+   */
   if (
     isPlainObject(
       incoming.chat_template_kwargs
     ) &&
-    typeof incoming
-      .chat_template_kwargs
-      .enable_thinking === "boolean"
+    typeof
+      incoming
+        .chat_template_kwargs
+        .enable_thinking ===
+        "boolean"
   ) {
     return (
       incoming
@@ -774,7 +1183,7 @@ function getNemotronThinking(
   }
 
   /*
-   * Optional top-level convenience flag.
+   * Convenience top-level flag.
    */
   if (
     incoming.enable_thinking !==
@@ -787,26 +1196,16 @@ function getNemotronThinking(
   }
 
   /*
-   * reasoning_effort
+   * reasoning_effort.
    */
-
   if (
     incoming.reasoning_effort !==
     undefined
   ) {
     const value =
-      incoming.reasoning_effort;
-
-    if (typeof value === "boolean") {
-      return value;
-    }
-
-    if (typeof value === "number") {
-      return value !== 0;
-    }
-
-    const normalized =
-      String(value)
+      String(
+        incoming.reasoning_effort
+      )
         .trim()
         .toLowerCase();
 
@@ -818,50 +1217,25 @@ function getNemotronThinking(
         "0",
         "disabled",
         "disable"
-      ].includes(normalized)
+      ].includes(value)
     ) {
       return false;
     }
 
-    if (
-      [
-        "low",
-        "medium",
-        "high",
-        "max",
-        "maximum",
-        "on",
-        "true",
-        "1",
-        "enabled",
-        "enable"
-      ].includes(normalized)
-    ) {
-      return true;
-    }
+    return true;
   }
 
   /*
-   * reasoning_mode
+   * reasoning_mode.
    */
-
   if (
     incoming.reasoning_mode !==
     undefined
   ) {
     const value =
-      incoming.reasoning_mode;
-
-    if (typeof value === "boolean") {
-      return value;
-    }
-
-    if (typeof value === "number") {
-      return value !== 0;
-    }
-
-    const normalized =
-      String(value)
+      String(
+        incoming.reasoning_mode
+      )
         .trim()
         .toLowerCase();
 
@@ -873,27 +1247,12 @@ function getNemotronThinking(
         "0",
         "disabled",
         "disable"
-      ].includes(normalized)
+      ].includes(value)
     ) {
       return false;
     }
 
-    if (
-      [
-        "low",
-        "medium",
-        "high",
-        "max",
-        "maximum",
-        "on",
-        "true",
-        "1",
-        "enabled",
-        "enable"
-      ].includes(normalized)
-    ) {
-      return true;
-    }
+    return true;
   }
 
   return DEFAULT_NEMOTRON_THINKING;
@@ -903,28 +1262,44 @@ function getNemotronThinking(
    MESSAGE NORMALIZATION
 ============================================================ */
 
-function normalizeMessages(messages) {
-  if (!Array.isArray(messages)) {
+function normalizeMessages(
+  messages
+) {
+  if (
+    !Array.isArray(messages)
+  ) {
     return [];
   }
 
   const result = [];
 
-  for (const message of messages) {
-    if (!isPlainObject(message)) {
+  for (
+    const message of messages
+  ) {
+    if (
+      !isPlainObject(message)
+    ) {
       continue;
     }
 
     if (
-      typeof message.role !== "string" ||
+      typeof message.role !==
+        "string" ||
       !message.role.trim()
     ) {
       continue;
     }
 
+    /*
+     * Everything else in the message is preserved.
+     *
+     * This is important for Janitor's context.
+     */
     result.push({
       ...message,
-      role: message.role.trim()
+
+      role:
+        message.role.trim()
     });
   }
 
@@ -932,30 +1307,44 @@ function normalizeMessages(messages) {
 }
 
 /* ============================================================
-   BUILD NIM REQUEST
+   BUILD NVIDIA REQUEST
 ============================================================ */
 
 function buildNimRequest(
   incoming,
-  model,
+  requestedModel,
   messages,
   stream
 ) {
+  const resolved =
+    resolveModel(
+      requestedModel
+    );
+
+  const model =
+    resolved.baseModel;
+
+  const profile =
+    resolved.profile;
+
   const normalizedModel =
     normalizeModel(model);
 
   const modelConfig =
-    getModelConfig(model);
+    MODELS[
+      normalizedModel
+    ] || null;
 
-  /*
-   * Kimi has more restricted sampling parameters.
-   */
   const isKimi =
     normalizedModel ===
     "moonshotai/kimi-k3";
 
+  /*
+   * Start with the common OpenAI-compatible request.
+   */
   const request = {
     model,
+
     messages,
 
     temperature:
@@ -974,8 +1363,8 @@ function buildNimRequest(
   };
 
   /*
-   * Do not send unsupported/default sampling
-   * parameters to Kimi.
+   * Kimi's original behavior deliberately omitted
+   * top_p, so preserve that.
    */
   if (!isKimi) {
     request.top_p =
@@ -985,7 +1374,7 @@ function buildNimRequest(
   }
 
   /* ==========================================================
-     OPTIONAL GENERATION PARAMETERS
+     OPTIONAL SAMPLING PARAMETERS
   ========================================================== */
 
   if (
@@ -1024,6 +1413,9 @@ function buildNimRequest(
       );
   }
 
+  /*
+   * Preserve additional parameters Janitor/NIM may support.
+   */
   const optionalParameters = [
     "stop",
     "seed",
@@ -1043,10 +1435,6 @@ function buildNimRequest(
     "audio"
   ];
 
-  /*
-   * "n" is deliberately excluded because Kimi
-   * does not expose it as a configurable parameter.
-   */
   for (
     const parameter of
       optionalParameters
@@ -1090,6 +1478,58 @@ function buildNimRequest(
   }
 
   /* ==========================================================
+     GLM 5.3
+  ========================================================== */
+
+  if (
+    normalizedModel ===
+    "z-ai/glm-5.3"
+  ) {
+    /*
+     * GLM-5.3 thinking is always enabled.
+     *
+     * reasoning_effort controls how much reasoning
+     * the model performs:
+     *
+     * low / high / max
+     */
+    request.reasoning_effort =
+      getRequestedReasoningEffort(
+        incoming,
+        model,
+        modelConfig,
+        profile
+      );
+
+    /*
+     * CRITICAL FOR MULTI-TURN CHAT:
+     *
+     * clear_thinking=true prevents prior hidden reasoning
+     * from being carried forward through the chat template.
+     *
+     * This does NOT disable reasoning.
+     */
+    request.chat_template_kwargs = {
+      ...(request.chat_template_kwargs ||
+        {}),
+
+      clear_thinking:
+        true
+    };
+
+    /*
+     * GLM uses reasoning_effort rather than Nemotron's
+     * reasoning_budget mechanism.
+     */
+    delete request.reasoning_budget;
+    delete request.enable_thinking;
+    delete request.reasoning_mode;
+    delete request.nvext;
+
+    return request;
+  }
+
+  /* ==========================================================
      NEMOTRON
   ========================================================== */
 
@@ -1099,7 +1539,8 @@ function buildNimRequest(
   ) {
     const enableThinking =
       getNemotronThinking(
-        incoming
+        incoming,
+        profile
       );
 
     request.chat_template_kwargs = {
@@ -1110,14 +1551,17 @@ function buildNimRequest(
         enableThinking
     };
 
-    if (enableThinking) {
+    if (
+      enableThinking
+    ) {
       const requestedBudget =
-        incoming.reasoning_budget !==
-        undefined
-          ? incoming.reasoning_budget
-          : MODEL_REASONING_BUDGETS[
-              normalizedModel
-            ];
+        profile?.reasoningBudget ??
+        (
+          incoming.reasoning_budget !==
+          undefined
+            ? incoming.reasoning_budget
+            : 16384
+        );
 
       request.reasoning_budget =
         clampReasoningBudget(
@@ -1129,12 +1573,14 @@ function buildNimRequest(
     }
 
     /*
-     * NVIDIA recommends force_nonempty_content
-     * for tool/coding scenarios when thinking is on.
+     * NVIDIA's Nemotron documentation uses this
+     * for thinking + tool scenarios.
      */
     if (
       enableThinking &&
-      Array.isArray(request.tools) &&
+      Array.isArray(
+        request.tools
+      ) &&
       request.tools.length > 0
     ) {
       request.chat_template_kwargs = {
@@ -1146,8 +1592,8 @@ function buildNimRequest(
     }
 
     /*
-     * These parameters must not be sent to
-     * Nemotron as reasoning controls.
+     * Do not accidentally send GLM-style reasoning
+     * controls to Nemotron.
      */
     delete request.reasoning_effort;
     delete request.reasoning_mode;
@@ -1169,7 +1615,8 @@ function buildNimRequest(
       getRequestedReasoningEffort(
         incoming,
         model,
-        modelConfig
+        modelConfig,
+        profile
       );
 
     request.reasoning_effort =
@@ -1180,7 +1627,8 @@ function buildNimRequest(
         {}),
 
       thinking:
-        reasoningEffort !== "none",
+        reasoningEffort !==
+        "none",
 
       reasoning_effort:
         reasoningEffort
@@ -1193,6 +1641,13 @@ function buildNimRequest(
      DEEPSEEK V4 PRO
   ========================================================== */
 
+  /*
+   * Preserve the original proxy's explicit handling of
+   * DeepSeek V4 Pro even though it isn't registered in
+   * MODELS above.
+   *
+   * ALLOW_UNKNOWN_MODELS remains untouched.
+   */
   if (
     normalizedModel ===
     "deepseek-ai/deepseek-v4-pro-0813"
@@ -1201,7 +1656,8 @@ function buildNimRequest(
       getRequestedReasoningEffort(
         incoming,
         model,
-        modelConfig
+        modelConfig,
+        profile
       );
 
     request.reasoning_effort =
@@ -1225,18 +1681,19 @@ function buildNimRequest(
       getRequestedReasoningEffort(
         incoming,
         model,
-        modelConfig
+        modelConfig,
+        profile
       );
 
     request.reasoning_effort =
-      reasoningEffort === "none"
+      reasoningEffort ===
+      "none"
         ? "max"
         : reasoningEffort;
 
     /*
      * Prevent callers from injecting a false
-     * reasoning-off configuration through extra_body
-     * or chat_template_kwargs.
+     * reasoning-off configuration.
      */
     if (
       isPlainObject(
@@ -1257,6 +1714,13 @@ function buildNimRequest(
      UNKNOWN MODELS
   ========================================================== */
 
+  /*
+   * IMPORTANT:
+   *
+   * Unknown-model behavior remains permissive.
+   *
+   * We do NOT change ALLOW_UNKNOWN_MODELS.
+   */
   if (!modelConfig) {
     if (
       incoming.reasoning_effort !==
@@ -1289,47 +1753,73 @@ function buildNimRequest(
 }
 
 /* ============================================================
-   REMOVE REASONING FROM CLIENT RESPONSE
+   RESPONSE REASONING STRIPPING
 ============================================================ */
 
-function stripReasoning(parsed) {
+function stripReasoning(
+  parsed
+) {
   if (
     !STRIP_REASONING_FROM_RESPONSE ||
     !parsed ||
-    typeof parsed !== "object" ||
-    !Array.isArray(parsed.choices)
+    typeof parsed !==
+      "object"
   ) {
     return parsed;
   }
 
-  for (const choice of parsed.choices) {
-    if (
-      !choice ||
-      typeof choice !== "object"
+  if (
+    Array.isArray(
+      parsed.choices
+    )
+  ) {
+    for (
+      const choice of
+        parsed.choices
     ) {
-      continue;
-    }
+      if (
+        !choice ||
+        typeof choice !==
+          "object"
+      ) {
+        continue;
+      }
 
-    if (choice.delta) {
-      delete choice.delta
-        .reasoning_content;
+      if (
+        choice.delta &&
+        typeof choice.delta ===
+          "object"
+      ) {
+        delete choice
+          .delta
+          .reasoning_content;
 
-      delete choice.delta
-        .reasoning;
+        delete choice
+          .delta
+          .reasoning;
 
-      delete choice.delta
-        .thinking;
-    }
+        delete choice
+          .delta
+          .thinking;
+      }
 
-    if (choice.message) {
-      delete choice.message
-        .reasoning_content;
+      if (
+        choice.message &&
+        typeof choice.message ===
+          "object"
+      ) {
+        delete choice
+          .message
+          .reasoning_content;
 
-      delete choice.message
-        .reasoning;
+        delete choice
+          .message
+          .reasoning;
 
-      delete choice.message
-        .thinking;
+        delete choice
+          .message
+          .thinking;
+      }
     }
   }
 
@@ -1340,32 +1830,55 @@ function stripReasoning(parsed) {
    SSE PROCESSING
 ============================================================ */
 
-function processSSEEvent(event) {
-  if (!event || !event.trim()) {
+function processSSEEvent(
+  event
+) {
+  if (
+    !event ||
+    !event.trim()
+  ) {
     return "";
   }
 
   const lines =
-    event.split(/\r?\n/);
+    event.split(
+      /\r?\n/
+    );
 
   const output = [];
 
-  for (const line of lines) {
-    if (!line.startsWith("data:")) {
+  for (
+    const line of lines
+  ) {
+    /*
+     * Preserve comments / non-data SSE lines.
+     */
+    if (
+      !line.startsWith(
+        "data:"
+      )
+    ) {
       output.push(line);
       continue;
     }
 
     const data =
-      line.slice(5).trim();
+      line
+        .slice(5)
+        .trim();
 
     if (!data) {
       output.push(line);
       continue;
     }
 
-    if (data === "[DONE]") {
-      output.push("data: [DONE]");
+    if (
+      data ===
+      "[DONE]"
+    ) {
+      output.push(
+        "data: [DONE]"
+      );
       continue;
     }
 
@@ -1373,19 +1886,26 @@ function processSSEEvent(event) {
       const parsed =
         JSON.parse(data);
 
-      stripReasoning(parsed);
-
       output.push(
         "data: " +
-          JSON.stringify(parsed)
+          JSON.stringify(
+            stripReasoning(
+              parsed
+            )
+          )
       );
     } catch {
+      /*
+       * If an upstream event isn't JSON,
+       * preserve it rather than destroying it.
+       */
       output.push(line);
     }
   }
 
   return output.length
-    ? output.join("\n") + "\n\n"
+    ? output.join("\n") +
+        "\n\n"
     : "";
 }
 
@@ -1393,68 +1913,88 @@ function processSSEEvent(event) {
    ERROR HELPERS
 ============================================================ */
 
-function readStream(stream) {
-  return new Promise(resolve => {
-    let output = "";
-    let finished = false;
+function readStream(
+  stream
+) {
+  return new Promise(
+    resolve => {
+      let output = "";
+      let finished = false;
 
-    function finish() {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-      resolve(output);
-    }
-
-    stream.on(
-      "data",
-      chunk => {
-        if (
-          output.length >=
-          MAX_ERROR_BODY_SIZE
-        ) {
+      function finish() {
+        if (finished) {
           return;
         }
 
-        output += chunk.toString("utf8");
+        finished = true;
+        resolve(output);
+      }
 
-        if (
-          output.length >
-          MAX_ERROR_BODY_SIZE
-        ) {
-          output =
-            output.slice(
-              0,
-              MAX_ERROR_BODY_SIZE
+      stream.on(
+        "data",
+        chunk => {
+          if (
+            output.length >=
+            MAX_ERROR_BODY_SIZE
+          ) {
+            return;
+          }
+
+          output +=
+            chunk.toString(
+              "utf8"
             );
+
+          if (
+            output.length >
+            MAX_ERROR_BODY_SIZE
+          ) {
+            output =
+              output.slice(
+                0,
+                MAX_ERROR_BODY_SIZE
+              );
+          }
         }
-      }
-    );
+      );
 
-    stream.on("end", finish);
-    stream.on("close", finish);
+      stream.on(
+        "end",
+        finish
+      );
 
-    stream.on(
-      "error",
-      error => {
-        console.error(
-          "Error while reading NVIDIA error response:",
-          error?.message || error
-        );
+      stream.on(
+        "close",
+        finish
+      );
 
-        finish();
-      }
-    );
-  });
+      stream.on(
+        "error",
+        error => {
+          console.error(
+            "Error while reading NVIDIA error response:",
+            error?.message ||
+              error
+          );
+
+          finish();
+        }
+      );
+    }
+  );
 }
 
-function extractErrorMessage(data) {
+function extractErrorMessage(
+  data
+) {
   if (!data) {
     return null;
   }
 
-  if (typeof data === "object") {
+  if (
+    typeof data ===
+    "object"
+  ) {
     return (
       data.error?.message ||
       data.message ||
@@ -1482,7 +2022,9 @@ function sendError(
   message,
   details
 ) {
-  if (res.headersSent) {
+  if (
+    res.headersSent
+  ) {
     try {
       res.end();
     } catch {}
@@ -1492,13 +2034,14 @@ function sendError(
 
   const response = {
     error: {
-      message: String(message)
+      message:
+        String(message)
     }
   };
 
   if (
-    details !== null &&
-    details !== undefined
+    details !== undefined &&
+    details !== null
   ) {
     response.error.details =
       details;
@@ -1513,20 +2056,39 @@ function sendError(
    NVIDIA MODEL DISCOVERY
 ============================================================ */
 
+let modelCache = null;
+let modelCacheTimestamp = 0;
+let modelCachePromise = null;
+
 async function fetchNimModels(
   forceRefresh = false
 ) {
-  const now = Date.now();
+  const now =
+    Date.now();
 
+  /*
+   * Normal cached result.
+   */
   if (
     !forceRefresh &&
-    Array.isArray(modelCache) &&
-    now - modelCacheTimestamp <
+    Array.isArray(
+      modelCache
+    ) &&
+    now -
+      modelCacheTimestamp <
       MODEL_CACHE_TTL
   ) {
     return modelCache;
   }
 
+  /*
+   * Coalesce simultaneous discovery requests.
+   *
+   * This is NOT retry logic.
+   *
+   * Multiple callers arriving simultaneously share the
+   * same outstanding /models request.
+   */
   if (
     modelCachePromise &&
     !forceRefresh
@@ -1537,12 +2099,21 @@ async function fetchNimModels(
   modelCachePromise =
     (async () => {
       try {
-        if (!NIM_API_KEY) {
-          return Array.isArray(modelCache)
+        if (
+          !NIM_API_KEY
+        ) {
+          return Array.isArray(
+            modelCache
+          )
             ? modelCache
             : [];
         }
 
+        /*
+         * Exactly ONE discovery request.
+         *
+         * There is no retry.
+         */
         const response =
           await axios.get(
             NIM_API_BASE +
@@ -1572,10 +2143,14 @@ async function fetchNimModels(
           );
 
         if (
-          response.status >= 200 &&
-          response.status < 300 &&
+          response.status >=
+            200 &&
+          response.status <
+            300 &&
           Array.isArray(
-            response.data?.data
+            response
+              .data
+              ?.data
           )
         ) {
           modelCache =
@@ -1592,20 +2167,26 @@ async function fetchNimModels(
           response.status
         );
 
-        return Array.isArray(modelCache)
+        return Array.isArray(
+          modelCache
+        )
           ? modelCache
           : [];
       } catch (error) {
         console.warn(
           "Unable to refresh NVIDIA model list:",
-          error?.message || error
+          error?.message ||
+            error
         );
 
-        return Array.isArray(modelCache)
+        return Array.isArray(
+          modelCache
+        )
           ? modelCache
           : [];
       } finally {
-        modelCachePromise = null;
+        modelCachePromise =
+          null;
       }
     })();
 
@@ -1613,10 +2194,12 @@ async function fetchNimModels(
 }
 
 /* ============================================================
-   HTTP REQUEST CONFIG
+   NIM HTTP REQUEST CONFIGURATION
 ============================================================ */
 
-function createNimAxiosConfig(stream) {
+function createNimAxiosConfig(
+  stream
+) {
   return {
     headers: {
       Authorization:
@@ -1633,11 +2216,20 @@ function createNimAxiosConfig(stream) {
     },
 
     /*
-     * STRICT NO-RETRY POLICY.
+     * IMPORTANT:
      *
-     * Axios does not retry automatically.
+     * Axios itself does not retry requests.
+     *
+     * There is:
+     *
+     *   no retry adapter
+     *   no retry interceptor
+     *   no backoff
+     *   no retry count
+     *   no retry loop
      */
-    timeout: NIM_TIMEOUT,
+    timeout:
+      NIM_TIMEOUT,
 
     httpAgent,
     httpsAgent,
@@ -1648,166 +2240,77 @@ function createNimAxiosConfig(stream) {
 }
 
 /* ============================================================
-   NIM REQUEST
-
-   EXACTLY ONE POST /chat/completions
+   NIM COMPLETION REQUEST
 ============================================================ */
 
+/*
+ * HARD NO-RETRY GUARANTEE:
+ *
+ * This function contains exactly ONE
+ *
+ *     axios.post(... /chat/completions ...)
+ *
+ * call.
+ *
+ * There is deliberately:
+ *
+ *   - no retry loop
+ *   - no retry interceptor
+ *   - no retry adapter
+ *   - no exponential backoff
+ *   - no retry on 429
+ *   - no retry on 5xx
+ *   - no retry on timeout
+ *   - no retry on ECONNRESET
+ *   - no retry after stream failure
+ *   - no retry after client disconnect
+ */
 async function requestNim(
   nimRequest,
-  stream
+  stream,
+  metrics
 ) {
-  try {
-    const response =
-      await axios.post(
-        NIM_API_BASE +
-          "/chat/completions",
+  metrics.upstreamRequestStartedAt =
+    Date.now();
 
-        nimRequest,
+  const response =
+    await axios.post(
+      NIM_API_BASE +
+        "/chat/completions",
 
-        stream
-          ? {
-              ...createNimAxiosConfig(
-                true
-              ),
+      nimRequest,
 
-              responseType:
-                "stream"
-            }
-          : createNimAxiosConfig(
-              false
-            )
-      );
+      stream
+        ? {
+            ...createNimAxiosConfig(
+              true
+            ),
 
-    if (
-      response.status >= 200 &&
-      response.status < 300
-    ) {
-      return response;
-    }
-
-    let errorBody = "";
-
-    if (
-      response.data &&
-      typeof response.data.on ===
-        "function"
-    ) {
-      errorBody =
-        await readStream(
-          response.data
-        );
-    } else if (
-      typeof response.data ===
-      "string"
-    ) {
-      errorBody =
-        response.data;
-    } else {
-      try {
-        errorBody =
-          JSON.stringify(
-            response.data
-          );
-      } catch {
-        errorBody =
-          String(response.data);
-      }
-    }
-
-    console.error(
-      "=================================================="
+            responseType:
+              "stream"
+          }
+        : createNimAxiosConfig(
+            false
+          )
     );
 
-    console.error(
-      "NVIDIA UPSTREAM RESPONSE"
-    );
+  metrics.upstreamHeadersAt =
+    Date.now();
 
-    console.error(
-      "HTTP STATUS:",
-      response.status
-    );
-
-    console.error(
-      "HEADERS:",
-      response.headers
-    );
-
-    console.error(
-      "BODY:",
-      errorBody
-    );
-
-    console.error(
-      "BODY LENGTH:",
-      errorBody.length
-    );
-
-    console.error(
-      "NIM RETRY: NONE"
-    );
-
-    console.error(
-      "=================================================="
-    );
-
-    response.data =
-      errorBody;
-
-    return response;
-  } catch (error) {
-    console.error(
-      "=================================================="
-    );
-
-    console.error(
-      "NVIDIA CONNECTION ERROR"
-    );
-
-    console.error(
-      "CODE:",
-      error?.code
-    );
-
-    console.error(
-      "MESSAGE:",
-      error?.message
-    );
-
-    console.error(
-      "STATUS:",
-      error?.response?.status
-    );
-
-    console.error(
-      "RESPONSE HEADERS:",
-      error?.response?.headers
-    );
-
-    console.error(
-      "RESPONSE DATA:",
-      error?.response?.data
-    );
-
-    console.error(
-      "NIM RETRY: NONE"
-    );
-
-    console.error(
-      "=================================================="
-    );
-
-    throw error;
-  }
+  return response;
 }
 
 /* ============================================================
    EXPRESS
 ============================================================ */
 
-app.disable("x-powered-by");
+app.disable(
+  "x-powered-by"
+);
 
-app.use(cors());
+app.use(
+  cors()
+);
 
 app.use(
   express.json({
@@ -1819,106 +2322,138 @@ app.use(
    ROOT
 ============================================================ */
 
-app.get("/", function (req, res) {
-  res.json({
-    status: "online",
+app.get(
+  "/",
+  function (
+    req,
+    res
+  ) {
+    res.json({
+      status:
+        "online",
 
-    service:
-      "JanitorAI -> NVIDIA NIM Proxy",
+      service:
+        "JanitorAI -> NVIDIA NIM Proxy",
 
-    default_model:
-      DEFAULT_MODEL,
+      default_model:
+        DEFAULT_MODEL,
 
-    explicitly_configured_models:
-      Object.keys(MODELS),
+      explicitly_configured_models:
+        Object.keys(
+          MODELS
+        ),
 
-    upstream_model_count:
-      Array.isArray(modelCache)
-        ? modelCache.length
-        : 0,
+      proxy_profiles:
+        Object.keys(
+          PROFILES
+        ),
 
-    unknown_models_allowed:
-      ALLOW_UNKNOWN_MODELS,
+      upstream_model_count:
+        Array.isArray(
+          modelCache
+        )
+          ? modelCache.length
+          : 0,
 
-    default_reasoning_effort:
-      DEFAULT_REASONING_EFFORT,
+      unknown_models_allowed:
+        ALLOW_UNKNOWN_MODELS,
 
-    default_reasoning_budget:
-      DEFAULT_REASONING_BUDGET,
+      default_reasoning_effort:
+        DEFAULT_REASONING_EFFORT,
 
-    nemotron_thinking_default:
-      DEFAULT_NEMOTRON_THINKING,
+      default_reasoning_budget:
+        DEFAULT_REASONING_BUDGET,
 
-    reasoning_stripped_from_response:
-      STRIP_REASONING_FROM_RESPONSE,
+      nemotron_thinking_default:
+        DEFAULT_NEMOTRON_THINKING,
 
-    kimi_reasoning:
-      "always_enabled",
+      reasoning_stripped_from_response:
+        STRIP_REASONING_FROM_RESPONSE,
 
-    nim_api_base:
-      NIM_API_BASE,
+      nim_api_base:
+        NIM_API_BASE,
 
-    timeout_ms:
-      NIM_TIMEOUT,
+      timeout_ms:
+        NIM_TIMEOUT,
 
-    nim_retries:
-      "disabled",
+      nim_completion_retries:
+        0,
 
-    kimi_memory: false,
+      kimi_memory:
+        false,
 
-    janitor_context_passthrough:
-      true
-  });
-});
+      janitor_context_passthrough:
+        true
+    });
+  }
+);
 
 /* ============================================================
    HEALTH
 ============================================================ */
 
-app.get("/health", function (req, res) {
-  res.json({
-    ok: true,
+app.get(
+  "/health",
+  function (
+    req,
+    res
+  ) {
+    res.json({
+      ok:
+        true,
 
-    model:
-      DEFAULT_MODEL,
+      model:
+        DEFAULT_MODEL,
 
-    explicitly_configured_models:
-      Object.keys(MODELS),
+      explicitly_configured_models:
+        Object.keys(
+          MODELS
+        ),
 
-    upstream_model_count:
-      Array.isArray(modelCache)
-        ? modelCache.length
-        : 0,
+      proxy_profiles:
+        Object.keys(
+          PROFILES
+        ),
 
-    unknown_models_allowed:
-      ALLOW_UNKNOWN_MODELS,
+      upstream_model_count:
+        Array.isArray(
+          modelCache
+        )
+          ? modelCache.length
+          : 0,
 
-    reasoning:
-      DEFAULT_REASONING_EFFORT,
+      unknown_models_allowed:
+        ALLOW_UNKNOWN_MODELS,
 
-    nemotron_thinking:
-      DEFAULT_NEMOTRON_THINKING,
+      reasoning:
+        DEFAULT_REASONING_EFFORT,
 
-    kimi_reasoning:
-      "always_enabled",
+      nemotron_thinking:
+        DEFAULT_NEMOTRON_THINKING,
 
-    max_tokens:
-      DEFAULT_MAX_TOKENS,
+      kimi_reasoning:
+        "always_enabled",
 
-    reasoning_response_stripping:
-      STRIP_REASONING_FROM_RESPONSE,
+      max_tokens:
+        DEFAULT_MAX_TOKENS,
 
-    kimi_memory: false,
+      reasoning_response_stripping:
+        STRIP_REASONING_FROM_RESPONSE,
 
-    janitor_context_passthrough:
-      true,
+      kimi_memory:
+        false,
 
-    nim_timeout_ms:
-      NIM_TIMEOUT,
+      janitor_context_passthrough:
+        true,
 
-    nim_retries: false
-  });
-});
+      nim_timeout_ms:
+        NIM_TIMEOUT,
+
+      nim_completion_retries:
+        0
+    });
+  }
+);
 
 /* ============================================================
    NVIDIA MODEL LIST
@@ -1926,49 +2461,81 @@ app.get("/health", function (req, res) {
 
 app.get(
   "/v1/models",
-  async function (req, res) {
+  async function (
+    req,
+    res
+  ) {
     try {
       const upstreamModels =
         await fetchNimModels();
 
-      if (
-        upstreamModels.length > 0
+      const seen =
+        new Set();
+
+      const data = [];
+
+      /*
+       * LOCAL MODELS FIRST
+       *
+       * This is important.
+       *
+       * If we simply returned NVIDIA's /models response,
+       * Janitor would never see our virtual profiles.
+       */
+      for (
+        const entry of
+          localModelEntries()
       ) {
-        return res.json({
-          object: "list",
-          data: upstreamModels
-        });
+        const id =
+          normalizeModel(
+            entry.id
+          );
+
+        if (
+          seen.has(id)
+        ) {
+          continue;
+        }
+
+        seen.add(id);
+        data.push(entry);
       }
 
-      const models =
-        Object.entries(
-          MODELS
-        ).map(
-          ([id, config]) => ({
-            id,
+      /*
+       * Then preserve NVIDIA's real model list.
+       */
+      for (
+        const entry of
+          upstreamModels
+      ) {
+        if (
+          !entry ||
+          typeof entry.id !==
+            "string"
+        ) {
+          continue;
+        }
 
-            object: "model",
+        const id =
+          normalizeModel(
+            entry.id
+          );
 
-            created:
-              Math.floor(
-                Date.now() /
-                  1000
-              ),
+        if (
+          seen.has(id)
+        ) {
+          continue;
+        }
 
-            owned_by:
-              config.provider,
-
-            reasoning_levels:
-              config.reasoningLevels,
-
-            max_output_tokens:
-              config.maxOutputTokens
-          })
-        );
+        seen.add(id);
+        data.push(entry);
+      }
 
       return res.json({
-        object: "list",
-        data: models
+        object:
+          "list",
+
+        data
       });
     } catch (error) {
       return sendError(
@@ -1988,7 +2555,10 @@ app.get(
 
 app.post(
   "/v1/models/refresh",
-  async function (req, res) {
+  async function (
+    req,
+    res
+  ) {
     try {
       const models =
         await fetchNimModels(
@@ -1996,11 +2566,14 @@ app.post(
         );
 
       return res.json({
-        object: "list",
+        object:
+          "list",
 
-        data: models,
+        data:
+          models,
 
-        count: models.length
+        count:
+          models.length
       });
     } catch (error) {
       return sendError(
@@ -2020,9 +2593,40 @@ app.post(
 
 app.post(
   "/v1/chat/completions",
-  async function (req, res) {
+  async function (
+    req,
+    res
+  ) {
+    /*
+     * These timestamps are intentionally kept server-side
+     * and contain no RP content.
+     */
+    const requestReceivedAt =
+      Date.now();
+
+    const metrics = {
+      requestReceivedAt,
+
+      upstreamRequestStartedAt:
+        null,
+
+      upstreamHeadersAt:
+        null,
+
+      firstUpstreamDataAt:
+        null,
+
+      firstContentAt:
+        null,
+
+      completedAt:
+        null
+    };
+
     try {
-      if (!NIM_API_KEY) {
+      if (
+        !NIM_API_KEY
+      ) {
         return sendError(
           res,
           500,
@@ -2031,38 +2635,51 @@ app.post(
       }
 
       const incoming =
-        isPlainObject(req.body)
+        isPlainObject(
+          req.body
+        )
           ? req.body
           : {};
 
       const requestedModel =
         typeof incoming.model ===
-            "string" &&
+          "string" &&
         incoming.model.trim()
           ? incoming.model.trim()
           : DEFAULT_MODEL;
 
-      const model =
-        requestedModel;
-
-      const normalizedModel =
-        normalizeModel(model);
+      const resolved =
+        resolveModel(
+          requestedModel
+        );
 
       const modelConfig =
-        getModelConfig(model);
+        getModelConfig(
+          requestedModel
+        );
 
+      /*
+       * Preserve permissive unknown-model behavior.
+       */
       if (
-        !isSupportedModel(model)
+        !isSupportedModel(
+          requestedModel
+        )
       ) {
         return sendError(
           res,
           400,
           "Unsupported model: " +
-            model,
+            requestedModel,
           {
             explicitly_configured_models:
               Object.keys(
                 MODELS
+              ),
+
+            proxy_profiles:
+              Object.keys(
+                PROFILES
               )
           }
         );
@@ -2073,43 +2690,13 @@ app.post(
           incoming.messages
         );
 
-      if (!messages.length) {
+      if (
+        !messages.length
+      ) {
         return sendError(
           res,
           400,
           "No valid messages were supplied."
-        );
-      }
-
-      if (DEBUG_PROXY) {
-        console.log(
-          "=================================================="
-        );
-
-        console.log(
-          "JANITORAI REQUEST"
-        );
-
-        console.log(
-          "MODEL:",
-          model
-        );
-
-        console.log(
-          "JANITOR MESSAGES:",
-          messages.length
-        );
-
-        console.log(
-          "FIRST MESSAGE ROLE:",
-          messages[0]?.role
-        );
-
-        console.log(
-          "LAST MESSAGE ROLE:",
-          messages[
-            messages.length - 1
-          ]?.role
         );
       }
 
@@ -2119,63 +2706,87 @@ app.post(
           true
         );
 
+      /*
+       * Build exactly one request.
+       */
       const nimRequest =
         buildNimRequest(
           incoming,
-          model,
+          requestedModel,
           messages,
           stream
         );
 
-      if (DEBUG_PROXY) {
+      if (
+        DEBUG_PROXY
+      ) {
         console.log(
-          "NIM REQUEST SUMMARY:",
-          {
-            model:
-              nimRequest.model,
-
-            message_count:
-              Array.isArray(
-                nimRequest.messages
-              )
-                ? nimRequest
-                    .messages
-                    .length
-                : 0,
-
-            temperature:
-              nimRequest.temperature,
-
-            top_p:
-              nimRequest.top_p,
-
-            max_tokens:
-              nimRequest.max_tokens,
-
-            stream:
-              nimRequest.stream,
-
-            reasoning_effort:
-              nimRequest.reasoning_effort,
-
-            reasoning_budget:
-              nimRequest.reasoning_budget,
-
-            chat_template_kwargs:
-              nimRequest
-                .chat_template_kwargs
-          }
+          "=================================================="
         );
 
         console.log(
-          "NIM REQUEST KEYS:",
-          Object.keys(
-            nimRequest
-          )
+          "JANITORAI REQUEST"
         );
 
         console.log(
-          "NIM COMPLETION REQUEST: 1"
+          "REQUESTED MODEL:",
+          requestedModel
+        );
+
+        console.log(
+          "NIM MODEL:",
+          nimRequest.model
+        );
+
+        console.log(
+          "PROFILE:",
+          resolved.profile?.label ||
+            "base"
+        );
+
+        console.log(
+          "JANITOR MESSAGES:",
+          messages.length
+        );
+
+        console.log(
+          "TEMPERATURE:",
+          nimRequest.temperature
+        );
+
+        console.log(
+          "TOP_P:",
+          nimRequest.top_p
+        );
+
+        console.log(
+          "MAX_TOKENS:",
+          nimRequest.max_tokens
+        );
+
+        console.log(
+          "STREAM:",
+          nimRequest.stream
+        );
+
+        console.log(
+          "REASONING_EFFORT:",
+          nimRequest.reasoning_effort
+        );
+
+        console.log(
+          "REASONING_BUDGET:",
+          nimRequest.reasoning_budget
+        );
+
+        console.log(
+          "CHAT_TEMPLATE_KWARGS:",
+          nimRequest
+            .chat_template_kwargs
+        );
+
+        console.log(
+          "NIM COMPLETION REQUESTS: 1"
         );
 
         console.log(
@@ -2188,12 +2799,19 @@ app.post(
       }
 
       /*
-       * EXACTLY ONE completion request.
+       * ========================================================
+       *
+       * EXACTLY ONE NIM COMPLETION REQUEST.
+       *
+       * There is no retry anywhere below.
+       *
+       * ========================================================
        */
       const response =
         await requestNim(
           nimRequest,
-          stream
+          stream,
+          metrics
         );
 
       /* ======================================================
@@ -2204,21 +2822,32 @@ app.post(
         response.status < 200 ||
         response.status >= 300
       ) {
-        const errorBody =
+        let errorBody =
+          "";
+
+        if (
+          response.data &&
+          typeof response
+            .data
+            .on ===
+            "function"
+        ) {
+          errorBody =
+            await readStream(
+              response.data
+            );
+        } else if (
           typeof response.data ===
           "string"
-            ? response.data
-            : (() => {
-                try {
-                  return JSON.stringify(
-                    response.data
-                  );
-                } catch {
-                  return String(
-                    response.data
-                  );
-                }
-              })();
+        ) {
+          errorBody =
+            response.data;
+        } else {
+          errorBody =
+            safeJson(
+              response.data
+            );
+        }
 
         const upstreamMessage =
           extractErrorMessage(
@@ -2226,43 +2855,43 @@ app.post(
           );
 
         console.error(
-          "=================================================="
+          "NVIDIA NIM ERROR",
+          {
+            model:
+              nimRequest.model,
+
+            profile:
+              resolved.profile
+                ?.label ||
+              null,
+
+            http:
+              response.status,
+
+            message:
+              upstreamMessage,
+
+            retry:
+              false,
+
+            retries:
+              0,
+
+            upstream_headers_ms:
+              metrics
+                .upstreamHeadersAt -
+              requestReceivedAt
+          }
         );
 
-        console.error(
-          "NVIDIA NIM ERROR"
-        );
-
-        console.error(
-          "Model:",
-          normalizedModel
-        );
-
-        console.error(
-          "HTTP:",
-          response.status
-        );
-
-        console.error(
-          "Message:",
-          upstreamMessage
-        );
-
-        console.error(
-          "Body:",
-          errorBody
-        );
-
-        console.error(
-          "NIM RETRY: NONE"
-        );
-
-        console.error(
-          "=================================================="
-        );
-
+        /*
+         * We deliberately DO NOT retry here.
+         *
+         * A 429/500/502/503/etc. is simply returned.
+         */
         const proxyStatus =
-          response.status >= 500
+          response.status >=
+          500
             ? 502
             : response.status;
 
@@ -2278,7 +2907,10 @@ app.post(
               response.status,
 
             upstream_body:
-              errorBody
+              errorBody,
+
+            retries:
+              0
           }
         );
       }
@@ -2288,6 +2920,36 @@ app.post(
       ====================================================== */
 
       if (!stream) {
+        metrics.completedAt =
+          Date.now();
+
+        if (
+          DEBUG_PROXY
+        ) {
+          console.log(
+            "NIM COMPLETE",
+            {
+              model:
+                nimRequest.model,
+
+              profile:
+                resolved.profile
+                  ?.label ||
+                "base",
+
+              upstream_headers_ms:
+                metrics
+                  .upstreamHeadersAt -
+                requestReceivedAt,
+
+              total_ms:
+                metrics
+                  .completedAt -
+                requestReceivedAt
+            }
+          );
+        }
+
         return res
           .status(200)
           .json(
@@ -2299,8 +2961,6 @@ app.post(
 
       /* ======================================================
          STREAMING
-
-         Validate upstream BEFORE sending headers.
       ====================================================== */
 
       const upstream =
@@ -2318,6 +2978,10 @@ app.post(
         );
       }
 
+      /*
+       * Do not send headers until we know the upstream
+       * response is actually streamable.
+       */
       res.status(200);
 
       res.setHeader(
@@ -2347,9 +3011,16 @@ app.post(
         res.flushHeaders();
       }
 
-      let buffer = "";
-      let ended = false;
+      let buffer =
+        "";
+
+      let ended =
+        false;
+
       let clientDisconnected =
+        false;
+
+      let sawContent =
         false;
 
       function destroyUpstream() {
@@ -2359,18 +3030,27 @@ app.post(
       }
 
       function disconnect() {
-        if (clientDisconnected) {
+        if (
+          clientDisconnected
+        ) {
           return;
         }
 
-        clientDisconnected = true;
+        clientDisconnected =
+          true;
 
         destroyUpstream();
+
+        /*
+         * IMPORTANT:
+         *
+         * Client cancellation is termination.
+         *
+         * It is NEVER a reason to issue another
+         * completion request.
+         */
       }
 
-      /*
-       * Client cancellation is NOT a retry.
-       */
       req.on(
         "aborted",
         disconnect
@@ -2379,7 +3059,9 @@ app.post(
       res.on(
         "close",
         function () {
-          if (!res.writableEnded) {
+          if (
+            !res.writableEnded
+          ) {
             disconnect();
           }
         }
@@ -2393,6 +3075,47 @@ app.post(
             clientDisconnected
           ) {
             return;
+          }
+
+          /*
+           * First byte / first upstream chunk.
+           */
+          if (
+            metrics
+              .firstUpstreamDataAt ===
+            null
+          ) {
+            metrics
+              .firstUpstreamDataAt =
+              Date.now();
+
+            if (
+              DEBUG_PROXY
+            ) {
+              console.log(
+                "NIM FIRST UPSTREAM DATA",
+                {
+                  model:
+                    nimRequest.model,
+
+                  profile:
+                    resolved.profile
+                      ?.label ||
+                    "base",
+
+                  ms_from_request:
+                    metrics
+                      .firstUpstreamDataAt -
+                    requestReceivedAt,
+
+                  ms_from_upstream_request:
+                    metrics
+                      .firstUpstreamDataAt -
+                    metrics
+                      .upstreamRequestStartedAt
+                }
+              );
+            }
           }
 
           buffer +=
@@ -2416,13 +3139,10 @@ app.post(
                 separatorIndex
               );
 
-            const separator =
+            const separatorLength =
               buffer[
                 separatorIndex
-              ];
-
-            const separatorLength =
-              separator === "\r"
+              ] === "\r"
                 ? 4
                 : 2;
 
@@ -2432,17 +3152,53 @@ app.post(
                   separatorLength
               );
 
-            const output =
-              processSSEEvent(
+            /*
+             * This measures the first JSON SSE event.
+             *
+             * It is a practical proxy-side TTFT measurement.
+             */
+            if (
+              !sawContent &&
+              /(^|\n)data:\s*\{/.test(
                 event
-              );
+              )
+            ) {
+              metrics
+                .firstContentAt =
+                Date.now();
+
+              sawContent =
+                true;
+            }
+
+            /*
+             * IMPORTANT PERFORMANCE PATH:
+             *
+             * If reasoning stripping is disabled,
+             * do NOT parse JSON and stringify it again.
+             *
+             * NVIDIA -> Render -> Janitor
+             *
+             * becomes almost direct SSE forwarding.
+             */
+            const output =
+              STRIP_REASONING_FROM_RESPONSE
+                ? processSSEEvent(
+                    event
+                  )
+                : event
+                    ? event +
+                      "\n\n"
+                    : "";
 
             if (!output) {
               continue;
             }
 
             try {
-              res.write(output);
+              res.write(
+                output
+              );
             } catch {
               disconnect();
               break;
@@ -2458,20 +3214,32 @@ app.post(
             return;
           }
 
-          ended = true;
+          ended =
+            true;
 
+          metrics.completedAt =
+            Date.now();
+
+          /*
+           * Flush any remaining partial SSE event.
+           */
           if (
             buffer.trim() &&
             !clientDisconnected
           ) {
             const output =
-              processSSEEvent(
-                buffer
-              );
+              STRIP_REASONING_FROM_RESPONSE
+                ? processSSEEvent(
+                    buffer
+                  )
+                : buffer +
+                  "\n\n";
 
             if (output) {
               try {
-                res.write(output);
+                res.write(
+                  output
+                );
               } catch {}
             }
           }
@@ -2483,6 +3251,51 @@ app.post(
               res.end();
             } catch {}
           }
+
+          if (
+            DEBUG_PROXY
+          ) {
+            console.log(
+              "NIM STREAM COMPLETE",
+              {
+                model:
+                  nimRequest.model,
+
+                profile:
+                  resolved.profile
+                    ?.label ||
+                  "base",
+
+                upstream_headers_ms:
+                  metrics
+                    .upstreamHeadersAt -
+                  requestReceivedAt,
+
+                first_data_ms:
+                  metrics
+                    .firstUpstreamDataAt ===
+                  null
+                    ? null
+                    : metrics
+                        .firstUpstreamDataAt -
+                      requestReceivedAt,
+
+                first_event_ms:
+                  metrics
+                    .firstContentAt ===
+                  null
+                    ? null
+                    : metrics
+                        .firstContentAt -
+                      requestReceivedAt,
+
+                total_ms:
+                  metrics
+                    .completedAt -
+                  requestReceivedAt
+              }
+            );
+          }
         }
       );
 
@@ -2493,7 +3306,8 @@ app.post(
             return;
           }
 
-          ended = true;
+          ended =
+            true;
 
           console.error(
             "NVIDIA stream error:",
@@ -2501,11 +3315,16 @@ app.post(
               error
           );
 
-          /*
-           * Never start another request.
-           */
+          console.error(
+            "NIM COMPLETION RETRIES: 0"
+          );
 
-          if (!res.headersSent) {
+          /*
+           * NEVER issue another NIM request.
+           */
+          if (
+            !res.headersSent
+          ) {
             return sendError(
               res,
               502,
@@ -2521,6 +3340,9 @@ app.post(
         }
       );
     } catch (error) {
+      metrics.completedAt =
+        Date.now();
+
       console.error(
         "=================================================="
       );
@@ -2536,14 +3358,22 @@ app.post(
       );
 
       console.error(
-        "NIM RETRY: NONE"
+        "NIM COMPLETION RETRIES: 0"
       );
 
       console.error(
         "=================================================="
       );
 
-      if (res.headersSent) {
+      /*
+       * If streaming headers were already sent,
+       * there is no safe JSON error response to send.
+       *
+       * End the stream.
+       */
+      if (
+        res.headersSent
+      ) {
         try {
           res.end();
         } catch {}
@@ -2561,7 +3391,10 @@ app.post(
           "NVIDIA NIM request timed out.",
           {
             timeout_ms:
-              NIM_TIMEOUT
+              NIM_TIMEOUT,
+
+            retries:
+              0
           }
         );
       }
@@ -2574,7 +3407,10 @@ app.post(
           res,
           502,
           "Connection to NVIDIA NIM was reset.",
-          error.message
+          {
+            retries:
+              0
+          }
         );
       }
 
@@ -2586,7 +3422,10 @@ app.post(
           res,
           504,
           "Connection to NVIDIA NIM timed out.",
-          error.message
+          {
+            retries:
+              0
+          }
         );
       }
 
@@ -2594,8 +3433,14 @@ app.post(
         res,
         500,
         "Proxy request failed.",
-        error?.message ||
-          String(error)
+        {
+          message:
+            error?.message ||
+            String(error),
+
+          retries:
+            0
+        }
       );
     }
   }
@@ -2606,7 +3451,10 @@ app.post(
 ============================================================ */
 
 app.use(
-  function (req, res) {
+  function (
+    req,
+    res
+  ) {
     return sendError(
       res,
       404,
@@ -2633,7 +3481,9 @@ app.use(
         error
     );
 
-    if (res.headersSent) {
+    if (
+      res.headersSent
+    ) {
       return next(error);
     }
 
@@ -2641,7 +3491,8 @@ app.use(
       res,
       500,
       "Internal proxy error.",
-      error?.message || null
+      error?.message ||
+        null
     );
   }
 );
@@ -2680,15 +3531,12 @@ const server =
 
       console.log(
         "NIM timeout:",
-        NIM_TIMEOUT + "ms"
+        NIM_TIMEOUT +
+          "ms"
       );
 
       console.log(
-        "NIM retries: DISABLED"
-      );
-
-      console.log(
-        "NVIDIA completion retries: 0"
+        "NIM completion retries: 0 (HARD DISABLED)"
       );
 
       console.log(
@@ -2706,7 +3554,10 @@ const server =
       );
 
       console.log(
-        "Kimi server memory: DISABLED"
+        "Proxy profiles:",
+        Object.keys(
+          PROFILES
+        ).length
       );
 
       console.log(
@@ -2718,8 +3569,11 @@ const server =
       );
 
       /*
-       * Model discovery only.
-       * This is NOT a completion retry.
+       * Initial model discovery.
+       *
+       * This is NOT a completion request and NOT a retry.
+       *
+       * It simply populates the /v1/models cache.
        */
       fetchNimModels()
         .then(
@@ -2747,9 +3601,11 @@ const server =
    LONG-RUNNING AI REQUEST SETTINGS
 ============================================================ */
 
-server.timeout = 0;
+server.timeout =
+  0;
 
-server.requestTimeout = 0;
+server.requestTimeout =
+  0;
 
 server.keepAliveTimeout =
   Math.max(
@@ -2773,7 +3629,9 @@ server.headersTimeout =
    GRACEFUL SHUTDOWN
 ============================================================ */
 
-function shutdown(signal) {
+function shutdown(
+  signal
+) {
   console.log(
     signal +
       " received. Shutting down..."
@@ -2803,10 +3661,16 @@ function shutdown(signal) {
 
 process.on(
   "SIGTERM",
-  () => shutdown("SIGTERM")
+  () =>
+    shutdown(
+      "SIGTERM"
+    )
 );
 
 process.on(
   "SIGINT",
-  () => shutdown("SIGINT")
+  () =>
+    shutdown(
+      "SIGINT"
+    )
 );
