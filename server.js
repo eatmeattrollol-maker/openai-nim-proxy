@@ -25,90 +25,43 @@ const NIM_API_KEY =
   process.env.NVIDIA_API_KEY ||
   "";
 
-/*
- * GLM 5.3 is the quality-first default.
- *
- * You can still override this in Render with DEFAULT_MODEL.
- */
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
   "z-ai/glm-5.3";
 
-/*
- * IMPORTANT:
- *
- * Keep this exactly as permissive as the original proxy.
- *
- * Unknown models remain allowed by default.
- */
 const ALLOW_UNKNOWN_MODELS =
   String(
-    process.env.ALLOW_UNKNOWN_MODELS ||
-      "true"
+    process.env.ALLOW_UNKNOWN_MODELS || "true"
   )
     .trim()
     .toLowerCase() === "true";
 
-/*
- * Debug logging is intentionally OFF by default.
- *
- * Enable DEBUG_PROXY=true when diagnosing the proxy.
- *
- * This never logs the actual RP messages.
- */
 const DEBUG_PROXY =
   String(
-    process.env.DEBUG_PROXY ||
-      "false"
+    process.env.DEBUG_PROXY || "false"
   )
     .trim()
     .toLowerCase() === "true";
 
-/*
- * Reasoning is stripped from responses by default.
- *
- * This keeps hidden reasoning out of JanitorAI's visible response.
- */
 const STRIP_REASONING_FROM_RESPONSE =
   String(
-    process.env.STRIP_REASONING_FROM_RESPONSE ||
-      "true"
+    process.env.STRIP_REASONING_FROM_RESPONSE || "true"
   )
     .trim()
     .toLowerCase() === "true";
 
-/*
- * Long-running request timeout.
- *
- * This is deliberately large because reasoning-heavy
- * GLM requests can take a while.
- */
 const NIM_TIMEOUT =
   Number.isFinite(
-    Number(
-      process.env.NIM_TIMEOUT_MS
-    )
+    Number(process.env.NIM_TIMEOUT_MS)
   )
-    ? Number(
-        process.env.NIM_TIMEOUT_MS
-      )
+    ? Number(process.env.NIM_TIMEOUT_MS)
     : 900000;
 
-/*
- * Model-list cache.
- *
- * This is only for GET /v1/models discovery.
- * It has NOTHING to do with completion retries.
- */
 const MODEL_CACHE_TTL =
   Number.isFinite(
-    Number(
-      process.env.MODEL_CACHE_TTL_MS
-    )
+    Number(process.env.MODEL_CACHE_TTL_MS)
   )
-    ? Number(
-        process.env.MODEL_CACHE_TTL_MS
-      )
+    ? Number(process.env.MODEL_CACHE_TTL_MS)
     : 300000;
 
 const MAX_ERROR_BODY_SIZE =
@@ -120,108 +73,76 @@ const MAX_ERROR_BODY_SIZE =
 
 const DEFAULT_REASONING_EFFORT =
   String(
-    process.env.DEFAULT_REASONING_EFFORT ||
-      "high"
+    process.env.DEFAULT_REASONING_EFFORT || "high"
   )
     .trim()
     .toLowerCase();
 
 const DEFAULT_REASONING_BUDGET =
   Number.isFinite(
-    Number(
-      process.env.DEFAULT_REASONING_BUDGET
-    )
+    Number(process.env.DEFAULT_REASONING_BUDGET)
   )
-    ? Number(
-        process.env.DEFAULT_REASONING_BUDGET
-      )
+    ? Number(process.env.DEFAULT_REASONING_BUDGET)
     : 16384;
 
 const DEFAULT_MAX_TOKENS =
   Number.isFinite(
-    Number(
-      process.env.DEFAULT_MAX_TOKENS
-    )
+    Number(process.env.DEFAULT_MAX_TOKENS)
   )
-    ? Number(
-        process.env.DEFAULT_MAX_TOKENS
-      )
+    ? Number(process.env.DEFAULT_MAX_TOKENS)
     : 16384;
 
 const DEFAULT_TEMPERATURE =
   Number.isFinite(
-    Number(
-      process.env.DEFAULT_TEMPERATURE
-    )
+    Number(process.env.DEFAULT_TEMPERATURE)
   )
-    ? Number(
-        process.env.DEFAULT_TEMPERATURE
-      )
+    ? Number(process.env.DEFAULT_TEMPERATURE)
     : 1.0;
 
 const DEFAULT_TOP_P =
   Number.isFinite(
-    Number(
-      process.env.DEFAULT_TOP_P
-    )
+    Number(process.env.DEFAULT_TOP_P)
   )
-    ? Number(
-        process.env.DEFAULT_TOP_P
-      )
+    ? Number(process.env.DEFAULT_TOP_P)
     : 0.95;
 
 const DEFAULT_REPETITION_PENALTY =
   Number.isFinite(
-    Number(
-      process.env.DEFAULT_REPETITION_PENALTY
-    )
+    Number(process.env.DEFAULT_REPETITION_PENALTY)
   )
-    ? Number(
-        process.env.DEFAULT_REPETITION_PENALTY
-      )
+    ? Number(process.env.DEFAULT_REPETITION_PENALTY)
     : 1.0;
 
 const DEFAULT_FREQUENCY_PENALTY =
   Number.isFinite(
-    Number(
-      process.env.DEFAULT_FREQUENCY_PENALTY
-    )
+    Number(process.env.DEFAULT_FREQUENCY_PENALTY)
   )
-    ? Number(
-        process.env.DEFAULT_FREQUENCY_PENALTY
-      )
+    ? Number(process.env.DEFAULT_FREQUENCY_PENALTY)
     : 0.0;
 
 const DEFAULT_PRESENCE_PENALTY =
   Number.isFinite(
-    Number(
-      process.env.DEFAULT_PRESENCE_PENALTY
-    )
+    Number(process.env.DEFAULT_PRESENCE_PENALTY)
   )
-    ? Number(
-        process.env.DEFAULT_PRESENCE_PENALTY
-      )
+    ? Number(process.env.DEFAULT_PRESENCE_PENALTY)
     : 0.0;
 
 /*
- * Preserve the original Nemotron default behavior.
+ * Nemotron's fallback thinking setting.
+ *
+ * The actual request adapter below uses NVIDIA's documented
+ * reasoning_effort/chat_template_kwargs behavior.
  */
 const DEFAULT_NEMOTRON_THINKING =
   parseBoolean(
     process.env.NEMOTRON_ENABLE_THINKING,
-    false
+    true
   );
 
 /* ============================================================
    HTTP AGENTS
 ============================================================ */
 
-/*
- * Persistent connections reduce avoidable connection setup
- * overhead between Render and NVIDIA.
- *
- * These do NOT perform retries.
- */
 const httpAgent =
   new http.Agent({
     keepAlive: true,
@@ -259,27 +180,19 @@ function isFiniteNumber(value) {
     typeof value === "string" &&
     value.trim() !== ""
   ) {
-    return Number.isFinite(
-      Number(value)
-    );
+    return Number.isFinite(Number(value));
   }
 
   return false;
 }
 
-function numberOrDefault(
-  value,
-  fallback
-) {
+function numberOrDefault(value, fallback) {
   return isFiniteNumber(value)
     ? Number(value)
     : fallback;
 }
 
-function parseBoolean(
-  value,
-  fallback
-) {
+function parseBoolean(value, fallback) {
   if (
     value === undefined ||
     value === null
@@ -297,9 +210,7 @@ function parseBoolean(
 
   if (typeof value === "string") {
     const normalized =
-      value
-        .trim()
-        .toLowerCase();
+      value.trim().toLowerCase();
 
     if (
       [
@@ -346,87 +257,98 @@ function safeJson(value) {
 ============================================================ */
 
 /*
- * These are the actual NVIDIA model IDs handled specially
- * by this proxy.
+ * IMPORTANT:
  *
- * The model-specific adapter is selected from this table.
+ * These are NVIDIA's actual upstream model IDs.
+ *
+ * Nemotron:
+ *   nvidia/nemotron-3-ultra-550b-a55b
+ *
+ * GLM-5.3-Flash:
+ *   zai-org/GLM-5.3-Flash
+ *
+ * GLM-5.3:
+ *   z-ai/glm-5.3
  */
 const MODELS = {
   "z-ai/glm-5.3": {
     name: "GLM 5.3",
     provider: "Z.ai",
 
-    /*
-     * NVIDIA documents these three reasoning levels.
-     */
     reasoningLevels: [
       "low",
       "high",
       "max"
     ],
 
-    /*
-     * We intentionally use HIGH as the normal/default
-     * GLM profile because your stated objective is:
-     *
-     *   quality + lower TTFT
-     *
-     * The Deep profile explicitly selects MAX.
-     */
-    defaultReasoningEffort:
+    defaultReasoningEffort: "high",
+
+    maxOutputTokens: 32768,
+
+    maxReasoningBudget: null,
+
+    adapter: "glm53",
+
+    contextTokens: 1048576
+  },
+
+  /*
+   * NEW:
+   *
+   * NVIDIA NIM's GLM-5.3-Flash model.
+   *
+   * Keep the canonical upstream model ID with the
+   * capitalization NVIDIA publishes.
+   */
+  "zai-org/glm-5.3-flash": {
+    name: "GLM 5.3 Flash",
+    provider: "Z.ai",
+
+    reasoningLevels: [
+      "low",
       "high",
+      "max"
+    ],
 
-    /*
-     * This is the maximum output ceiling exposed by
-     * the proxy when Janitor does not request something
-     * smaller.
-     */
-    maxOutputTokens:
-      32768,
+    defaultReasoningEffort: "max",
 
-    maxReasoningBudget:
-      null,
+    maxOutputTokens: 32768,
 
-    adapter:
-      "glm53",
+    maxReasoningBudget: null,
 
-    /*
-     * NVIDIA documents GLM-5.3 as supporting a 1,048,576
-     * token context window.
-     *
-     * We do NOT attempt to construct or alter Janitor's
-     * context ourselves.
-     */
-    contextTokens:
-      1048576
+    adapter: "glm53-flash",
+
+    contextTokens: 1048576
   },
 
   "moonshotai/kimi-k3": {
     name: "Kimi K3",
     provider: "Moonshot AI",
 
-    /*
-     * Kimi reasoning is never disabled by this proxy.
-     */
     reasoningLevels: [
       "low",
       "high",
       "max"
     ],
 
-    defaultReasoningEffort:
-      "max",
+    defaultReasoningEffort: "max",
 
-    maxOutputTokens:
-      8192,
+    maxOutputTokens: 8192,
 
-    maxReasoningBudget:
-      32768,
+    maxReasoningBudget: 32768,
 
-    adapter:
-      "kimi-k3"
+    adapter: "kimi-k3"
   },
 
+  /*
+   * NVIDIA Nemotron 3 Ultra.
+   *
+   * IMPORTANT:
+   *
+   * Nemotron is handled separately from GLM.
+   * It does NOT receive GLM's reasoning_effort/max
+   * mapping.
+   */
   "nvidia/nemotron-3-ultra-550b-a55b": {
     name:
       "NVIDIA Nemotron 3 Ultra 550B",
@@ -435,11 +357,17 @@ const MODELS = {
       "NVIDIA",
 
     /*
-     * Nemotron uses a thinking switch rather than
-     * GLM's reasoning_effort mechanism.
+     * NVIDIA's current NIM API exposes:
+     *
+     *   none
+     *   medium
+     *   high
+     *
+     * reasoning_effort values.
      */
     reasoningLevels: [
       "none",
+      "medium",
       "high"
     ],
 
@@ -453,7 +381,10 @@ const MODELS = {
       32768,
 
     maxOutputTokens:
-      16384,
+      32768,
+
+    contextTokens:
+      1048576,
 
     adapter:
       "nemotron"
@@ -491,35 +422,16 @@ const MODELS = {
    PROXY PROFILES
 ============================================================ */
 
-/*
- * JanitorAI does not need to understand reasoning profiles.
- *
- * These are virtual model IDs exposed by OUR /v1/models
- * endpoint.
- *
- * When Janitor selects one:
- *
- *     z-ai/glm-5.3-balanced
- *
- * the proxy sends:
- *
- *     model = z-ai/glm-5.3
- *     reasoning_effort = high
- *
- * to NVIDIA.
- *
- * This means profiles can be selected from Janitor's normal
- * model selector if Janitor refreshes the model list.
- */
-
-/* ---------------- GLM 5.3 ---------------- */
-
 const PROFILES = {
+  /* ---------------- GLM 5.3 ---------------- */
+
   "z-ai/glm-5.3-fast": {
     baseModel:
       "z-ai/glm-5.3",
+
     label:
       "Fast",
+
     reasoningEffort:
       "low"
   },
@@ -527,8 +439,10 @@ const PROFILES = {
   "z-ai/glm-5.3-balanced": {
     baseModel:
       "z-ai/glm-5.3",
+
     label:
       "Balanced",
+
     reasoningEffort:
       "high"
   },
@@ -536,8 +450,52 @@ const PROFILES = {
   "z-ai/glm-5.3-deep": {
     baseModel:
       "z-ai/glm-5.3",
+
     label:
       "Deep",
+
+    reasoningEffort:
+      "max"
+  },
+
+  /* ---------------- GLM 5.3 FLASH ---------------- */
+
+  /*
+   * GLM-5.3-Flash always reasons.
+   *
+   * Fast     = low
+   * Balanced = high
+   * Deep     = max
+   */
+  "zai-org/glm-5.3-flash-fast": {
+    baseModel:
+      "zai-org/GLM-5.3-Flash",
+
+    label:
+      "Fast",
+
+    reasoningEffort:
+      "low"
+  },
+
+  "zai-org/glm-5.3-flash-balanced": {
+    baseModel:
+      "zai-org/GLM-5.3-Flash",
+
+    label:
+      "Balanced",
+
+    reasoningEffort:
+      "high"
+  },
+
+  "zai-org/glm-5.3-flash-deep": {
+    baseModel:
+      "zai-org/GLM-5.3-Flash",
+
+    label:
+      "Deep",
+
     reasoningEffort:
       "max"
   },
@@ -547,8 +505,10 @@ const PROFILES = {
   "moonshotai/kimi-k3-fast": {
     baseModel:
       "moonshotai/kimi-k3",
+
     label:
       "Fast",
+
     reasoningEffort:
       "low"
   },
@@ -556,8 +516,10 @@ const PROFILES = {
   "moonshotai/kimi-k3-balanced": {
     baseModel:
       "moonshotai/kimi-k3",
+
     label:
       "Balanced",
+
     reasoningEffort:
       "high"
   },
@@ -565,8 +527,10 @@ const PROFILES = {
   "moonshotai/kimi-k3-deep": {
     baseModel:
       "moonshotai/kimi-k3",
+
     label:
       "Deep",
+
     reasoningEffort:
       "max"
   },
@@ -574,19 +538,33 @@ const PROFILES = {
   /* ---------------- NEMOTRON ---------------- */
 
   /*
-   * Nemotron does not use GLM's reasoning_effort.
+   * Nemotron is different from GLM.
    *
-   * Instead:
+   * Fast:
+   *   reasoning_effort = none
    *
-   *   Fast     = thinking disabled
-   *   Balanced = thinking enabled + 16K budget
-   *   Deep     = thinking enabled + 32K budget
+   * Balanced:
+   *   reasoning_effort = medium
+   *
+   * Deep:
+   *   reasoning_effort = high
+   *
+   * We also keep an explicit reasoningBudget on the
+   * Balanced/Deep profiles.
+   *
+   * The request adapter puts the controls in the
+   * NVIDIA-compatible chat_template_kwargs object.
    */
   "nvidia/nemotron-3-ultra-550b-a55b-fast": {
     baseModel:
       "nvidia/nemotron-3-ultra-550b-a55b",
+
     label:
       "Fast",
+
+    reasoningEffort:
+      "none",
+
     thinking:
       false
   },
@@ -594,10 +572,16 @@ const PROFILES = {
   "nvidia/nemotron-3-ultra-550b-a55b-balanced": {
     baseModel:
       "nvidia/nemotron-3-ultra-550b-a55b",
+
     label:
       "Balanced",
+
+    reasoningEffort:
+      "medium",
+
     thinking:
       true,
+
     reasoningBudget:
       16384
   },
@@ -605,10 +589,16 @@ const PROFILES = {
   "nvidia/nemotron-3-ultra-550b-a55b-deep": {
     baseModel:
       "nvidia/nemotron-3-ultra-550b-a55b",
+
     label:
       "Deep",
+
+    reasoningEffort:
+      "high",
+
     thinking:
       true,
+
     reasoningBudget:
       32768
   },
@@ -618,8 +608,10 @@ const PROFILES = {
   "deepseek-ai/deepseek-v4-flash-0731-fast": {
     baseModel:
       "deepseek-ai/deepseek-v4-flash-0731",
+
     label:
       "Fast",
+
     reasoningEffort:
       "low"
   },
@@ -627,8 +619,10 @@ const PROFILES = {
   "deepseek-ai/deepseek-v4-flash-0731-balanced": {
     baseModel:
       "deepseek-ai/deepseek-v4-flash-0731",
+
     label:
       "Balanced",
+
     reasoningEffort:
       "high"
   },
@@ -636,8 +630,10 @@ const PROFILES = {
   "deepseek-ai/deepseek-v4-flash-0731-deep": {
     baseModel:
       "deepseek-ai/deepseek-v4-flash-0731",
+
     label:
       "Deep",
+
     reasoningEffort:
       "max"
   }
@@ -722,9 +718,6 @@ function publicModelEntry(
 function localModelEntries() {
   const entries = [];
 
-  /*
-   * Real configured models.
-   */
   for (
     const [
       id,
@@ -755,9 +748,6 @@ function localModelEntries() {
     );
   }
 
-  /*
-   * Virtual profile models.
-   */
   for (
     const [
       id,
@@ -768,7 +758,9 @@ function localModelEntries() {
   ) {
     const config =
       MODELS[
-        profile.baseModel
+        normalizeModel(
+          profile.baseModel
+        )
       ];
 
     entries.push(
@@ -815,10 +807,13 @@ function clampTemperature(
   const resolved =
     resolveModel(model);
 
-  const maximum =
+  const normalized =
     normalizeModel(
       resolved.baseModel
-    ) ===
+    );
+
+  const maximum =
+    normalized ===
     "moonshotai/kimi-k3"
       ? 1
       : 2;
@@ -1046,12 +1041,6 @@ function getRequestedReasoningEffort(
   modelConfig,
   profile
 ) {
-  /*
-   * A selected proxy profile has priority.
-   *
-   * This is how Janitor's model selection becomes
-   * an internal reasoning profile.
-   */
   if (
     profile &&
     profile.reasoningEffort
@@ -1144,46 +1133,77 @@ function getRequestedReasoningEffort(
 }
 
 /* ============================================================
-   NEMOTRON THINKING
+   NEMOTRON REASONING
 ============================================================ */
 
-function getNemotronThinking(
+/*
+ * Nemotron-specific reasoning resolution.
+ *
+ * This is intentionally separate from GLM.
+ *
+ * NVIDIA's current Nemotron API documents:
+ *
+ *   reasoning_effort:
+ *     none
+ *     medium
+ *     high
+ *
+ * and:
+ *
+ *   reasoning_budget:
+ *     -1 through 32768
+ *
+ * We use chat_template_kwargs as well so the request remains
+ * compatible with the underlying Nemotron chat template.
+ */
+function getNemotronReasoningEffort(
   incoming,
+  modelConfig,
   profile
 ) {
-  /*
-   * Profile wins first.
-   */
   if (
     profile &&
-    typeof profile.thinking ===
-      "boolean"
+    profile.reasoningEffort
   ) {
-    return profile.thinking;
+    return normalizeReasoningEffort(
+      profile.reasoningEffort,
+      modelConfig
+    );
   }
 
-  /*
-   * Explicit chat_template_kwargs wins next.
-   */
   if (
-    isPlainObject(
-      incoming.chat_template_kwargs
-    ) &&
-    typeof
-      incoming
-        .chat_template_kwargs
-        .enable_thinking ===
-        "boolean"
+    incoming.reasoning_effort !==
+    undefined
   ) {
-    return (
-      incoming
-        .chat_template_kwargs
-        .enable_thinking
+    return normalizeReasoningEffort(
+      incoming.reasoning_effort,
+      modelConfig
+    );
+  }
+
+  if (
+    incoming.reasoning_mode !==
+    undefined
+  ) {
+    return normalizeReasoningEffort(
+      incoming.reasoning_mode,
+      modelConfig
+    );
+  }
+
+  if (
+    incoming.reasoning_budget !==
+    undefined
+  ) {
+    return budgetToReasoningEffort(
+      incoming.reasoning_budget,
+      modelConfig
     );
   }
 
   /*
-   * Convenience top-level flag.
+   * If the caller explicitly requests thinking off,
+   * map it to NVIDIA's "none".
    */
   if (
     incoming.enable_thinking !==
@@ -1192,70 +1212,91 @@ function getNemotronThinking(
     return parseBoolean(
       incoming.enable_thinking,
       DEFAULT_NEMOTRON_THINKING
+    )
+      ? "high"
+      : "none";
+  }
+
+  if (
+    isPlainObject(
+      incoming.chat_template_kwargs
+    ) &&
+    typeof
+      incoming
+        .chat_template_kwargs
+        .enable_thinking ===
+      "boolean"
+  ) {
+    return incoming
+      .chat_template_kwargs
+      .enable_thinking
+      ? "high"
+      : "none";
+  }
+
+  return DEFAULT_NEMOTRON_THINKING
+    ? "high"
+    : "none";
+}
+
+function getNemotronThinking(
+  reasoningEffort
+) {
+  return reasoningEffort !==
+    "none";
+}
+
+function getNemotronBudget(
+  incoming,
+  modelConfig,
+  profile,
+  reasoningEffort
+) {
+  /*
+   * If reasoning is disabled, do not send a budget.
+   */
+  if (
+    reasoningEffort ===
+    "none"
+  ) {
+    return null;
+  }
+
+  /*
+   * Explicit proxy profile budget wins.
+   */
+  if (
+    profile &&
+    profile.reasoningBudget !==
+      undefined
+  ) {
+    return clampReasoningBudget(
+      profile.reasoningBudget,
+      modelConfig
     );
   }
 
   /*
-   * reasoning_effort.
+   * Explicit caller budget next.
    */
   if (
-    incoming.reasoning_effort !==
+    incoming.reasoning_budget !==
     undefined
   ) {
-    const value =
-      String(
-        incoming.reasoning_effort
-      )
-        .trim()
-        .toLowerCase();
-
-    if (
-      [
-        "none",
-        "off",
-        "false",
-        "0",
-        "disabled",
-        "disable"
-      ].includes(value)
-    ) {
-      return false;
-    }
-
-    return true;
+    return clampReasoningBudget(
+      incoming.reasoning_budget,
+      modelConfig
+    );
   }
 
   /*
-   * reasoning_mode.
+   * NVIDIA documents 16384 as the normal default
+   * reasoning budget.
    */
-  if (
-    incoming.reasoning_mode !==
-    undefined
-  ) {
-    const value =
-      String(
-        incoming.reasoning_mode
-      )
-        .trim()
-        .toLowerCase();
-
-    if (
-      [
-        "none",
-        "off",
-        "false",
-        "0",
-        "disabled",
-        "disable"
-      ].includes(value)
-    ) {
-      return false;
-    }
-
-    return true;
-  }
-
-  return DEFAULT_NEMOTRON_THINKING;
+  return clampReasoningBudget(
+    16384,
+    modelConfig
+  );
 }
 
 /* ============================================================
@@ -1290,11 +1331,6 @@ function normalizeMessages(
       continue;
     }
 
-    /*
-     * Everything else in the message is preserved.
-     *
-     * This is important for Janitor's context.
-     */
     result.push({
       ...message,
 
@@ -1339,9 +1375,6 @@ function buildNimRequest(
     normalizedModel ===
     "moonshotai/kimi-k3";
 
-  /*
-   * Start with the common OpenAI-compatible request.
-   */
   const request = {
     model,
 
@@ -1363,8 +1396,7 @@ function buildNimRequest(
   };
 
   /*
-   * Kimi's original behavior deliberately omitted
-   * top_p, so preserve that.
+   * Kimi preserves the original behavior of omitting top_p.
    */
   if (!isKimi) {
     request.top_p =
@@ -1413,9 +1445,6 @@ function buildNimRequest(
       );
   }
 
-  /*
-   * Preserve additional parameters Janitor/NIM may support.
-   */
   const optionalParameters = [
     "stop",
     "seed",
@@ -1485,15 +1514,7 @@ function buildNimRequest(
     normalizedModel ===
     "z-ai/glm-5.3"
   ) {
-    /*
-     * GLM-5.3 thinking is always enabled.
-     *
-     * reasoning_effort controls how much reasoning
-     * the model performs:
-     *
-     * low / high / max
-     */
-    request.reasoning_effort =
+    const reasoningEffort =
       getRequestedReasoningEffort(
         incoming,
         model,
@@ -1501,14 +1522,9 @@ function buildNimRequest(
         profile
       );
 
-    /*
-     * CRITICAL FOR MULTI-TURN CHAT:
-     *
-     * clear_thinking=true prevents prior hidden reasoning
-     * from being carried forward through the chat template.
-     *
-     * This does NOT disable reasoning.
-     */
+    request.reasoning_effort =
+      reasoningEffort;
+
     request.chat_template_kwargs = {
       ...(request.chat_template_kwargs ||
         {}),
@@ -1518,9 +1534,71 @@ function buildNimRequest(
     };
 
     /*
-     * GLM uses reasoning_effort rather than Nemotron's
-     * reasoning_budget mechanism.
+     * GLM gets reasoning_effort.
+     * It does NOT get Nemotron-specific controls.
      */
+    delete request.reasoning_budget;
+    delete request.enable_thinking;
+    delete request.reasoning_mode;
+    delete request.nvext;
+
+    return request;
+  }
+
+  /* ==========================================================
+     GLM 5.3 FLASH
+  ========================================================== */
+
+  if (
+    normalizedModel ===
+    "zai-org/glm-5.3-flash"
+  ) {
+    /*
+     * GLM-5.3-Flash always reasons.
+     *
+     * Valid levels:
+     *
+     *   low
+     *   high
+     *   max
+     *
+     * Do NOT allow "none".
+     */
+    let reasoningEffort =
+      getRequestedReasoningEffort(
+        incoming,
+        model,
+        modelConfig,
+        profile
+      );
+
+    if (
+      reasoningEffort ===
+      "none"
+    ) {
+      reasoningEffort =
+        "low";
+    }
+
+    request.reasoning_effort =
+      reasoningEffort;
+
+    /*
+     * GLM-5.3-Flash's chat template defaults
+     * clear_thinking to false, so explicitly enable it
+     * for multi-turn chat.
+     */
+    request.chat_template_kwargs = {
+      ...(request.chat_template_kwargs ||
+        {}),
+
+      clear_thinking:
+        true,
+
+      reasoning_effort:
+        reasoningEffort
+    };
+
     delete request.reasoning_budget;
     delete request.enable_thinking;
     delete request.reasoning_mode;
@@ -1537,12 +1615,54 @@ function buildNimRequest(
     normalizedModel ===
     "nvidia/nemotron-3-ultra-550b-a55b"
   ) {
-    const enableThinking =
-      getNemotronThinking(
+    /*
+     * THIS IS THE IMPORTANT FIX.
+     *
+     * Nemotron gets its own adapter.
+     *
+     * We do not send:
+     *
+     *   reasoning_mode
+     *   enable_thinking
+     *   nvext
+     *
+     * as random top-level parameters.
+     *
+     * Instead we translate the request into NVIDIA's
+     * documented reasoning controls.
+     */
+    const reasoningEffort =
+      getNemotronReasoningEffort(
         incoming,
+        modelConfig,
         profile
       );
 
+    const enableThinking =
+      getNemotronThinking(
+        reasoningEffort
+      );
+
+    const reasoningBudget =
+      getNemotronBudget(
+        incoming,
+        modelConfig,
+        profile,
+        reasoningEffort
+      );
+
+    /*
+     * NVIDIA NIM accepts reasoning_effort directly.
+     *
+     * Keep this as the canonical API-level setting.
+     */
+    request.reasoning_effort =
+      reasoningEffort;
+
+    /*
+     * Also provide the chat-template settings used by
+     * Nemotron itself.
+     */
     request.chat_template_kwargs = {
       ...(request.chat_template_kwargs ||
         {}),
@@ -1551,30 +1671,34 @@ function buildNimRequest(
         enableThinking
     };
 
+    /*
+     * Only send a reasoning budget when thinking is enabled.
+     */
     if (
-      enableThinking
+      enableThinking &&
+      reasoningBudget !==
+        null
     ) {
-      const requestedBudget =
-        profile?.reasoningBudget ??
-        (
-          incoming.reasoning_budget !==
-          undefined
-            ? incoming.reasoning_budget
-            : 16384
-        );
-
       request.reasoning_budget =
-        clampReasoningBudget(
-          requestedBudget,
-          modelConfig
-        );
+        reasoningBudget;
+
+      request.chat_template_kwargs = {
+        ...request.chat_template_kwargs,
+
+        reasoning_budget:
+          reasoningBudget
+      };
     } else {
       delete request.reasoning_budget;
+
+      delete request
+        .chat_template_kwargs
+        .reasoning_budget;
     }
 
     /*
-     * NVIDIA's Nemotron documentation uses this
-     * for thinking + tool scenarios.
+     * NVIDIA specifically documents this for tool calls
+     * with reasoning.
      */
     if (
       enableThinking &&
@@ -1592,12 +1716,14 @@ function buildNimRequest(
     }
 
     /*
-     * Do not accidentally send GLM-style reasoning
-     * controls to Nemotron.
+     * Remove client-side aliases that should NOT reach NIM.
+     *
+     * This is particularly important because the previous
+     * adapter could mix GLM-style and Nemotron-style
+     * reasoning controls.
      */
-    delete request.reasoning_effort;
-    delete request.reasoning_mode;
     delete request.enable_thinking;
+    delete request.reasoning_mode;
     delete request.nvext;
 
     return request;
@@ -1641,13 +1767,6 @@ function buildNimRequest(
      DEEPSEEK V4 PRO
   ========================================================== */
 
-  /*
-   * Preserve the original proxy's explicit handling of
-   * DeepSeek V4 Pro even though it isn't registered in
-   * MODELS above.
-   *
-   * ALLOW_UNKNOWN_MODELS remains untouched.
-   */
   if (
     normalizedModel ===
     "deepseek-ai/deepseek-v4-pro-0813"
@@ -1674,9 +1793,6 @@ function buildNimRequest(
     normalizedModel ===
     "moonshotai/kimi-k3"
   ) {
-    /*
-     * Kimi reasoning is NEVER disabled.
-     */
     const reasoningEffort =
       getRequestedReasoningEffort(
         incoming,
@@ -1691,10 +1807,6 @@ function buildNimRequest(
         ? "max"
         : reasoningEffort;
 
-    /*
-     * Prevent callers from injecting a false
-     * reasoning-off configuration.
-     */
     if (
       isPlainObject(
         request.chat_template_kwargs
@@ -1714,13 +1826,6 @@ function buildNimRequest(
      UNKNOWN MODELS
   ========================================================== */
 
-  /*
-   * IMPORTANT:
-   *
-   * Unknown-model behavior remains permissive.
-   *
-   * We do NOT change ALLOW_UNKNOWN_MODELS.
-   */
   if (!modelConfig) {
     if (
       incoming.reasoning_effort !==
@@ -1756,9 +1861,7 @@ function buildNimRequest(
    RESPONSE REASONING STRIPPING
 ============================================================ */
 
-function stripReasoning(
-  parsed
-) {
+function stripReasoning(parsed) {
   if (
     !STRIP_REASONING_FROM_RESPONSE ||
     !parsed ||
@@ -1850,9 +1953,6 @@ function processSSEEvent(
   for (
     const line of lines
   ) {
-    /*
-     * Preserve comments / non-data SSE lines.
-     */
     if (
       !line.startsWith(
         "data:"
@@ -1879,6 +1979,7 @@ function processSSEEvent(
       output.push(
         "data: [DONE]"
       );
+
       continue;
     }
 
@@ -1895,10 +1996,6 @@ function processSSEEvent(
           )
       );
     } catch {
-      /*
-       * If an upstream event isn't JSON,
-       * preserve it rather than destroying it.
-       */
       output.push(line);
     }
   }
@@ -2066,9 +2163,6 @@ async function fetchNimModels(
   const now =
     Date.now();
 
-  /*
-   * Normal cached result.
-   */
   if (
     !forceRefresh &&
     Array.isArray(
@@ -2081,14 +2175,6 @@ async function fetchNimModels(
     return modelCache;
   }
 
-  /*
-   * Coalesce simultaneous discovery requests.
-   *
-   * This is NOT retry logic.
-   *
-   * Multiple callers arriving simultaneously share the
-   * same outstanding /models request.
-   */
   if (
     modelCachePromise &&
     !forceRefresh
@@ -2110,9 +2196,10 @@ async function fetchNimModels(
         }
 
         /*
-         * Exactly ONE discovery request.
+         * Exactly ONE /models request.
          *
-         * There is no retry.
+         * This is discovery only.
+         * It is not completion retry logic.
          */
         const response =
           await axios.get(
@@ -2148,9 +2235,7 @@ async function fetchNimModels(
           response.status <
             300 &&
           Array.isArray(
-            response
-              .data
-              ?.data
+            response.data?.data
           )
         ) {
           modelCache =
@@ -2216,17 +2301,7 @@ function createNimAxiosConfig(
     },
 
     /*
-     * IMPORTANT:
-     *
-     * Axios itself does not retry requests.
-     *
-     * There is:
-     *
-     *   no retry adapter
-     *   no retry interceptor
-     *   no backoff
-     *   no retry count
-     *   no retry loop
+     * HARD NO-RETRY.
      */
     timeout:
       NIM_TIMEOUT,
@@ -2244,20 +2319,17 @@ function createNimAxiosConfig(
 ============================================================ */
 
 /*
- * HARD NO-RETRY GUARANTEE:
+ * HARD NO-RETRY GUARANTEE.
  *
- * This function contains exactly ONE
+ * Exactly ONE axios.post() per completion request.
  *
- *     axios.post(... /chat/completions ...)
- *
- * call.
- *
- * There is deliberately:
+ * There is:
  *
  *   - no retry loop
- *   - no retry interceptor
  *   - no retry adapter
- *   - no exponential backoff
+ *   - no retry interceptor
+ *   - no backoff
+ *   - no retry on 404
  *   - no retry on 429
  *   - no retry on 5xx
  *   - no retry on timeout
@@ -2475,12 +2547,7 @@ app.get(
       const data = [];
 
       /*
-       * LOCAL MODELS FIRST
-       *
-       * This is important.
-       *
-       * If we simply returned NVIDIA's /models response,
-       * Janitor would never see our virtual profiles.
+       * Our configured models and profiles first.
        */
       for (
         const entry of
@@ -2502,7 +2569,7 @@ app.get(
       }
 
       /*
-       * Then preserve NVIDIA's real model list.
+       * Then NVIDIA's upstream models.
        */
       for (
         const entry of
@@ -2597,10 +2664,6 @@ app.post(
     req,
     res
   ) {
-    /*
-     * These timestamps are intentionally kept server-side
-     * and contain no RP content.
-     */
     const requestReceivedAt =
       Date.now();
 
@@ -2658,9 +2721,6 @@ app.post(
           requestedModel
         );
 
-      /*
-       * Preserve permissive unknown-model behavior.
-       */
       if (
         !isSupportedModel(
           requestedModel
@@ -2707,7 +2767,7 @@ app.post(
         );
 
       /*
-       * Build exactly one request.
+       * Build exactly one upstream request body.
        */
       const nimRequest =
         buildNimRequest(
@@ -2736,6 +2796,12 @@ app.post(
         console.log(
           "NIM MODEL:",
           nimRequest.model
+        );
+
+        console.log(
+          "ADAPTER:",
+          modelConfig?.adapter ||
+            "unknown"
         );
 
         console.log(
@@ -2803,8 +2869,6 @@ app.post(
        *
        * EXACTLY ONE NIM COMPLETION REQUEST.
        *
-       * There is no retry anywhere below.
-       *
        * ========================================================
        */
       const response =
@@ -2860,6 +2924,13 @@ app.post(
             model:
               nimRequest.model,
 
+            requested_model:
+              requestedModel,
+
+            adapter:
+              modelConfig?.adapter ||
+              null,
+
             profile:
               resolved.profile
                 ?.label ||
@@ -2877,6 +2948,16 @@ app.post(
             retries:
               0,
 
+            reasoning_effort:
+              nimRequest.reasoning_effort,
+
+            reasoning_budget:
+              nimRequest.reasoning_budget,
+
+            chat_template_kwargs:
+              nimRequest
+                .chat_template_kwargs,
+
             upstream_headers_ms:
               metrics
                 .upstreamHeadersAt -
@@ -2885,9 +2966,10 @@ app.post(
         );
 
         /*
-         * We deliberately DO NOT retry here.
+         * NEVER retry.
          *
-         * A 429/500/502/503/etc. is simply returned.
+         * A 404 is passed through as a 404 now rather than
+         * being converted into a generic retry/failure path.
          */
         const proxyStatus =
           response.status >=
@@ -2908,6 +2990,12 @@ app.post(
 
             upstream_body:
               errorBody,
+
+            requested_model:
+              requestedModel,
+
+            upstream_model:
+              nimRequest.model,
 
             retries:
               0
@@ -2978,10 +3066,6 @@ app.post(
         );
       }
 
-      /*
-       * Do not send headers until we know the upstream
-       * response is actually streamable.
-       */
       res.status(200);
 
       res.setHeader(
@@ -3040,15 +3124,6 @@ app.post(
           true;
 
         destroyUpstream();
-
-        /*
-         * IMPORTANT:
-         *
-         * Client cancellation is termination.
-         *
-         * It is NEVER a reason to issue another
-         * completion request.
-         */
       }
 
       req.on(
@@ -3077,9 +3152,6 @@ app.post(
             return;
           }
 
-          /*
-           * First byte / first upstream chunk.
-           */
           if (
             metrics
               .firstUpstreamDataAt ===
@@ -3152,11 +3224,6 @@ app.post(
                   separatorLength
               );
 
-            /*
-             * This measures the first JSON SSE event.
-             *
-             * It is a practical proxy-side TTFT measurement.
-             */
             if (
               !sawContent &&
               /(^|\n)data:\s*\{/.test(
@@ -3172,14 +3239,7 @@ app.post(
             }
 
             /*
-             * IMPORTANT PERFORMANCE PATH:
-             *
-             * If reasoning stripping is disabled,
-             * do NOT parse JSON and stringify it again.
-             *
-             * NVIDIA -> Render -> Janitor
-             *
-             * becomes almost direct SSE forwarding.
+             * Fast path when reasoning stripping is disabled.
              */
             const output =
               STRIP_REASONING_FROM_RESPONSE
@@ -3220,9 +3280,6 @@ app.post(
           metrics.completedAt =
             Date.now();
 
-          /*
-           * Flush any remaining partial SSE event.
-           */
           if (
             buffer.trim() &&
             !clientDisconnected
@@ -3365,12 +3422,6 @@ app.post(
         "=================================================="
       );
 
-      /*
-       * If streaming headers were already sent,
-       * there is no safe JSON error response to send.
-       *
-       * End the stream.
-       */
       if (
         res.headersSent
       ) {
@@ -3568,13 +3619,6 @@ const server =
         "=================================================="
       );
 
-      /*
-       * Initial model discovery.
-       *
-       * This is NOT a completion request and NOT a retry.
-       *
-       * It simply populates the /v1/models cache.
-       */
       fetchNimModels()
         .then(
           models => {
