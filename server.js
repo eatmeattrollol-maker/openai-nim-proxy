@@ -265,7 +265,7 @@ function safeJson(value) {
  *   nvidia/nemotron-3-ultra-550b-a55b
  *
  * GLM-5.3-Flash:
- *   zai-org/GLM-5.3-Flash
+ *   z-ai/glm-5.3-flash
  *
  * GLM-5.3:
  *   z-ai/glm-5.3
@@ -300,7 +300,7 @@ const MODELS = {
    * Keep the canonical upstream model ID with the
    * capitalization NVIDIA publishes.
    */
-  "zai-org/glm-5.3-flash": {
+  "z-ai/glm-5.3-flash": {
     name: "GLM 5.3 Flash",
     provider: "Z.ai",
 
@@ -467,9 +467,9 @@ const PROFILES = {
    * Balanced = high
    * Deep     = max
    */
-  "zai-org/glm-5.3-flash-fast": {
+  "z-ai/glm-5.3-flash-fast": {
     baseModel:
-      "zai-org/GLM-5.3-Flash",
+      "z-ai/glm-5.3-flash",
 
     label:
       "Fast",
@@ -478,9 +478,9 @@ const PROFILES = {
       "low"
   },
 
-  "zai-org/glm-5.3-flash-balanced": {
+  "z-ai/glm-5.3-flash-balanced": {
     baseModel:
-      "zai-org/GLM-5.3-Flash",
+      "z-ai/glm-5.3-flash",
 
     label:
       "Balanced",
@@ -489,9 +489,9 @@ const PROFILES = {
       "high"
   },
 
-  "zai-org/glm-5.3-flash-deep": {
+  "z-ai/glm-5.3-flash-deep": {
     baseModel:
-      "zai-org/GLM-5.3-Flash",
+      "z-ai/glm-5.3-flash",
 
     label:
       "Deep",
@@ -1551,7 +1551,7 @@ function buildNimRequest(
 
   if (
     normalizedModel ===
-    "zai-org/glm-5.3-flash"
+    "z-ai/glm-5.3-flash"
   ) {
     /*
      * GLM-5.3-Flash always reasons.
