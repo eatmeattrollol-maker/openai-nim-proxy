@@ -131,18 +131,17 @@ const MODELS = {
     maxOutputTokens: 8192
   },
 
-  "deepseek-ai/deepseek-v4-pro-0813": {
-    name: "DeepSeek V4 Pro 0813",
-    provider: "DeepSeek AI",
+  "z-ai/glm-5.3": {
+    name: "GLM 5.3",
+    provider: "Z.ai",
 
     reasoningLevels: [
-      "none",
       "low",
       "high",
       "max"
     ],
 
-    defaultReasoningEffort: "max",
+    defaultReasoningEffort: "high",
 
     maxOutputTokens: 8192
   },
