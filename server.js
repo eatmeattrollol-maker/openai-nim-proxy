@@ -141,9 +141,9 @@ const MODELS = {
       "max"
     ],
 
-    defaultReasoningEffort: "max",
+    defaultReasoningEffort: "high",
 
-    maxOutputTokens: 8192
+    maxOutputTokens: 16384
   },
 
   "moonshotai/kimi-k3": {
