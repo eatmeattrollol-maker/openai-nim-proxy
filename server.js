@@ -6,13 +6,20 @@ const axios = require("axios");
 const http = require("http");
 const https = require("https");
 
+/* ============================================================
+   APP
+============================================================ */
+
 const app = express();
+
+app.disable("x-powered-by");
 
 /* ============================================================
    CONFIGURATION
 ============================================================ */
 
-const PORT = Number(process.env.PORT) || 10000;
+const PORT =
+  Number(process.env.PORT) || 10000;
 
 const NIM_API_BASE = (
   process.env.NIM_API_BASE ||
@@ -28,133 +35,86 @@ const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
   "z-ai/glm-5.3";
 
-const ALLOW_UNKNOWN_MODELS =
-  parseBoolean(
-    process.env.ALLOW_UNKNOWN_MODELS,
-    true
-  );
-
 const DEBUG_PROXY =
   parseBoolean(
     process.env.DEBUG_PROXY,
     false
   );
 
-const STRIP_REASONING_FROM_RESPONSE =
+const ALLOW_UNKNOWN_MODELS =
+  parseBoolean(
+    process.env.ALLOW_UNKNOWN_MODELS,
+    true
+  );
+
+const STRIP_REASONING =
   parseBoolean(
     process.env.STRIP_REASONING_FROM_RESPONSE,
     true
   );
 
-const NIM_TIMEOUT =
-  Number.isFinite(
-    Number(process.env.NIM_TIMEOUT_MS)
-  )
-    ? Number(process.env.NIM_TIMEOUT_MS)
-    : 900000;
+const NIM_TIMEOUT_MS =
+  positiveNumber(
+    process.env.NIM_TIMEOUT_MS,
+    900000
+  );
 
-const MODEL_CACHE_TTL =
-  Number.isFinite(
-    Number(process.env.MODEL_CACHE_TTL_MS)
-  )
-    ? Number(process.env.MODEL_CACHE_TTL_MS)
-    : 300000;
+const MODEL_CACHE_TTL_MS =
+  positiveNumber(
+    process.env.MODEL_CACHE_TTL_MS,
+    300000
+  );
 
-const MAX_ERROR_BODY_SIZE =
-  2 * 1024 * 1024;
+const DEFAULT_MAX_TOKENS =
+  positiveNumber(
+    process.env.DEFAULT_MAX_TOKENS,
+    16384
+  );
+
+const DEFAULT_TEMPERATURE =
+  numberOrDefault(
+    process.env.DEFAULT_TEMPERATURE,
+    1.0
+  );
+
+const DEFAULT_TOP_P =
+  numberOrDefault(
+    process.env.DEFAULT_TOP_P,
+    0.95
+  );
+
+const DEFAULT_REPETITION_PENALTY =
+  numberOrDefault(
+    process.env.DEFAULT_REPETITION_PENALTY,
+    1.0
+  );
+
+const DEFAULT_FREQUENCY_PENALTY =
+  numberOrDefault(
+    process.env.DEFAULT_FREQUENCY_PENALTY,
+    0
+  );
+
+const DEFAULT_PRESENCE_PENALTY =
+  numberOrDefault(
+    process.env.DEFAULT_PRESENCE_PENALTY,
+    0
+  );
 
 const DEFAULT_REASONING_EFFORT =
   String(
     process.env.DEFAULT_REASONING_EFFORT ||
-    "high"
+      "high"
   )
     .trim()
     .toLowerCase();
 
 const DEFAULT_REASONING_BUDGET =
-  Number.isFinite(
-    Number(
-      process.env.DEFAULT_REASONING_BUDGET
-    )
-  )
-    ? Number(
-        process.env.DEFAULT_REASONING_BUDGET
-      )
-    : 16384;
+  positiveNumber(
+    process.env.DEFAULT_REASONING_BUDGET,
+    16384
+  );
 
-const DEFAULT_MAX_TOKENS =
-  Number.isFinite(
-    Number(
-      process.env.DEFAULT_MAX_TOKENS
-    )
-  )
-    ? Number(
-        process.env.DEFAULT_MAX_TOKENS
-      )
-    : 16384;
-
-const DEFAULT_TEMPERATURE =
-  Number.isFinite(
-    Number(
-      process.env.DEFAULT_TEMPERATURE
-    )
-  )
-    ? Number(
-        process.env.DEFAULT_TEMPERATURE
-      )
-    : 1.0;
-
-const DEFAULT_TOP_P =
-  Number.isFinite(
-    Number(
-      process.env.DEFAULT_TOP_P
-    )
-  )
-    ? Number(
-        process.env.DEFAULT_TOP_P
-      )
-    : 0.95;
-
-const DEFAULT_REPETITION_PENALTY =
-  Number.isFinite(
-    Number(
-      process.env.DEFAULT_REPETITION_PENALTY
-    )
-  )
-    ? Number(
-        process.env.DEFAULT_REPETITION_PENALTY
-      )
-    : 1.0;
-
-const DEFAULT_FREQUENCY_PENALTY =
-  Number.isFinite(
-    Number(
-      process.env.DEFAULT_FREQUENCY_PENALTY
-    )
-  )
-    ? Number(
-        process.env.DEFAULT_FREQUENCY_PENALTY
-      )
-    : 0.0;
-
-const DEFAULT_PRESENCE_PENALTY =
-  Number.isFinite(
-    Number(
-      process.env.DEFAULT_PRESENCE_PENALTY
-    )
-  )
-    ? Number(
-        process.env.DEFAULT_PRESENCE_PENALTY
-      )
-    : 0.0;
-
-/*
- * NVIDIA's Nemotron 3 Ultra API defaults thinking on.
- *
- * Profiles can override this explicitly. The -no profiles
- * explicitly disable reasoning where the upstream model
- * supports a true non-thinking mode.
- */
 const DEFAULT_NEMOTRON_THINKING =
   parseBoolean(
     process.env.NEMOTRON_ENABLE_THINKING,
@@ -165,22 +125,24 @@ const DEFAULT_NEMOTRON_THINKING =
    HTTP AGENTS
 ============================================================ */
 
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  scheduling: "lifo"
-});
+const httpAgent =
+  new http.Agent({
+    keepAlive: true,
+    maxSockets: 64,
+    maxFreeSockets: 16,
+    scheduling: "lifo"
+  });
 
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  scheduling: "lifo"
-});
+const httpsAgent =
+  new https.Agent({
+    keepAlive: true,
+    maxSockets: 64,
+    maxFreeSockets: 16,
+    scheduling: "lifo"
+  });
 
 /* ============================================================
-   HELPERS
+   BASIC HELPERS
 ============================================================ */
 
 function parseBoolean(
@@ -194,86 +156,145 @@ function parseBoolean(
     return fallback;
   }
 
-  if (typeof value === "boolean") {
+  if (
+    typeof value ===
+    "boolean"
+  ) {
     return value;
   }
 
-  if (typeof value === "number") {
+  if (
+    typeof value ===
+    "number"
+  ) {
     return value !== 0;
   }
 
-  if (typeof value === "string") {
-    const normalized =
-      value.trim().toLowerCase();
+  const normalized =
+    String(value)
+      .trim()
+      .toLowerCase();
 
-    if (
-      [
-        "true",
-        "1",
-        "yes",
-        "on"
-      ].includes(normalized)
-    ) {
-      return true;
-    }
+  if (
+    [
+      "true",
+      "1",
+      "yes",
+      "on"
+    ].includes(normalized)
+  ) {
+    return true;
+  }
 
-    if (
-      [
-        "false",
-        "0",
-        "no",
-        "off"
-      ].includes(normalized)
-    ) {
-      return false;
-    }
+  if (
+    [
+      "false",
+      "0",
+      "no",
+      "off"
+    ].includes(normalized)
+  ) {
+    return false;
   }
 
   return fallback;
 }
 
-function isPlainObject(value) {
+function isPlainObject(
+  value
+) {
   return (
     value !== null &&
-    typeof value === "object" &&
+    typeof value ===
+      "object" &&
     !Array.isArray(value)
   );
 }
 
-function isFiniteNumber(value) {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value)
-  );
+function isFiniteNumber(
+  value
+) {
+  if (
+    typeof value ===
+    "number"
+  ) {
+    return Number.isFinite(
+      value
+    );
+  }
+
+  if (
+    typeof value ===
+      "string" &&
+    value.trim() !== ""
+  ) {
+    return Number.isFinite(
+      Number(value)
+    );
+  }
+
+  return false;
 }
 
 function numberOrDefault(
   value,
   fallback
 ) {
-  const parsed =
-    Number(value);
-
-  return Number.isFinite(parsed)
-    ? parsed
+  return isFiniteNumber(
+    value
+  )
+    ? Number(value)
     : fallback;
 }
 
-function normalizeModel(model) {
-  return String(
-    model || ""
-  ).trim();
+function positiveNumber(
+  value,
+  fallback
+) {
+  const number =
+    Number(value);
+
+  return Number.isFinite(
+    number
+  ) && number > 0
+    ? number
+    : fallback;
 }
 
 function clamp(
   value,
-  min,
-  max
+  minimum,
+  maximum
 ) {
   return Math.min(
-    max,
-    Math.max(min, value)
+    maximum,
+    Math.max(
+      minimum,
+      value
+    )
   );
+}
+
+function normalizeModel(
+  model
+) {
+  return String(
+    model || ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function safeJsonParse(
+  value
+) {
+  try {
+    return JSON.parse(
+      value
+    );
+  } catch {
+    return null;
+  }
 }
 
 /* ============================================================
@@ -282,28 +303,45 @@ function clamp(
 
 const MODELS = {
   "z-ai/glm-5.3": {
-    name: "GLM 5.3",
-    provider: "Z.ai",
+    name:
+      "GLM 5.3",
+
+    provider:
+      "Z.ai",
+
     reasoningLevels: [
       "none",
       "low",
       "high",
       "max"
     ],
-    defaultReasoningEffort: "high",
-    maxOutputTokens: 32768,
-    maxReasoningBudget: null,
-    contextTokens: 1048576,
-    adapter: "glm53"
+
+    defaultReasoningEffort:
+      "high",
+
+    maxOutputTokens:
+      32768,
+
+    maxReasoningBudget:
+      null,
+
+    contextTokens:
+      1048576,
+
+    adapter:
+      "glm53"
   },
 
   "z-ai/glm-5.3-flash": {
-    name: "GLM 5.3 Flash",
-    provider: "Z.ai",
+    name:
+      "GLM 5.3 Flash",
+
+    provider:
+      "Z.ai",
 
     /*
-     * NVIDIA documents GLM-5.3-Flash as always reasoning.
-     * "low" is its minimum supported reasoning setting.
+     * Flash does not expose a true no-thinking mode.
+     * Its lowest reasoning setting is "low".
      */
     reasoningLevels: [
       "low",
@@ -311,255 +349,372 @@ const MODELS = {
       "max"
     ],
 
-    defaultReasoningEffort: "max",
-    maxOutputTokens: 32768,
-    maxReasoningBudget: null,
-    contextTokens: 1048576,
-    adapter: "glm53-flash"
+    defaultReasoningEffort:
+      "max",
+
+    maxOutputTokens:
+      32768,
+
+    maxReasoningBudget:
+      null,
+
+    contextTokens:
+      1048576,
+
+    adapter:
+      "glm53-flash"
   },
 
   "moonshotai/kimi-k3": {
-    name: "Kimi K3",
-    provider: "Moonshot AI",
+    name:
+      "Kimi K3",
+
+    provider:
+      "Moonshot AI",
+
     reasoningLevels: [
       "low",
       "high",
       "max"
     ],
-    defaultReasoningEffort: "max",
-    maxOutputTokens: 8192,
-    maxReasoningBudget: 32768,
-    adapter: "kimi-k3"
+
+    defaultReasoningEffort:
+      "max",
+
+    maxOutputTokens:
+      8192,
+
+    maxReasoningBudget:
+      32768,
+
+    contextTokens:
+      1048576,
+
+    adapter:
+      "kimi-k3"
   },
 
   "nvidia/nemotron-3-ultra-550b-a55b": {
     name:
       "NVIDIA Nemotron 3 Ultra 550B",
-    provider: "NVIDIA",
 
-    /*
-     * Kept for proxy metadata compatibility.
-     *
-     * IMPORTANT:
-     * These values are NOT forwarded as generic
-     * reasoning_effort/reasoning_budget fields.
-     *
-     * Nemotron 3 Ultra uses chat_template_kwargs
-     * and thinking_token_budget instead.
-     */
+    provider:
+      "NVIDIA",
+
     reasoningLevels: [
       "none",
       "medium",
       "high"
     ],
 
-    defaultReasoningEffort: "high",
-    defaultThinking: true,
+    defaultReasoningEffort:
+      "high",
 
-    maxReasoningBudget: 32768,
-    maxOutputTokens: 32768,
-    contextTokens: 1048576,
-    adapter: "nemotron"
+    defaultThinking:
+      true,
+
+    maxReasoningBudget:
+      32768,
+
+    maxOutputTokens:
+      32768,
+
+    contextTokens:
+      1048576,
+
+    adapter:
+      "nemotron"
   },
 
   "deepseek-ai/deepseek-v4-flash-0731": {
     name:
       "DeepSeek V4 Flash 0731",
-    provider: "DeepSeek AI",
+
+    provider:
+      "DeepSeek AI",
+
     reasoningLevels: [
       "none",
       "low",
       "high",
       "max"
     ],
-    defaultReasoningEffort: "max",
-    maxOutputTokens: 8192,
-    maxReasoningBudget: 16384,
-    adapter: "deepseek-flash"
+
+    defaultReasoningEffort:
+      "max",
+
+    maxOutputTokens:
+      8192,
+
+    maxReasoningBudget:
+      16384,
+
+    contextTokens:
+      1048576,
+
+    adapter:
+      "deepseek-flash"
   }
 };
 
 /* ============================================================
-   PROXY PROFILES
+   PROFILES
 ============================================================ */
 
 const PROFILES = {
-  /* ---------------- GLM 5.3 ---------------- */
+  /* ----------------------------------------------------------
+     GLM 5.3
+  ---------------------------------------------------------- */
 
   "z-ai/glm-5.3-no": {
-    baseModel: "z-ai/glm-5.3",
-    label: "No Thinking",
-    reasoningEffort: "none"
+    baseModel:
+      "z-ai/glm-5.3",
+
+    label:
+      "No Thinking",
+
+    reasoningEffort:
+      "none"
   },
 
   "z-ai/glm-5.3-fast": {
-    baseModel: "z-ai/glm-5.3",
-    label: "Fast",
-    reasoningEffort: "low"
+    baseModel:
+      "z-ai/glm-5.3",
+
+    label:
+      "Fast",
+
+    reasoningEffort:
+      "low"
   },
 
   "z-ai/glm-5.3-balanced": {
-    baseModel: "z-ai/glm-5.3",
-    label: "Balanced",
-    reasoningEffort: "high"
+    baseModel:
+      "z-ai/glm-5.3",
+
+    label:
+      "Balanced",
+
+    reasoningEffort:
+      "high"
   },
 
   "z-ai/glm-5.3-deep": {
-    baseModel: "z-ai/glm-5.3",
-    label: "Deep",
-    reasoningEffort: "max"
+    baseModel:
+      "z-ai/glm-5.3",
+
+    label:
+      "Deep",
+
+    reasoningEffort:
+      "max"
   },
 
-  /* ---------------- GLM 5.3 FLASH ---------------- */
+  /* ----------------------------------------------------------
+     GLM 5.3 FLASH
+  ---------------------------------------------------------- */
 
   /*
-   * GLM-5.3-Flash always reasons upstream.
-   *
-   * NVIDIA documents "low" as the minimum reasoning
-   * setting, so this profile uses the lowest supported
-   * effort rather than pretending reasoning can be disabled.
+   * GLM-5.3-Flash does not provide a genuine disabled
+   * reasoning mode, so "-no" maps to its minimum reasoning
+   * level instead of pretending thinking is disabled.
    */
+
   "z-ai/glm-5.3-flash-no": {
     baseModel:
       "z-ai/glm-5.3-flash",
-    label: "No Thinking / Minimum",
-    reasoningEffort: "low"
+
+    label:
+      "No Thinking / Minimum",
+
+    reasoningEffort:
+      "low"
   },
 
   "z-ai/glm-5.3-flash-fast": {
     baseModel:
       "z-ai/glm-5.3-flash",
-    label: "Fast",
-    reasoningEffort: "low"
+
+    label:
+      "Fast",
+
+    reasoningEffort:
+      "low"
   },
 
   "z-ai/glm-5.3-flash-balanced": {
     baseModel:
       "z-ai/glm-5.3-flash",
-    label: "Balanced",
-    reasoningEffort: "high"
+
+    label:
+      "Balanced",
+
+    reasoningEffort:
+      "high"
   },
 
   "z-ai/glm-5.3-flash-deep": {
     baseModel:
       "z-ai/glm-5.3-flash",
-    label: "Deep",
-    reasoningEffort: "max"
+
+    label:
+      "Deep",
+
+    reasoningEffort:
+      "max"
   },
 
-  /* ---------------- KIMI K3 ---------------- */
+  /* ----------------------------------------------------------
+     KIMI K3
+  ---------------------------------------------------------- */
 
   /*
-   * Intentionally no "-no" Kimi profile.
-   *
-   * Kimi K3 remains reasoning-only in this proxy.
+   * Intentionally NO moonshotai/kimi-k3-no profile.
    */
+
   "moonshotai/kimi-k3-fast": {
-    baseModel: "moonshotai/kimi-k3",
-    label: "Fast",
-    reasoningEffort: "low"
+    baseModel:
+      "moonshotai/kimi-k3",
+
+    label:
+      "Fast",
+
+    reasoningEffort:
+      "low"
   },
 
   "moonshotai/kimi-k3-balanced": {
-    baseModel: "moonshotai/kimi-k3",
-    label: "Balanced",
-    reasoningEffort: "high"
+    baseModel:
+      "moonshotai/kimi-k3",
+
+    label:
+      "Balanced",
+
+    reasoningEffort:
+      "high"
   },
 
   "moonshotai/kimi-k3-deep": {
-    baseModel: "moonshotai/kimi-k3",
-    label: "Deep",
-    reasoningEffort: "max"
+    baseModel:
+      "moonshotai/kimi-k3",
+
+    label:
+      "Deep",
+
+    reasoningEffort:
+      "max"
   },
 
-  /* ---------------- NEMOTRON 3 ULTRA ---------------- */
+  /* ----------------------------------------------------------
+     NEMOTRON 3 ULTRA
+  ---------------------------------------------------------- */
 
-  /*
-   * Explicit no-thinking profile.
-   *
-   * This sends:
-   *
-   *   chat_template_kwargs:
-   *     enable_thinking: false
-   *
-   * No thinking budget is sent.
-   */
   "nvidia/nemotron-3-ultra-550b-a55b-no": {
     baseModel:
       "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "No Thinking",
-    thinking: false
+
+    label:
+      "No Thinking",
+
+    thinking:
+      false
   },
 
-  /*
-   * Fast is also a no-thinking profile.
-   *
-   * It remains available as a separate compatibility
-   * profile, while "-no" is the explicit naming for
-   * disabling thinking.
-   */
   "nvidia/nemotron-3-ultra-550b-a55b-fast": {
     baseModel:
       "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "Fast",
-    thinking: false
+
+    label:
+      "Fast",
+
+    thinking:
+      false
   },
 
-  /*
-   * Balanced uses NVIDIA's documented medium_effort hint.
-   */
   "nvidia/nemotron-3-ultra-550b-a55b-balanced": {
     baseModel:
       "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "Balanced",
-    thinking: true,
-    mediumEffort: true
+
+    label:
+      "Balanced",
+
+    thinking:
+      true,
+
+    mediumEffort:
+      true
   },
 
-  /*
-   * Deep uses full thinking and an explicit thinking-token
-   * budget.
-   */
   "nvidia/nemotron-3-ultra-550b-a55b-deep": {
     baseModel:
       "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "Deep",
-    thinking: true,
-    thinkingTokenBudget: 32768
+
+    label:
+      "Deep",
+
+    thinking:
+      true,
+
+    thinkingTokenBudget:
+      32768
   },
 
-  /* ---------------- DEEPSEEK ---------------- */
+  /* ----------------------------------------------------------
+     DEEPSEEK
+  ---------------------------------------------------------- */
 
   "deepseek-ai/deepseek-v4-flash-0731-no": {
     baseModel:
       "deepseek-ai/deepseek-v4-flash-0731",
-    label: "No Thinking",
-    reasoningEffort: "none"
+
+    label:
+      "No Thinking",
+
+    reasoningEffort:
+      "none"
   },
 
   "deepseek-ai/deepseek-v4-flash-0731-fast": {
     baseModel:
       "deepseek-ai/deepseek-v4-flash-0731",
-    label: "Fast",
-    reasoningEffort: "low"
+
+    label:
+      "Fast",
+
+    reasoningEffort:
+      "low"
   },
 
   "deepseek-ai/deepseek-v4-flash-0731-balanced": {
     baseModel:
       "deepseek-ai/deepseek-v4-flash-0731",
-    label: "Balanced",
-    reasoningEffort: "high"
+
+    label:
+      "Balanced",
+
+    reasoningEffort:
+      "high"
   },
 
   "deepseek-ai/deepseek-v4-flash-0731-deep": {
     baseModel:
       "deepseek-ai/deepseek-v4-flash-0731",
-    label: "Deep",
-    reasoningEffort: "max"
+
+    label:
+      "Deep",
+
+    reasoningEffort:
+      "max"
   }
 };
 
-function getProfile(model) {
+/* ============================================================
+   MODEL RESOLUTION
+============================================================ */
+
+function getProfile(
+  model
+) {
   return (
     PROFILES[
       normalizeModel(model)
@@ -567,42 +722,69 @@ function getProfile(model) {
   );
 }
 
-function resolveModel(model) {
+function resolveModel(
+  requestedModel
+) {
   const requested =
-    String(model || "").trim();
+    normalizeModel(
+      requestedModel
+    );
 
   const profile =
-    getProfile(requested);
+    getProfile(
+      requested
+    );
 
   if (profile) {
     return {
-      requestedModel: requested,
-      model: profile.baseModel,
+      requestedModel:
+        requested,
+
+      model:
+        profile.baseModel,
+
       profile,
+
       config:
-        MODELS[profile.baseModel] ||
+        MODELS[
+          profile.baseModel
+        ] || null
+    };
+  }
+
+  if (
+    MODELS[requested]
+  ) {
+    return {
+      requestedModel:
+        requested,
+
+      model:
+        requested,
+
+      profile:
+        null,
+
+      config:
+        MODELS[requested]
+    };
+  }
+
+  if (
+    ALLOW_UNKNOWN_MODELS
+  ) {
+    return {
+      requestedModel:
+        requested,
+
+      model:
+        requested,
+
+      profile:
+        null,
+
+      config:
         null
-    };
-  }
-
-  const direct =
-    MODELS[requested];
-
-  if (direct) {
-    return {
-      requestedModel: requested,
-      model: requested,
-      profile: null,
-      config: direct
-    };
-  }
-
-  if (ALLOW_UNKNOWN_MODELS) {
-    return {
-      requestedModel: requested,
-      model: requested,
-      profile: null,
-      config: null
     };
   }
 
@@ -610,19 +792,18 @@ function resolveModel(model) {
 }
 
 /* ============================================================
-   REASONING HELPERS
+   REASONING NORMALIZATION
 ============================================================ */
 
 function normalizeReasoningEffort(
   value,
-  modelConfig
+  config
 ) {
   const levels =
     Array.isArray(
-      modelConfig &&
-      modelConfig.reasoningLevels
+      config?.reasoningLevels
     )
-      ? modelConfig.reasoningLevels
+      ? config.reasoningLevels
       : [
           "none",
           "low",
@@ -631,7 +812,7 @@ function normalizeReasoningEffort(
           "max"
         ];
 
-  const normalized =
+  const effort =
     String(
       value || ""
     )
@@ -640,48 +821,45 @@ function normalizeReasoningEffort(
 
   if (
     levels.includes(
-      normalized
+      effort
     )
   ) {
-    return normalized;
+    return effort;
   }
 
-  /*
-   * Common aliases.
-   */
   if (
-    normalized ===
-      "off" ||
-    normalized ===
-      "disabled" ||
-    normalized ===
-      "false"
+    [
+      "off",
+      "disabled",
+      "false",
+      "none"
+    ].includes(effort)
   ) {
     return levels.includes(
       "none"
     )
       ? "none"
-      : levels[0] || "none";
+      : levels[0];
   }
 
   if (
-    normalized ===
-      "minimal" ||
-    normalized ===
-      "fast"
+    [
+      "fast",
+      "minimal"
+    ].includes(effort)
   ) {
     return levels.includes(
       "low"
     )
       ? "low"
-      : levels[0] || "none";
+      : levels[0];
   }
 
   if (
-    normalized ===
-      "balanced" ||
-    normalized ===
+    [
+      "balanced",
       "medium"
+    ].includes(effort)
   ) {
     if (
       levels.includes(
@@ -699,43 +877,40 @@ function normalizeReasoningEffort(
       return "high";
     }
 
-    return levels[0] || "none";
+    return levels[0];
   }
 
   if (
-    normalized ===
-      "deep"
+    effort === "deep"
   ) {
-    return levels.includes(
-      "max"
-    )
-      ? "max"
-      : levels.includes(
-          "high"
-        )
-        ? "high"
-        : levels[0] || "none";
-  }
+    if (
+      levels.includes(
+        "max"
+      )
+    ) {
+      return "max";
+    }
 
-  if (
-    normalized ===
-      "true"
-  ) {
-    return (
-      modelConfig &&
-      modelConfig.defaultReasoningEffort
-    ) || "high";
+    if (
+      levels.includes(
+        "high"
+      )
+    ) {
+      return "high";
+    }
+
+    return levels[0];
   }
 
   return (
-    modelConfig &&
-    modelConfig.defaultReasoningEffort
-  ) || "high";
+    config?.defaultReasoningEffort ||
+    DEFAULT_REASONING_EFFORT
+  );
 }
 
-function budgetToReasoningEffort(
+function budgetToEffort(
   budget,
-  modelConfig
+  config
 ) {
   const numeric =
     Number(budget);
@@ -747,7 +922,7 @@ function budgetToReasoningEffort(
   ) {
     return normalizeReasoningEffort(
       DEFAULT_REASONING_EFFORT,
-      modelConfig
+      config
     );
   }
 
@@ -756,7 +931,7 @@ function budgetToReasoningEffort(
   ) {
     return normalizeReasoningEffort(
       "none",
-      modelConfig
+      config
     );
   }
 
@@ -765,7 +940,7 @@ function budgetToReasoningEffort(
   ) {
     return normalizeReasoningEffort(
       "low",
-      modelConfig
+      config
     );
   }
 
@@ -774,156 +949,82 @@ function budgetToReasoningEffort(
   ) {
     return normalizeReasoningEffort(
       "high",
-      modelConfig
+      config
     );
   }
 
   return normalizeReasoningEffort(
     "max",
-    modelConfig
+    config
   );
 }
 
-function clampReasoningBudget(
-  value
+function requestedEffort(
+  body,
+  resolution
 ) {
-  const numeric =
-    Number(value);
+  const {
+    model,
+    profile,
+    config
+  } = resolution;
 
   if (
-    !Number.isFinite(
-      numeric
-    )
-  ) {
-    return null;
-  }
-
-  return clamp(
-    Math.floor(numeric),
-    0,
-    32768
-  );
-}
-
-function getRequestedReasoningEffort(
-  incoming,
-  model,
-  modelConfig,
-  profile
-) {
-  if (
-    profile &&
-    profile.reasoningEffort
+    profile?.reasoningEffort
   ) {
     return normalizeReasoningEffort(
       profile.reasoningEffort,
-      modelConfig
+      config
     );
   }
 
-  const normalizedModel =
-    normalizeModel(model);
-
-  /*
-   * Kimi reasoning cannot be disabled.
-   */
   if (
-    normalizedModel ===
-    "moonshotai/kimi-k3"
-  ) {
-    if (
-      incoming.reasoning_effort !==
-      undefined
-    ) {
-      const requested =
-        normalizeReasoningEffort(
-          incoming.reasoning_effort,
-          modelConfig
-        );
-
-      return requested ===
-        "none"
-        ? "max"
-        : requested;
-    }
-
-    if (
-      incoming.reasoning_mode !==
-      undefined
-    ) {
-      const requested =
-        normalizeReasoningEffort(
-          incoming.reasoning_mode,
-          modelConfig
-        );
-
-      return requested ===
-        "none"
-        ? "max"
-        : requested;
-    }
-
-    return "max";
-  }
-
-  if (
-    incoming.reasoning_effort !==
+    body.reasoning_effort !==
     undefined
   ) {
     return normalizeReasoningEffort(
-      incoming.reasoning_effort,
-      modelConfig
+      body.reasoning_effort,
+      config
     );
   }
 
   if (
-    incoming.reasoning_mode !==
+    body.reasoning_mode !==
     undefined
   ) {
     return normalizeReasoningEffort(
-      incoming.reasoning_mode,
-      modelConfig
+      body.reasoning_mode,
+      config
     );
   }
 
   if (
-    incoming.reasoning_budget !==
+    body.reasoning_budget !==
     undefined
   ) {
-    return budgetToReasoningEffort(
-      incoming.reasoning_budget,
-      modelConfig
+    return budgetToEffort(
+      body.reasoning_budget,
+      config
     );
   }
 
   return normalizeReasoningEffort(
     DEFAULT_REASONING_EFFORT,
-    modelConfig
+    config
   );
 }
 
 /* ============================================================
-   NEMOTRON-SPECIFIC THINKING RESOLUTION
+   NEMOTRON HELPERS
 ============================================================ */
 
-/*
- * NVIDIA Nemotron 3 Ultra uses:
- *
- *   chat_template_kwargs.enable_thinking
- *   chat_template_kwargs.medium_effort
- *   thinking_token_budget
- *
- * Generic reasoning_effort/reasoning_budget fields are NOT
- * forwarded to this adapter.
- */
-
-function getNemotronThinking(
-  incoming,
+function resolveNemotronThinking(
+  body,
   profile
 ) {
   if (
-    profile &&
-    profile.thinking !== undefined
+    profile?.thinking !==
+    undefined
   ) {
     return Boolean(
       profile.thinking
@@ -931,26 +1032,25 @@ function getNemotronThinking(
   }
 
   if (
-    incoming.enable_thinking !==
+    body.enable_thinking !==
     undefined
   ) {
     return parseBoolean(
-      incoming.enable_thinking,
+      body.enable_thinking,
       DEFAULT_NEMOTRON_THINKING
     );
   }
 
   if (
     isPlainObject(
-      incoming.chat_template_kwargs
+      body.chat_template_kwargs
     ) &&
-    typeof
-      incoming
-        .chat_template_kwargs
-        .enable_thinking ===
+    typeof body
+      .chat_template_kwargs
+      .enable_thinking ===
       "boolean"
   ) {
-    return incoming
+    return body
       .chat_template_kwargs
       .enable_thinking;
   }
@@ -958,8 +1058,83 @@ function getNemotronThinking(
   return DEFAULT_NEMOTRON_THINKING;
 }
 
-function getNemotronMediumEffort(
-  incoming,
+function resolveNemotronBudget(
+  body,
+  profile,
+  thinking
+) {
+  if (!thinking) {
+    return null;
+  }
+
+  if (
+    profile?.thinkingTokenBudget !==
+    undefined
+  ) {
+    return clamp(
+      Math.floor(
+        Number(
+          profile.thinkingTokenBudget
+        )
+      ),
+      1,
+      32768
+    );
+  }
+
+  if (
+    body.thinking_token_budget !==
+    undefined
+  ) {
+    const budget =
+      Number(
+        body.thinking_token_budget
+      );
+
+    if (
+      Number.isFinite(
+        budget
+      )
+    ) {
+      return clamp(
+        Math.floor(budget),
+        1,
+        32768
+      );
+    }
+  }
+
+  /*
+   * Accept legacy client input, but translate it rather than
+   * forwarding reasoning_budget to Nemotron.
+   */
+  if (
+    body.reasoning_budget !==
+    undefined
+  ) {
+    const budget =
+      Number(
+        body.reasoning_budget
+      );
+
+    if (
+      Number.isFinite(
+        budget
+      )
+    ) {
+      return clamp(
+        Math.floor(budget),
+        1,
+        32768
+      );
+    }
+  }
+
+  return null;
+}
+
+function resolveNemotronMediumEffort(
+  body,
   profile,
   thinking
 ) {
@@ -968,9 +1143,8 @@ function getNemotronMediumEffort(
   }
 
   if (
-    profile &&
-    profile.mediumEffort !==
-      undefined
+    profile?.mediumEffort !==
+    undefined
   ) {
     return Boolean(
       profile.mediumEffort
@@ -979,15 +1153,14 @@ function getNemotronMediumEffort(
 
   if (
     isPlainObject(
-      incoming.chat_template_kwargs
+      body.chat_template_kwargs
     ) &&
-    typeof
-      incoming
-        .chat_template_kwargs
-        .medium_effort ===
+    typeof body
+      .chat_template_kwargs
+      .medium_effort ===
       "boolean"
   ) {
-    return incoming
+    return body
       .chat_template_kwargs
       .medium_effort;
   }
@@ -995,82 +1168,17 @@ function getNemotronMediumEffort(
   return false;
 }
 
-function normalizeThinkingBudget(
-  value
-) {
-  if (
-    !isFiniteNumber(value)
-  ) {
-    return null;
-  }
-
-  return clamp(
-    Math.floor(
-      Number(value)
-    ),
-    1,
-    32768
-  );
-}
-
-function getNemotronThinkingTokenBudget(
-  incoming,
-  profile,
-  thinking
-) {
-  if (!thinking) {
-    return null;
-  }
-
-  if (
-    profile &&
-    profile.thinkingTokenBudget !==
-      undefined
-  ) {
-    return normalizeThinkingBudget(
-      profile.thinkingTokenBudget
-    );
-  }
-
-  /*
-   * Preferred modern request field.
-   */
-  if (
-    incoming.thinking_token_budget !==
-      undefined
-  ) {
-    return normalizeThinkingBudget(
-      incoming.thinking_token_budget
-    );
-  }
-
-  /*
-   * Backward-compatible client input.
-   *
-   * Accept it, but translate it to the actual Nemotron request
-   * field rather than forwarding reasoning_budget.
-   */
-  if (
-    incoming.reasoning_budget !==
-      undefined
-  ) {
-    return normalizeThinkingBudget(
-      incoming.reasoning_budget
-    );
-  }
-
-  return null;
-}
-
 /* ============================================================
-   MESSAGE NORMALIZATION
+   REQUEST CONSTRUCTION
 ============================================================ */
 
 function normalizeMessages(
   messages
 ) {
   if (
-    !Array.isArray(messages)
+    !Array.isArray(
+      messages
+    )
   ) {
     return [];
   }
@@ -1085,67 +1193,20 @@ function normalizeMessages(
         return message;
       }
 
-      const normalized = {
+      return {
         ...message
       };
-
-      /*
-       * JanitorAI and OpenAI-compatible clients sometimes send
-       * undefined/null content for assistant/tool messages.
-       * Preserve actual content but avoid malformed undefined
-       * values.
-       */
-      if (
-        normalized.content ===
-          undefined &&
-        normalized.role !==
-          "assistant"
-      ) {
-        normalized.content = "";
-      }
-
-      return normalized;
     }
   );
 }
 
-/* ============================================================
-   REQUEST VALUE HELPERS
-============================================================ */
-
-function clampTemperature(
-  value
-) {
-  return clamp(
-    numberOrDefault(
-      value,
-      DEFAULT_TEMPERATURE
-    ),
-    0,
-    2
-  );
-}
-
-function clampTopP(
-  value
-) {
-  return clamp(
-    numberOrDefault(
-      value,
-      DEFAULT_TOP_P
-    ),
-    0,
-    1
-  );
-}
-
 function getMaxTokens(
-  incoming,
-  modelConfig
+  body,
+  config
 ) {
   const requested =
     Number(
-      incoming.max_tokens
+      body.max_tokens
     );
 
   if (
@@ -1155,16 +1216,15 @@ function getMaxTokens(
     requested > 0
   ) {
     if (
-      modelConfig &&
       Number.isFinite(
-        modelConfig.maxOutputTokens
+        config?.maxOutputTokens
       )
     ) {
       return Math.min(
         Math.floor(
           requested
         ),
-        modelConfig.maxOutputTokens
+        config.maxOutputTokens
       );
     }
 
@@ -1173,120 +1233,105 @@ function getMaxTokens(
     );
   }
 
-  if (
-    modelConfig &&
-    Number.isFinite(
-      modelConfig.maxOutputTokens
-    )
-  ) {
-    return modelConfig.maxOutputTokens;
-  }
-
-  return DEFAULT_MAX_TOKENS;
+  return (
+    config?.maxOutputTokens ||
+    DEFAULT_MAX_TOKENS
+  );
 }
 
-/* ============================================================
-   NIM REQUEST ADAPTER
-============================================================ */
-
-function buildNimRequest(
-  incoming,
+function buildBaseRequest(
+  body,
   resolution
 ) {
-  const requestedModel =
-    resolution.requestedModel;
-
-  const normalizedModel =
-    resolution.model;
-
-  const modelConfig =
-    resolution.config;
-
-  const profile =
-    resolution.profile;
-
-  const messages =
-    normalizeMessages(
-      incoming.messages
-    );
-
-  const isKimi =
-    normalizedModel ===
-    "moonshotai/kimi-k3";
-
   const request = {
     model:
-      normalizedModel,
+      resolution.model,
 
-    messages,
+    messages:
+      normalizeMessages(
+        body.messages
+      ),
 
     max_tokens:
       getMaxTokens(
-        incoming,
-        modelConfig
+        body,
+        resolution.config
       ),
 
     temperature:
-      clampTemperature(
-        incoming.temperature
+      clamp(
+        numberOrDefault(
+          body.temperature,
+          DEFAULT_TEMPERATURE
+        ),
+        0,
+        2
       ),
 
     stream:
       Boolean(
-        incoming.stream
+        body.stream
       )
   };
 
   /*
-   * Kimi keeps the original proxy behavior of omitting top_p.
+   * Only include top_p if the client actually provided it.
+   *
+   * This prevents us from unexpectedly changing upstream
+   * sampling behavior.
    */
-  if (!isKimi) {
+  if (
+    body.top_p !==
+    undefined
+  ) {
     request.top_p =
-      clampTopP(
-        incoming.top_p
+      clamp(
+        numberOrDefault(
+          body.top_p,
+          DEFAULT_TOP_P
+        ),
+        0,
+        1
       );
   }
 
-  /*
-   * Optional sampling controls.
-   */
   if (
-    !isKimi &&
-    incoming.repetition_penalty !==
-      undefined
+    body.repetition_penalty !==
+    undefined
   ) {
     request.repetition_penalty =
       numberOrDefault(
-        incoming.repetition_penalty,
+        body.repetition_penalty,
         DEFAULT_REPETITION_PENALTY
       );
   }
 
   if (
-    !isKimi &&
-    incoming.frequency_penalty !==
-      undefined
+    body.frequency_penalty !==
+    undefined
   ) {
     request.frequency_penalty =
       numberOrDefault(
-        incoming.frequency_penalty,
+        body.frequency_penalty,
         DEFAULT_FREQUENCY_PENALTY
       );
   }
 
   if (
-    !isKimi &&
-    incoming.presence_penalty !==
-      undefined
+    body.presence_penalty !==
+    undefined
   ) {
     request.presence_penalty =
       numberOrDefault(
-        incoming.presence_penalty,
+        body.presence_penalty,
         DEFAULT_PRESENCE_PENALTY
       );
   }
 
-  const optionalParameters = [
+  /*
+   * Pass through supported OpenAI-compatible parameters.
+   */
+  const passthrough = [
     "stop",
     "seed",
     "tools",
@@ -1306,241 +1351,263 @@ function buildNimRequest(
   ];
 
   for (
-    const parameter of
-      optionalParameters
+    const key of
+      passthrough
   ) {
     if (
-      incoming[parameter] !==
+      body[key] !==
       undefined
     ) {
-      request[parameter] =
-        incoming[parameter];
+      request[key] =
+        body[key];
     }
   }
 
+  /*
+   * Preserve explicitly supplied chat template kwargs as a
+   * starting point. Model adapters are allowed to sanitize them.
+   */
   if (
     isPlainObject(
-      incoming.chat_template_kwargs
+      body.chat_template_kwargs
     )
   ) {
     request.chat_template_kwargs = {
-      ...incoming.chat_template_kwargs
+      ...body.chat_template_kwargs
     };
   }
 
+  /*
+   * extra_body is accepted for compatibility with OpenAI SDK
+   * clients, but is merged before model-specific cleanup.
+   */
   if (
     isPlainObject(
-      incoming.extra_body
+      body.extra_body
     )
   ) {
     Object.assign(
       request,
-      incoming.extra_body
+      body.extra_body
     );
   }
 
-  /* ==========================================================
+  return request;
+}
+
+/* ============================================================
+   MODEL ADAPTER
+============================================================ */
+
+function buildNimRequest(
+  body,
+  resolution
+) {
+  const request =
+    buildBaseRequest(
+      body,
+      resolution
+    );
+
+  const model =
+    resolution.model;
+
+  const profile =
+    resolution.profile;
+
+  /* ----------------------------------------------------------
      GLM 5.3
-  ========================================================== */
+  ---------------------------------------------------------- */
 
   if (
-    normalizedModel ===
+    model ===
     "z-ai/glm-5.3"
   ) {
-    const reasoningEffort =
-      getRequestedReasoningEffort(
-        incoming,
-        normalizedModel,
-        modelConfig,
-        profile
+    const effort =
+      requestedEffort(
+        body,
+        resolution
       );
 
     request.reasoning_effort =
-      reasoningEffort;
+      effort;
 
+    /*
+     * Keep only the GLM-specific template option.
+     */
     request.chat_template_kwargs = {
       ...(request.chat_template_kwargs ||
         {}),
 
-      clear_thinking: true
+      clear_thinking:
+        true
     };
 
+    /*
+     * Prevent incompatible controls from leaking through.
+     */
     delete request.reasoning_budget;
-    delete request.enable_thinking;
     delete request.reasoning_mode;
+    delete request.enable_thinking;
+    delete request.thinking_token_budget;
     delete request.nvext;
 
     return request;
   }
 
-  /* ==========================================================
+  /* ----------------------------------------------------------
      GLM 5.3 FLASH
-  ========================================================== */
+  ---------------------------------------------------------- */
 
   if (
-    normalizedModel ===
+    model ===
     "z-ai/glm-5.3-flash"
   ) {
-    let reasoningEffort =
-      getRequestedReasoningEffort(
-        incoming,
-        normalizedModel,
-        modelConfig,
-        profile
+    let effort =
+      requestedEffort(
+        body,
+        resolution
       );
 
     /*
-     * GLM-5.3-Flash does not expose a true "none" mode.
-     * Its minimum supported reasoning effort is low.
+     * Flash cannot truly disable reasoning.
      */
     if (
-      reasoningEffort ===
+      effort ===
       "none"
     ) {
-      reasoningEffort =
+      effort =
         "low";
     }
 
     request.reasoning_effort =
-      reasoningEffort;
+      effort;
 
     request.chat_template_kwargs = {
       ...(request.chat_template_kwargs ||
         {}),
 
-      clear_thinking: true,
+      clear_thinking:
+        true,
+
       reasoning_effort:
-        reasoningEffort
+        effort
     };
 
     delete request.reasoning_budget;
-    delete request.enable_thinking;
     delete request.reasoning_mode;
+    delete request.enable_thinking;
+    delete request.thinking_token_budget;
     delete request.nvext;
 
     return request;
   }
 
-  /* ==========================================================
+  /* ----------------------------------------------------------
      NEMOTRON 3 ULTRA
-  ========================================================== */
+  ---------------------------------------------------------- */
 
   if (
-    normalizedModel ===
+    model ===
     "nvidia/nemotron-3-ultra-550b-a55b"
   ) {
-    /*
-     * CRITICAL FIX:
-     *
-     * Do NOT send:
-     *
-     *   reasoning_effort
-     *   reasoning_budget
-     *   reasoning_mode
-     *   enable_thinking as a top-level field
-     *   nvext
-     *
-     * for this Nemotron adapter.
-     *
-     * NVIDIA's current Nemotron 3 Ultra API examples control
-     * thinking through chat_template_kwargs and use the top-level
-     * thinking_token_budget field for explicit budgets.
-     */
-
-    const enableThinking =
-      getNemotronThinking(
-        incoming,
+    const thinking =
+      resolveNemotronThinking(
+        body,
         profile
       );
 
     const mediumEffort =
-      getNemotronMediumEffort(
-        incoming,
+      resolveNemotronMediumEffort(
+        body,
         profile,
-        enableThinking
+        thinking
       );
 
-    const thinkingTokenBudget =
-      getNemotronThinkingTokenBudget(
-        incoming,
+    const thinkingBudget =
+      resolveNemotronBudget(
+        body,
         profile,
-        enableThinking
+        thinking
       );
-
-    request.chat_template_kwargs = {
-      ...(request.chat_template_kwargs ||
-        {}),
-
-      enable_thinking:
-        enableThinking
-    };
 
     /*
-     * A no-thinking profile must not carry any thinking controls.
+     * Start with a clean object instead of inheriting arbitrary
+     * reasoning fields from JanitorAI.
      */
+    const existingTemplate =
+      isPlainObject(
+        body.chat_template_kwargs
+      )
+        ? {
+            ...body.chat_template_kwargs
+          }
+        : {};
+
+    /*
+     * Remove fields that are not part of the Nemotron-specific
+     * interface we want to expose.
+     */
+    delete existingTemplate.reasoning_effort;
+    delete existingTemplate.reasoning_budget;
+    delete existingTemplate.thinking_token_budget;
+    delete existingTemplate.enable_thinking;
+    delete existingTemplate.nvext;
+
+    /*
+     * NVIDIA Nemotron thinking control.
+     */
+    existingTemplate.enable_thinking =
+      thinking;
+
     if (
-      enableThinking &&
+      thinking &&
       mediumEffort
     ) {
-      request.chat_template_kwargs = {
-        ...request.chat_template_kwargs,
-
-        medium_effort: true
-      };
+      existingTemplate.medium_effort =
+        true;
     } else {
-      delete request
-        .chat_template_kwargs
-        .medium_effort;
+      delete existingTemplate.medium_effort;
     }
 
     /*
-     * NVIDIA's Nemotron 3 Ultra Chat Completions examples use
-     * thinking_token_budget as a top-level request field.
-     *
-     * It is intentionally NOT duplicated inside
-     * chat_template_kwargs.
+     * force_nonempty_content is useful when reasoning is used
+     * alongside tools.
      */
-    delete request
-      .chat_template_kwargs
-      .thinking_token_budget;
-
     if (
-      enableThinking &&
-      thinkingTokenBudget !==
+      thinking &&
+      Array.isArray(
+        request.tools
+      ) &&
+      request.tools.length >
+        0
+    ) {
+      existingTemplate.force_nonempty_content =
+        true;
+    } else {
+      delete existingTemplate.force_nonempty_content;
+    }
+
+    request.chat_template_kwargs =
+      existingTemplate;
+
+    /*
+     * Explicit thinking budget belongs at the top level.
+     */
+    if (
+      thinking &&
+      thinkingBudget !==
         null
     ) {
       request.thinking_token_budget =
-        thinkingTokenBudget;
+        thinkingBudget;
     } else {
       delete request.thinking_token_budget;
     }
 
     /*
-     * With tools + reasoning, NVIDIA documents
-     * force_nonempty_content in chat_template_kwargs.
-     */
-    if (
-      enableThinking &&
-      Array.isArray(
-        request.tools
-      ) &&
-      request.tools.length > 0
-    ) {
-      request.chat_template_kwargs = {
-        ...request.chat_template_kwargs,
-
-        force_nonempty_content:
-          true
-      };
-    } else {
-      delete request
-        .chat_template_kwargs
-        .force_nonempty_content;
-    }
-
-    /*
-     * Strip all generic/legacy reasoning controls that may have
-     * arrived from JanitorAI, extra_body, or an older client.
+     * Absolutely do not send generic reasoning controls to
+     * Nemotron.
      */
     delete request.reasoning_effort;
     delete request.reasoning_budget;
@@ -1548,73 +1615,72 @@ function buildNimRequest(
     delete request.enable_thinking;
     delete request.nvext;
 
-    delete request
-      .chat_template_kwargs
-      .reasoning_effort;
-
-    delete request
-      .chat_template_kwargs
-      .reasoning_budget;
-
     return request;
   }
 
-  /* ==========================================================
-     DEEPSEEK V4 FLASH
-  ========================================================== */
+  /* ----------------------------------------------------------
+     DEEPSEEK
+  ---------------------------------------------------------- */
 
   if (
-    normalizedModel ===
+    model ===
     "deepseek-ai/deepseek-v4-flash-0731"
   ) {
-    const reasoningEffort =
-      getRequestedReasoningEffort(
-        incoming,
-        normalizedModel,
-        modelConfig,
-        profile
+    const effort =
+      requestedEffort(
+        body,
+        resolution
       );
 
     request.reasoning_effort =
-      reasoningEffort;
+      effort;
 
     request.chat_template_kwargs = {
       ...(request.chat_template_kwargs ||
         {}),
 
       thinking:
-        reasoningEffort !==
-        "none",
+        effort !== "none",
 
       reasoning_effort:
-        reasoningEffort
+        effort
     };
 
     return request;
   }
 
-  /* ==========================================================
+  /* ----------------------------------------------------------
      KIMI K3
-  ========================================================== */
+  ---------------------------------------------------------- */
 
   if (
-    normalizedModel ===
+    model ===
     "moonshotai/kimi-k3"
   ) {
-    const reasoningEffort =
-      getRequestedReasoningEffort(
-        incoming,
-        normalizedModel,
-        modelConfig,
-        profile
+    let effort =
+      requestedEffort(
+        body,
+        resolution
       );
 
-    request.reasoning_effort =
-      reasoningEffort ===
+    /*
+     * Kimi has no -no profile in this proxy.
+     * Never turn it into a fake non-thinking request.
+     */
+    if (
+      effort ===
       "none"
-        ? "max"
-        : reasoningEffort;
+    ) {
+      effort =
+        "max";
+    }
 
+    request.reasoning_effort =
+      effort;
+
+    /*
+     * Do not inject an enable_thinking flag.
+     */
     if (
       isPlainObject(
         request.chat_template_kwargs
@@ -1625,321 +1691,993 @@ function buildNimRequest(
         .enable_thinking;
     }
 
-    delete request.reasoning_mode;
-
     return request;
   }
 
-  /* ==========================================================
+  /* ----------------------------------------------------------
      UNKNOWN MODELS
-  ========================================================== */
-
-  if (!modelConfig) {
-    if (
-      incoming.reasoning_effort !==
-      undefined
-    ) {
-      request.reasoning_effort =
-        incoming.reasoning_effort;
-    }
-
-    if (
-      incoming.reasoning_mode !==
-      undefined
-    ) {
-      request.reasoning_mode =
-        incoming.reasoning_mode;
-    }
-
-    if (
-      incoming.reasoning_budget !==
-      undefined
-    ) {
-      request.reasoning_budget =
-        clampReasoningBudget(
-          incoming.reasoning_budget
-        );
-    }
-  }
+  ---------------------------------------------------------- */
 
   return request;
 }
 
 /* ============================================================
-   RESPONSE REASONING STRIPPING
+   SAFE DEBUG LOGGING
 ============================================================ */
 
-function stripReasoning(
-  parsed
+/*
+ * IMPORTANT:
+ *
+ * This deliberately NEVER logs:
+ *
+ *   - messages
+ *   - prompts
+ *   - conversation history
+ *   - assistant content
+ *   - tool arguments
+ *   - request bodies
+ *
+ * Even DEBUG_PROXY=true only prints metadata.
+ */
+
+function debugLog(
+  label,
+  data
+) {
+  if (!DEBUG_PROXY) {
+    return;
+  }
+
+  try {
+    console.log(
+      `[proxy-debug] ${label} ${JSON.stringify(
+        data
+      )}`
+    );
+  } catch {
+    console.log(
+      `[proxy-debug] ${label}`
+    );
+  }
+}
+
+function requestMetadata(
+  body,
+  resolution
+) {
+  return {
+    requested_model:
+      resolution.requestedModel,
+
+    resolved_model:
+      resolution.model,
+
+    profile:
+      resolution.profile?.label ||
+      null,
+
+    adapter:
+      resolution.config?.adapter ||
+      null,
+
+    stream:
+      Boolean(
+        body.stream
+      ),
+
+    message_count:
+      Array.isArray(
+        body.messages
+      )
+        ? body.messages.length
+        : 0,
+
+    has_tools:
+      Array.isArray(
+        body.tools
+      ) &&
+      body.tools.length >
+        0
+  };
+}
+
+/* ============================================================
+   RESPONSE CLEANING
+============================================================ */
+
+/*
+ * Remove explicit reasoning fields from a normal JSON
+ * OpenAI-compatible response.
+ */
+function cleanResponseObject(
+  response
 ) {
   if (
-    !STRIP_REASONING_FROM_RESPONSE ||
-    !parsed ||
-    typeof parsed !==
-      "object"
+    !isPlainObject(
+      response
+    )
   ) {
-    return parsed;
+    return response;
   }
+
+  const output = {
+    ...response
+  };
 
   if (
     Array.isArray(
-      parsed.choices
+      output.choices
     )
   ) {
-    parsed.choices =
-      parsed.choices.map(
-        (choice) => {
-          if (
-            !choice ||
-            typeof choice !==
-              "object"
-          ) {
-            return choice;
-          }
-
-          const next = {
-            ...choice
-          };
-
-          if (
-            next.message &&
-            typeof next.message ===
-              "object"
-          ) {
-            next.message = {
-              ...next.message
-            };
-
-            if (
-              "reasoning_content" in
-              next.message
-            ) {
-              delete next.message
-                .reasoning_content;
-            }
-
-            if (
-              "reasoning" in
-              next.message
-            ) {
-              delete next.message
-                .reasoning;
-            }
-
-            if (
-              typeof next.message.content ===
-              "string"
-            ) {
-              next.message.content =
-                removeThinkTags(
-                  next.message.content
-                );
-            }
-          }
-
-          if (
-            next.delta &&
-            typeof next.delta ===
-              "object"
-          ) {
-            next.delta = {
-              ...next.delta
-            };
-
-            if (
-              "reasoning_content" in
-              next.delta
-            ) {
-              delete next.delta
-                .reasoning_content;
-            }
-
-            if (
-              "reasoning" in
-              next.delta
-            ) {
-              delete next.delta
-                .reasoning;
-            }
-
-            if (
-              typeof next.delta.content ===
-              "string"
-            ) {
-              next.delta.content =
-                removeThinkTags(
-                  next.delta.content
-                );
-            }
-          }
-
-          return next;
-        }
+    output.choices =
+      output.choices.map(
+        cleanChoice
       );
   }
 
-  return parsed;
+  return output;
 }
 
-function removeThinkTags(
-  content
+function cleanChoice(
+  choice
 ) {
   if (
-    typeof content !==
-    "string"
+    !isPlainObject(
+      choice
+    )
   ) {
-    return content;
+    return choice;
   }
 
-  return content
+  const output = {
+    ...choice
+  };
+
+  if (
+    isPlainObject(
+      output.message
+    )
+  ) {
+    output.message = {
+      ...output.message
+    };
+
+    delete output.message
+      .reasoning_content;
+
+    delete output.message
+      .reasoning;
+
+    delete output.message
+      .thinking;
+
+    if (
+      typeof output.message.content ===
+      "string"
+    ) {
+      output.message.content =
+        removeThinkBlocks(
+          output.message.content
+        );
+    }
+  }
+
+  if (
+    isPlainObject(
+      output.delta
+    )
+  ) {
+    output.delta = {
+      ...output.delta
+    };
+
+    delete output.delta
+      .reasoning_content;
+
+    delete output.delta
+      .reasoning;
+
+    delete output.delta
+      .thinking;
+
+    if (
+      typeof output.delta.content ===
+      "string"
+    ) {
+      output.delta.content =
+        removeThinkBlocks(
+          output.delta.content
+        );
+    }
+  }
+
+  return output;
+}
+
+/*
+ * Non-streaming cleanup.
+ */
+function removeThinkBlocks(
+  text
+) {
+  if (
+    typeof text !==
+    "string"
+  ) {
+    return text;
+  }
+
+  return text
     .replace(
-      /<think>[\s\S]*?<\/think>/gi,
+      /<think\b[^>]*>[\s\S]*?<\/think\s*>/gi,
       ""
     )
     .replace(
-      /<thinking>[\s\S]*?<\/thinking>/gi,
+      /<thinking\b[^>]*>[\s\S]*?<\/thinking\s*>/gi,
       ""
     )
     .trim();
 }
 
 /* ============================================================
-   SSE HELPERS
+   STREAMING REASONING FILTER
 ============================================================ */
 
-function writeSse(
-  response,
-  data
-) {
-  response.write(
-    `data: ${data}\n\n`
-  );
-}
+/*
+ * Streaming is different from normal JSON because a <think>
+ * block can be split across arbitrary SSE chunks.
+ *
+ * Example:
+ *
+ *   chunk 1: "<thi"
+ *   chunk 2: "nk>secret"
+ *   chunk 3: "</think>Hello"
+ *
+ * A simple regex on each chunk would fail.
+ *
+ * This stateful filter keeps track of whether we're currently
+ * inside a thinking block.
+ */
 
-function writeJsonSse(
-  response,
-  object
-) {
-  writeSse(
-    response,
-    JSON.stringify(
-      object
-    )
-  );
-}
+class ThinkingStreamFilter {
+  constructor() {
+    this.insideThink =
+      false;
 
-function endSse(
-  response
-) {
-  writeSse(
-    response,
-    "[DONE]"
-  );
+    this.pending =
+      "";
+  }
 
-  response.end();
-}
-
-function extractSseDataLines(
-  buffer
-) {
-  const events = [];
-
-  let remaining =
-    buffer;
-
-  while (true) {
-    const newline =
-      remaining.indexOf(
-        "\n\n"
-      );
-
+  process(
+    input
+  ) {
     if (
-      newline ===
-      -1
+      typeof input !==
+      "string" ||
+      input.length === 0
     ) {
-      break;
+      return "";
     }
 
-    const event =
-      remaining.slice(
-        0,
-        newline
+    let text =
+      this.pending +
+      input;
+
+    this.pending =
+      "";
+
+    let output =
+      "";
+
+    while (
+      text.length > 0
+    ) {
+      if (
+        this.insideThink
+      ) {
+        const closeIndex =
+          findClosingThinkTag(
+            text
+          );
+
+        if (
+          closeIndex ===
+          -1
+        ) {
+          /*
+           * Keep a small suffix in case the closing tag is split
+           * across chunks.
+           */
+          const keep =
+            partialTagSuffix(
+              text,
+              [
+                "</think>",
+                "</thinking>"
+              ]
+            );
+
+          if (
+            keep > 0
+          ) {
+            text =
+              text.slice(
+                text.length -
+                  keep
+              );
+          } else {
+            text =
+              "";
+          }
+
+          this.pending =
+            text;
+
+          break;
+        }
+
+        text =
+          text.slice(
+            closeIndex
+          );
+
+        const match =
+          text.match(
+            /^<\/thinking\s*>/i
+          ) ||
+          text.match(
+            /^<\/think\s*>/i
+          );
+
+        if (
+          match
+        ) {
+          text =
+            text.slice(
+              match[0].length
+            );
+        }
+
+        this.insideThink =
+          false;
+
+        continue;
+      }
+
+      const openMatch =
+        findOpeningThinkTag(
+          text
+        );
+
+      if (
+        !openMatch
+      ) {
+        /*
+         * The end of this text could be the beginning of a
+         * split <think> tag.
+         */
+        const keep =
+          partialTagSuffix(
+            text,
+            [
+              "<think>",
+              "<thinking>"
+            ]
+          );
+
+        if (
+          keep > 0
+        ) {
+          output +=
+            text.slice(
+              0,
+              text.length -
+                keep
+            );
+
+          this.pending =
+            text.slice(
+              text.length -
+                keep
+            );
+        } else {
+          output +=
+            text;
+        }
+
+        break;
+      }
+
+      output +=
+        text.slice(
+          0,
+          openMatch.index
+        );
+
+      text =
+        text.slice(
+          openMatch.index +
+            openMatch.length
+        );
+
+      this.insideThink =
+        true;
+    }
+
+    return output;
+  }
+
+  flush() {
+    /*
+     * If the stream ends while inside a thinking block, don't
+     * leak the unfinished reasoning.
+     */
+    if (
+      this.insideThink
+    ) {
+      this.pending =
+        "";
+
+      return "";
+    }
+
+    const output =
+      this.pending;
+
+    this.pending =
+      "";
+
+    return output;
+  }
+}
+
+function findOpeningThinkTag(
+  text
+) {
+  const think =
+    text.search(
+      /<think\s*>/i
+    );
+
+  const thinking =
+    text.search(
+      /<thinking\s*>/i
+    );
+
+  if (
+    think === -1 &&
+    thinking === -1
+  ) {
+    return null;
+  }
+
+  if (
+    think === -1
+  ) {
+    const match =
+      text.match(
+        /<thinking\s*>/i
       );
 
-    remaining =
-      remaining.slice(
-        newline + 2
+    return {
+      index:
+        thinking,
+      length:
+        match[0].length
+    };
+  }
+
+  if (
+    thinking === -1
+  ) {
+    const match =
+      text.match(
+        /<think\s*>/i
       );
+
+    return {
+      index:
+        think,
+      length:
+        match[0].length
+    };
+  }
+
+  if (
+    think <
+    thinking
+  ) {
+    const match =
+      text.match(
+        /<think\s*>/i
+      );
+
+    return {
+      index:
+        think,
+      length:
+        match[0].length
+    };
+  }
+
+  const match =
+    text.match(
+      /<thinking\s*>/i
+    );
+
+  return {
+    index:
+      thinking,
+    length:
+      match[0].length
+  };
+}
+
+function findClosingThinkTag(
+  text
+) {
+  const think =
+    text.search(
+      /<\/think\s*>/i
+    );
+
+  const thinking =
+    text.search(
+      /<\/thinking\s*>/i
+    );
+
+  if (
+    think === -1
+  ) {
+    return thinking;
+  }
+
+  if (
+    thinking === -1
+  ) {
+    return think;
+  }
+
+  return Math.min(
+    think,
+    thinking
+  );
+}
+
+function partialTagSuffix(
+  text,
+  tags
+) {
+  const lower =
+    text.toLowerCase();
+
+  let best =
+    0;
+
+  for (
+    const tag of
+      tags
+  ) {
+    const normalized =
+      tag.toLowerCase();
+
+    const maximum =
+      Math.min(
+        normalized.length - 1,
+        text.length
+      );
+
+    for (
+      let size = 1;
+      size <= maximum;
+      size++
+    ) {
+      const suffix =
+        lower.slice(
+          lower.length -
+            size
+        );
+
+      const prefix =
+        normalized.slice(
+          0,
+          size
+        );
+
+      if (
+        suffix ===
+        prefix
+      ) {
+        best =
+          Math.max(
+            best,
+            size
+          );
+      }
+    }
+  }
+
+  return best;
+}
+
+/* ============================================================
+   SSE PARSER
+============================================================ */
+
+class SSEParser {
+  constructor(
+    onEvent
+  ) {
+    this.buffer =
+      "";
+
+    this.onEvent =
+      onEvent;
+  }
+
+  push(
+    chunk
+  ) {
+    this.buffer +=
+      chunk;
+
+    /*
+     * Normalize CRLF/CR to LF.
+     */
+    this.buffer =
+      this.buffer.replace(
+        /\r\n/g,
+        "\n"
+      );
+
+    this.buffer =
+      this.buffer.replace(
+        /\r/g,
+        "\n"
+      );
+
+    while (true) {
+      const separator =
+        this.buffer.indexOf(
+          "\n\n"
+        );
+
+      if (
+        separator ===
+        -1
+      ) {
+        break;
+      }
+
+      const rawEvent =
+        this.buffer.slice(
+          0,
+          separator
+        );
+
+      this.buffer =
+        this.buffer.slice(
+          separator + 2
+        );
+
+      this.parseEvent(
+        rawEvent
+      );
+    }
+  }
+
+  end() {
+    if (
+      this.buffer.length > 0
+    ) {
+      this.parseEvent(
+        this.buffer
+      );
+    }
+
+    this.buffer =
+      "";
+  }
+
+  parseEvent(
+    rawEvent
+  ) {
+    if (
+      !rawEvent
+    ) {
+      return;
+    }
 
     const lines =
-      event.split(
+      rawEvent.split(
         "\n"
       );
 
     const dataLines =
-      lines
-        .filter(
-          (line) =>
-            line.startsWith(
-              "data:"
-            )
+      [];
+
+    let eventName =
+      null;
+
+    let eventId =
+      null;
+
+    for (
+      const line of
+        lines
+    ) {
+      if (
+        line.startsWith(
+          "data:"
         )
-        .map(
-          (line) =>
-            line.slice(
-              5
-            ).trimStart()
+      ) {
+        dataLines.push(
+          line.slice(
+            5
+          ).replace(
+            /^ /,
+            ""
+          )
         );
 
+        continue;
+      }
+
+      if (
+        line.startsWith(
+          "event:"
+        )
+      ) {
+        eventName =
+          line.slice(
+            6
+          ).trim();
+        continue;
+      }
+
+      if (
+        line.startsWith(
+          "id:"
+        )
+      ) {
+        eventId =
+          line.slice(
+            3
+          ).trim();
+      }
+    }
+
     if (
-      dataLines.length
+      dataLines.length ===
+      0
     ) {
-      events.push(
+      return;
+    }
+
+    this.onEvent({
+      data:
         dataLines.join(
           "\n"
-        )
-      );
-    }
-  }
+        ),
 
-  return {
-    events,
-    remainder:
-      remaining
-  };
+      event:
+        eventName,
+
+      id:
+        eventId
+    });
+  }
 }
 
 /* ============================================================
-   ERROR HELPERS
+   SSE EVENT CLEANING
 ============================================================ */
 
-function safeJsonParse(
-  value
+function cleanSSEJson(
+  json,
+  thinkingFilter
 ) {
-  try {
-    return JSON.parse(
-      value
-    );
-  } catch {
-    return null;
+  if (
+    !isPlainObject(
+      json
+    )
+  ) {
+    return json;
   }
-}
 
-function extractUpstreamError(
-  error
-) {
-  const response =
-    error &&
-    error.response;
-
-  const data =
-    response &&
-    response.data;
+  const output = {
+    ...json
+  };
 
   if (
-    data &&
-    typeof data ===
-      "object"
+    Array.isArray(
+      output.choices
+    )
+  ) {
+    output.choices =
+      output.choices.map(
+        (choice) => {
+          if (
+            !isPlainObject(
+              choice
+            )
+          ) {
+            return choice;
+          }
+
+          const cleaned =
+            {
+              ...choice
+            };
+
+          if (
+            isPlainObject(
+              cleaned.delta
+            )
+          ) {
+            cleaned.delta = {
+              ...cleaned.delta
+            };
+
+            /*
+             * These fields are what can cause reasoning to
+             * appear as visible content in clients.
+             */
+            delete cleaned.delta
+              .reasoning_content;
+
+            delete cleaned.delta
+              .reasoning;
+
+            delete cleaned.delta
+              .thinking;
+
+            if (
+              typeof cleaned.delta.content ===
+              "string"
+            ) {
+              cleaned.delta.content =
+                thinkingFilter.process(
+                  cleaned.delta.content
+                );
+            }
+          }
+
+          if (
+            isPlainObject(
+              cleaned.message
+            )
+          ) {
+            cleaned.message = {
+              ...cleaned.message
+            };
+
+            delete cleaned.message
+              .reasoning_content;
+
+            delete cleaned.message
+              .reasoning;
+
+            delete cleaned.message
+              .thinking;
+
+            if (
+              typeof cleaned.message.content ===
+              "string"
+            ) {
+              cleaned.message.content =
+                removeThinkBlocks(
+                  cleaned.message.content
+                );
+            }
+          }
+
+          return cleaned;
+        }
+      );
+  }
+
+  /*
+   * Some upstream responses can expose reasoning at the top
+   * level. Remove it as well.
+   */
+  delete output.reasoning;
+  delete output.reasoning_content;
+  delete output.thinking;
+
+  return output;
+}
+
+/* ============================================================
+   SSE OUTPUT
+============================================================ */
+
+function writeSSEEvent(
+  res,
+  event
+) {
+  /*
+   * We intentionally output standard OpenAI-compatible SSE:
+   *
+   * data: {...}
+   *
+   * No extra prefixes, JSON wrappers, markdown, or logging.
+   */
+  if (
+    event.event
+  ) {
+    res.write(
+      `event: ${event.event}\n`
+    );
+  }
+
+  if (
+    event.id
+  ) {
+    res.write(
+      `id: ${event.id}\n`
+    );
+  }
+
+  const lines =
+    String(
+      event.data
+    ).split(
+      "\n"
+    );
+
+  for (
+    const line of
+      lines
+  ) {
+    res.write(
+      `data: ${line}\n`
+    );
+  }
+
+  res.write(
+    "\n"
+  );
+}
+
+/* ============================================================
+   UPSTREAM HEADERS
+============================================================ */
+
+function buildHeaders(
+  streaming
+) {
+  const headers = {
+    "Content-Type":
+      "application/json",
+
+    Accept:
+      streaming
+        ? "text/event-stream"
+        : "application/json"
+  };
+
+  if (
+    NIM_API_KEY
+  ) {
+    headers.Authorization =
+      `Bearer ${NIM_API_KEY}`;
+  }
+
+  return headers;
+}
+
+/* ============================================================
+   UPSTREAM ERROR EXTRACTION
+============================================================ */
+
+function extractErrorBody(
+  data
+) {
+  if (
+    isPlainObject(
+      data
+    )
   ) {
     return data;
   }
@@ -1953,887 +2691,92 @@ function extractUpstreamError(
         data
       );
 
-    return (
-      parsed || {
-        error:
-          data.slice(
-            0,
-            MAX_ERROR_BODY_SIZE
-          )
-      }
-    );
+    if (
+      parsed
+    ) {
+      return parsed;
+    }
+
+    return {
+      message:
+        data.slice(
+          0,
+          2000
+        )
+    };
   }
 
   return {
-    error:
-      error &&
-      error.message
-        ? error.message
-        : "Unknown upstream error"
+    message:
+      "Unknown upstream error"
   };
 }
 
-function makeErrorResponse(
+function makeProxyError(
   error,
   resolution,
   elapsedMs
 ) {
-  const upstream =
-    extractUpstreamError(
-      error
-    );
-
   const status =
     Number(
-      error &&
-      error.response &&
-      error.response.status
+      error?.response?.status
     ) || 502;
 
-  const request =
-    resolution
-      ? resolution
-      : null;
+  const upstream =
+    extractErrorBody(
+      error?.response?.data
+    );
+
+  const upstreamMessage =
+    upstream?.error?.message ||
+    upstream?.message ||
+    error?.message ||
+    "NVIDIA NIM request failed";
 
   return {
     error: {
       message:
-        upstream.error?.message ||
-        upstream.message ||
-        error?.message ||
-        "NVIDIA NIM request failed",
+        upstreamMessage,
 
       type:
-        upstream.error?.type ||
+        upstream?.error?.type ||
         "upstream_error",
 
       code:
-        upstream.error?.code ||
+        upstream?.error?.code ||
         status,
 
       status,
 
       proxy: {
         requested_model:
-          request?.requestedModel ||
+          resolution?.requestedModel ||
           null,
 
         resolved_model:
-          request?.model ||
+          resolution?.model ||
           null,
 
         profile:
-          request?.profile
-            ? {
-                label:
-                  request.profile.label ||
-                  null,
-                thinking:
-                  request.profile.thinking,
-                reasoningEffort:
-                  request.profile
-                    .reasoningEffort ||
-                  null
-              }
-            : null,
+          resolution?.profile?.label ||
+          null,
 
         adapter:
-          request?.config?.adapter ||
+          resolution?.config?.adapter ||
           null,
 
         upstream_latency_ms:
           elapsedMs
-      },
-
-      upstream:
-        DEBUG_PROXY
-          ? upstream
-          : undefined
+      }
     }
   };
 }
 
 /* ============================================================
-   DEBUGGING
+   STREAM ERROR BODY
 ============================================================ */
 
-function debugLog(
-  label,
-  value
-) {
-  if (!DEBUG_PROXY) {
-    return;
-  }
-
-  console.log(
-    `\n========== ${label} ==========\n` +
-      JSON.stringify(
-        value,
-        null,
-        2
-      ) +
-      `\n========== END ${label} ==========\n`
-  );
-}
-
-/* ============================================================
-   MODEL CACHE
-============================================================ */
-
-let modelCache = {
-  fetchedAt: 0,
-  data: null
-};
-
-async function fetchNimModels() {
-  const now =
-    Date.now();
-
-  if (
-    modelCache.data &&
-    now -
-      modelCache.fetchedAt <
-      MODEL_CACHE_TTL
-  ) {
-    return modelCache.data;
-  }
-
-  try {
-    const response =
-      await axios.get(
-        `${NIM_API_BASE}/models`,
-        {
-          headers:
-            buildHeaders(),
-          timeout:
-            Math.min(
-              NIM_TIMEOUT,
-              30000
-            ),
-          httpAgent,
-          httpsAgent,
-          validateStatus:
-            () => true
-        }
-      );
-
-    if (
-      response.status >= 200 &&
-      response.status < 300
-    ) {
-      modelCache = {
-        fetchedAt:
-          now,
-        data:
-          response.data
-      };
-
-      return response.data;
-    }
-  } catch {
-    /* Fall through to local models. */
-  }
-
-  return null;
-}
-
-/* ============================================================
-   HEADERS
-============================================================ */
-
-function buildHeaders() {
-  const headers = {
-    "Content-Type":
-      "application/json",
-    Accept:
-      "application/json"
-  };
-
-  if (NIM_API_KEY) {
-    headers.Authorization =
-      `Bearer ${NIM_API_KEY}`;
-  }
-
-  return headers;
-}
-
-/* ============================================================
-   LOCAL MODEL LIST
-============================================================ */
-
-function getLocalModels() {
-  const created =
-    Math.floor(
-      Date.now() / 1000
-    );
-
-  const models = [];
-
-  for (
-    const [
-      id,
-      config
-    ] of Object.entries(
-      MODELS
-    )
-  ) {
-    models.push({
-      id,
-      object:
-        "model",
-      created,
-      owned_by:
-        config.provider,
-      name:
-        config.name
-    });
-  }
-
-  for (
-    const [
-      id,
-      profile
-    ] of Object.entries(
-      PROFILES
-    )
-  ) {
-    const base =
-      MODELS[
-        profile.baseModel
-      ];
-
-    models.push({
-      id,
-      object:
-        "model",
-      created,
-      owned_by:
-        base?.provider ||
-        "proxy",
-      name:
-        `${base?.name || profile.baseModel} - ${profile.label}`
-    });
-  }
-
-  return models;
-}
-
-/* ============================================================
-   EXPRESS SETUP
-============================================================ */
-
-app.disable(
-  "x-powered-by"
-);
-
-app.use(
-  cors({
-    origin: true,
-    credentials: true
-  })
-);
-
-app.use(
-  express.json({
-    limit:
-      process.env.JSON_BODY_LIMIT ||
-      "10mb"
-  })
-);
-
-/*
- * Raw request logging when debugging.
- */
-app.use(
-  (req, res, next) => {
-    if (
-      DEBUG_PROXY &&
-      req.path !==
-        "/health"
-    ) {
-      console.log(
-        `[${new Date().toISOString()}] ` +
-          `${req.method} ${req.path}`
-      );
-    }
-
-    next();
-  }
-);
-
-/* ============================================================
-   BASIC ROUTES
-============================================================ */
-
-app.get(
-  "/",
-  (req, res) => {
-    res.json({
-      name:
-        "NVIDIA NIM OpenAI-Compatible Proxy",
-
-      status:
-        "ok",
-
-      default_model:
-        DEFAULT_MODEL,
-
-      profiles:
-        Object.keys(
-          PROFILES
-        ),
-
-      models:
-        Object.keys(
-          MODELS
-        )
-    });
-  }
-);
-
-app.get(
-  "/health",
-  (req, res) => {
-    res.json({
-      status:
-        "ok",
-
-      upstream:
-        NIM_API_BASE,
-
-      default_model:
-        DEFAULT_MODEL,
-
-      configured:
-        Boolean(
-          NIM_API_KEY
-        )
-    });
-  }
-);
-
-app.get(
-  "/v1/models",
-  async (req, res) => {
-    const remote =
-      await fetchNimModels();
-
-    /*
-     * Return our local profile models first so clients such
-     * as JanitorAI can discover the aliases.
-     */
-    const local =
-      getLocalModels();
-
-    if (
-      remote &&
-      Array.isArray(
-        remote.data
-      )
-    ) {
-      const existing =
-        new Set(
-          remote.data.map(
-            (model) =>
-              model.id
-          )
-        );
-
-      const merged =
-        [
-          ...remote.data
-        ];
-
-      for (
-        const model of
-          local
-      ) {
-        if (
-          !existing.has(
-            model.id
-          )
-        ) {
-          merged.push(
-            model
-          );
-        }
-      }
-
-      return res.json({
-        object:
-          "list",
-        data:
-          merged
-      });
-    }
-
-    return res.json({
-      object:
-        "list",
-      data:
-        local
-    });
-  }
-);
-
-app.post(
-  "/v1/models/refresh",
-  async (req, res) => {
-    modelCache = {
-      fetchedAt: 0,
-      data: null
-    };
-
-    const remote =
-      await fetchNimModels();
-
-    res.json({
-      ok:
-        true,
-      upstream:
-        remote
-          ? "reachable"
-          : "unavailable",
-      models:
-        remote?.data ||
-        getLocalModels()
-    });
-  }
-);
-
-/* ============================================================
-   CHAT COMPLETIONS
-============================================================ */
-
-app.post(
-  "/v1/chat/completions",
-  async (req, res) => {
-    const startedAt =
-      Date.now();
-
-    const incoming =
-      isPlainObject(
-        req.body
-      )
-        ? req.body
-        : {};
-
-    const requestedModel =
-      normalizeModel(
-        incoming.model ||
-          DEFAULT_MODEL
-      );
-
-    const resolution =
-      resolveModel(
-        requestedModel
-      );
-
-    if (!resolution) {
-      return res
-        .status(400)
-        .json({
-          error: {
-            message:
-              `Unknown model: ${requestedModel}`,
-
-            type:
-              "invalid_request_error",
-
-            code:
-              "unknown_model"
-          }
-        });
-    }
-
-    const nimRequest =
-      buildNimRequest(
-        incoming,
-        resolution
-      );
-
-    debugLog(
-      "INCOMING REQUEST",
-      incoming
-    );
-
-    debugLog(
-      "RESOLUTION",
-      resolution
-    );
-
-    debugLog(
-      "FULL NIM REQUEST",
-      nimRequest
-    );
-
-    const isStreaming =
-      Boolean(
-        nimRequest.stream
-      );
-
-    const headers =
-      buildHeaders();
-
-    if (
-      isStreaming
-    ) {
-      headers.Accept =
-        "text/event-stream";
-    }
-
-    try {
-      const upstream =
-        await axios.post(
-          `${NIM_API_BASE}/chat/completions`,
-          nimRequest,
-          {
-            headers,
-
-            timeout:
-              NIM_TIMEOUT,
-
-            httpAgent,
-            httpsAgent,
-
-            responseType:
-              isStreaming
-                ? "stream"
-                : "json",
-
-            /*
-             * Do not retry automatically.
-             *
-             * This is deliberate because a 500 from NIM on a
-             * reasoning profile should remain visible instead
-             * of causing duplicate generations.
-             */
-            validateStatus:
-              () => true,
-
-            maxContentLength:
-              Infinity,
-
-            maxBodyLength:
-              Infinity
-          }
-        );
-
-      const elapsedMs =
-        Date.now() -
-        startedAt;
-
-      /*
-       * --------------------------------------------------------
-       * UPSTREAM ERROR
-       * --------------------------------------------------------
-       */
-      if (
-        upstream.status <
-          200 ||
-        upstream.status >=
-          300
-      ) {
-        let body =
-          upstream.data;
-
-        if (
-          body &&
-          typeof body.pipe ===
-            "function"
-        ) {
-          body =
-            await readStreamToString(
-              body
-            );
-        }
-
-        debugLog(
-          "NIM ERROR RESPONSE",
-          body
-        );
-
-        return res
-          .status(
-            upstream.status
-          )
-          .json(
-            makeErrorResponse(
-              {
-                response: {
-                  status:
-                    upstream.status,
-                  data:
-                    body
-                }
-              },
-              resolution,
-              elapsedMs
-            )
-          );
-      }
-
-      /*
-       * --------------------------------------------------------
-       * STREAMING
-       * --------------------------------------------------------
-       */
-      if (
-        isStreaming
-      ) {
-        res.status(
-          upstream.status
-        );
-
-        res.setHeader(
-          "Content-Type",
-          "text/event-stream"
-        );
-
-        res.setHeader(
-          "Cache-Control",
-          "no-cache, no-transform"
-        );
-
-        res.setHeader(
-          "Connection",
-          "keep-alive"
-        );
-
-        res.flushHeaders?.();
-
-        let buffer =
-          "";
-
-        upstream.data.on(
-          "data",
-          (chunk) => {
-            buffer +=
-              chunk.toString(
-                "utf8"
-              );
-
-            const parsed =
-              extractSseDataLines(
-                buffer
-              );
-
-            buffer =
-              parsed.remainder;
-
-            for (
-              const data of
-                parsed.events
-            ) {
-              if (
-                data ===
-                "[DONE]"
-              ) {
-                writeSse(
-                  res,
-                  "[DONE]"
-                );
-
-                continue;
-              }
-
-              const json =
-                safeJsonParse(
-                  data
-                );
-
-              if (!json) {
-                writeSse(
-                  res,
-                  data
-                );
-
-                continue;
-              }
-
-              const cleaned =
-                stripReasoning(
-                  json
-                );
-
-              writeJsonSse(
-                res,
-                cleaned
-              );
-            }
-          }
-        );
-
-        upstream.data.on(
-          "end",
-          () => {
-            /*
-             * Flush a final incomplete event if one exists.
-             */
-            if (
-              buffer.trim()
-            ) {
-              const data =
-                buffer
-                  .split("\n")
-                  .filter(
-                    (line) =>
-                      line.startsWith(
-                        "data:"
-                      )
-                  )
-                  .map(
-                    (line) =>
-                      line
-                        .slice(5)
-                        .trimStart()
-                  )
-                  .join("\n");
-
-              if (
-                data
-              ) {
-                const json =
-                  safeJsonParse(
-                    data
-                  );
-
-                if (
-                  json
-                ) {
-                  writeJsonSse(
-                    res,
-                    stripReasoning(
-                      json
-                    )
-                  );
-                } else {
-                  writeSse(
-                    res,
-                    data
-                  );
-                }
-              }
-            }
-
-            if (
-              !res.writableEnded
-            ) {
-              endSse(
-                res
-              );
-            }
-          }
-        );
-
-        upstream.data.on(
-          "error",
-          (streamError) => {
-            console.error(
-              "NIM stream error:",
-              streamError
-            );
-
-            if (
-              !res.writableEnded
-            ) {
-              res.end();
-            }
-          }
-        );
-
-        req.on(
-          "close",
-          () => {
-            if (
-              upstream.data &&
-              typeof
-                upstream.data.destroy ===
-                "function"
-            ) {
-              upstream.data.destroy();
-            }
-          }
-        );
-
-        return;
-      }
-
-      /*
-       * --------------------------------------------------------
-       * NON-STREAMING
-       * --------------------------------------------------------
-       */
-      const cleaned =
-        stripReasoning(
-          upstream.data
-        );
-
-      debugLog(
-        "NIM RESPONSE",
-        cleaned
-      );
-
-      return res
-        .status(
-          upstream.status
-        )
-        .json(
-          cleaned
-        );
-    } catch (error) {
-      const elapsedMs =
-        Date.now() -
-        startedAt;
-
-      console.error(
-        "Proxy request failed:",
-        error?.message ||
-          error
-      );
-
-      debugLog(
-        "NIM EXCEPTION",
-        {
-          message:
-            error?.message,
-          code:
-            error?.code,
-          status:
-            error?.response?.status,
-          response:
-            error?.response?.data
-        }
-      );
-
-      if (
-        res.headersSent
-      ) {
-        return res.end();
-      }
-
-      return res
-        .status(
-          Number(
-            error?.response?.status
-          ) || 502
-        )
-        .json(
-          makeErrorResponse(
-            error,
-            resolution,
-            elapsedMs
-          )
-        );
-    }
-  }
-);
-
-/* ============================================================
-   STREAM READER
-============================================================ */
-
-function readStreamToString(
+async function streamToBuffer(
   stream
 ) {
   return new Promise(
@@ -2850,9 +2793,7 @@ function readStreamToString(
             )
               ? chunk
               : Buffer.from(
-                  String(
-                    chunk
-                  )
+                  String(chunk)
                 )
           );
         }
@@ -2888,6 +2829,891 @@ function readStreamToString(
 }
 
 /* ============================================================
+   MODEL CACHE
+============================================================ */
+
+let modelCache = {
+  timestamp:
+    0,
+
+  data:
+    null
+};
+
+async function fetchRemoteModels() {
+  const now =
+    Date.now();
+
+  if (
+    modelCache.data &&
+    now -
+      modelCache.timestamp <
+      MODEL_CACHE_TTL_MS
+  ) {
+    return modelCache.data;
+  }
+
+  try {
+    const response =
+      await axios.get(
+        `${NIM_API_BASE}/models`,
+        {
+          headers:
+            buildHeaders(
+              false
+            ),
+
+          timeout:
+            30000,
+
+          httpAgent,
+          httpsAgent,
+
+          validateStatus:
+            () => true
+        }
+      );
+
+    if (
+      response.status >= 200 &&
+      response.status < 300 &&
+      isPlainObject(
+        response.data
+      )
+    ) {
+      modelCache = {
+        timestamp:
+          now,
+
+        data:
+          response.data
+      };
+
+      return response.data;
+    }
+  } catch {
+    /*
+     * Local models are used below.
+     */
+  }
+
+  return null;
+}
+
+function localModelList() {
+  const created =
+    Math.floor(
+      Date.now() / 1000
+    );
+
+  const result =
+    [];
+
+  for (
+    const [
+      id,
+      config
+    ] of Object.entries(
+      MODELS
+    )
+  ) {
+    result.push({
+      id,
+
+      object:
+        "model",
+
+      created,
+
+      owned_by:
+        config.provider,
+
+      name:
+        config.name
+    });
+  }
+
+  for (
+    const [
+      id,
+      profile
+    ] of Object.entries(
+      PROFILES
+    )
+  ) {
+    const config =
+      MODELS[
+        profile.baseModel
+      ];
+
+    result.push({
+      id,
+
+      object:
+        "model",
+
+      created,
+
+      owned_by:
+        config?.provider ||
+        "proxy",
+
+      name:
+        `${config?.name || profile.baseModel} - ${profile.label}`
+    });
+  }
+
+  return result;
+}
+
+/* ============================================================
+   CORS / BODY PARSER
+============================================================ */
+
+app.use(
+  cors({
+    origin:
+      true,
+
+    credentials:
+      true
+  })
+);
+
+app.use(
+  express.json({
+    limit:
+      process.env.JSON_BODY_LIMIT ||
+      "10mb"
+  })
+);
+
+/*
+ * IMPORTANT:
+ *
+ * There is deliberately NO middleware here that logs
+ * req.body.
+ *
+ * This is what prevents full Janitor conversations from being
+ * dumped into Render logs.
+ */
+
+/* ============================================================
+   ROOT
+============================================================ */
+
+app.get(
+  "/",
+  (req, res) => {
+    res.json({
+      name:
+        "NVIDIA NIM OpenAI-Compatible Proxy",
+
+      status:
+        "ok",
+
+      default_model:
+        DEFAULT_MODEL,
+
+      upstream:
+        NIM_API_BASE,
+
+      profile_count:
+        Object.keys(
+          PROFILES
+        ).length
+    });
+  }
+);
+
+/* ============================================================
+   HEALTH
+============================================================ */
+
+app.get(
+  "/health",
+  (req, res) => {
+    res.json({
+      status:
+        "ok",
+
+      upstream:
+        NIM_API_BASE,
+
+      default_model:
+        DEFAULT_MODEL,
+
+      api_key_configured:
+        Boolean(
+          NIM_API_KEY
+        )
+    });
+  }
+);
+
+/* ============================================================
+   MODELS
+============================================================ */
+
+app.get(
+  "/v1/models",
+  async (req, res) => {
+    const remote =
+      await fetchRemoteModels();
+
+    const local =
+      localModelList();
+
+    if (
+      isPlainObject(
+        remote
+      ) &&
+      Array.isArray(
+        remote.data
+      )
+    ) {
+      const ids =
+        new Set(
+          remote.data
+            .filter(
+              isPlainObject
+            )
+            .map(
+              (model) =>
+                model.id
+            )
+        );
+
+      const merged =
+        [
+          ...remote.data
+        ];
+
+      for (
+        const model of
+          local
+      ) {
+        if (
+          !ids.has(
+            model.id
+          )
+        ) {
+          merged.push(
+            model
+          );
+        }
+      }
+
+      return res.json({
+        object:
+          "list",
+
+        data:
+          merged
+      });
+    }
+
+    return res.json({
+      object:
+        "list",
+
+      data:
+        local
+    });
+  }
+);
+
+app.post(
+  "/v1/models/refresh",
+  async (req, res) => {
+    modelCache = {
+      timestamp:
+        0,
+
+      data:
+        null
+    };
+
+    const remote =
+      await fetchRemoteModels();
+
+    res.json({
+      object:
+        "list",
+
+      data:
+        remote?.data ||
+        localModelList()
+    });
+  }
+);
+
+/* ============================================================
+   CHAT COMPLETIONS
+============================================================ */
+
+app.post(
+  "/v1/chat/completions",
+  async (req, res) => {
+    const startedAt =
+      Date.now();
+
+    const body =
+      isPlainObject(
+        req.body
+      )
+        ? req.body
+        : {};
+
+    const requestedModel =
+      normalizeModel(
+        body.model ||
+          DEFAULT_MODEL
+      );
+
+    const resolution =
+      resolveModel(
+        requestedModel
+      );
+
+    if (
+      !resolution
+    ) {
+      return res
+        .status(400)
+        .json({
+          error: {
+            message:
+              `Unknown model: ${requestedModel}`,
+
+            type:
+              "invalid_request_error",
+
+            code:
+              "unknown_model"
+          }
+        });
+    }
+
+    const nimRequest =
+      buildNimRequest(
+        body,
+        resolution
+      );
+
+    const streaming =
+      Boolean(
+        nimRequest.stream
+      );
+
+    /*
+     * Safe debug logging ONLY.
+     *
+     * No conversation content.
+     */
+    debugLog(
+      "request",
+      requestMetadata(
+        body,
+        resolution
+      )
+    );
+
+    debugLog(
+      "upstream_request_metadata",
+      {
+        model:
+          nimRequest.model,
+
+        stream:
+          Boolean(
+            nimRequest.stream
+          ),
+
+        max_tokens:
+          nimRequest.max_tokens,
+
+        temperature:
+          nimRequest.temperature,
+
+        has_tools:
+          Array.isArray(
+            nimRequest.tools
+          ) &&
+          nimRequest.tools.length >
+            0,
+
+        chat_template_kwargs:
+          nimRequest.chat_template_kwargs ||
+          null,
+
+        thinking_token_budget:
+          nimRequest.thinking_token_budget ||
+          null,
+
+        reasoning_effort:
+          nimRequest.reasoning_effort ||
+          null
+      }
+    );
+
+    try {
+      /*
+       * Exactly ONE upstream request.
+       * No automatic retries.
+       */
+      const upstream =
+        await axios.post(
+          `${NIM_API_BASE}/chat/completions`,
+          nimRequest,
+          {
+            headers:
+              buildHeaders(
+                streaming
+              ),
+
+            timeout:
+              NIM_TIMEOUT_MS,
+
+            httpAgent,
+            httpsAgent,
+
+            responseType:
+              streaming
+                ? "stream"
+                : "json",
+
+            validateStatus:
+              () => true,
+
+            maxContentLength:
+              Infinity,
+
+            maxBodyLength:
+              Infinity
+          }
+        );
+
+      const elapsedMs =
+        Date.now() -
+        startedAt;
+
+      /* --------------------------------------------------------
+         UPSTREAM ERROR
+      -------------------------------------------------------- */
+
+      if (
+        upstream.status < 200 ||
+        upstream.status >= 300
+      ) {
+        let errorData =
+          upstream.data;
+
+        if (
+          errorData &&
+          typeof errorData.pipe ===
+            "function"
+        ) {
+          errorData =
+            await streamToBuffer(
+              errorData
+            );
+        }
+
+        const errorObject =
+          makeProxyError(
+            {
+              response: {
+                status:
+                  upstream.status,
+
+                data:
+                  errorData
+              }
+            },
+            resolution,
+            elapsedMs
+          );
+
+        /*
+         * Only log status/model metadata, never the upstream
+         * conversation/error body.
+         */
+        console.error(
+          `[proxy] NIM ${upstream.status} ` +
+            `${resolution.model} ` +
+            `profile=${resolution.profile?.label || "default"}`
+        );
+
+        if (
+          DEBUG_PROXY
+        ) {
+          debugLog(
+            "upstream_error",
+            {
+              status:
+                upstream.status,
+
+              model:
+                resolution.model,
+
+              profile:
+                resolution.profile?.label ||
+                null,
+
+              adapter:
+                resolution.config?.adapter ||
+                null,
+
+              upstream_message:
+                extractErrorBody(
+                  errorData
+                )?.error?.message ||
+                extractErrorBody(
+                  errorData
+                )?.message ||
+                null
+            }
+          );
+        }
+
+        return res
+          .status(
+            upstream.status
+          )
+          .json(
+            errorObject
+          );
+      }
+
+      /* --------------------------------------------------------
+         NON-STREAMING
+      -------------------------------------------------------- */
+
+      if (
+        !streaming
+      ) {
+        const cleaned =
+          STRIP_REASONING
+            ? cleanResponseObject(
+                upstream.data
+              )
+            : upstream.data;
+
+        /*
+         * Send the JSON object directly.
+         * Do NOT stringify it ourselves.
+         * Express handles the correct JSON response.
+         */
+        return res
+          .status(
+            upstream.status
+          )
+          .json(
+            cleaned
+          );
+      }
+
+      /* --------------------------------------------------------
+         STREAMING
+      -------------------------------------------------------- */
+
+      res.status(
+        upstream.status
+      );
+
+      /*
+       * These are the standard headers expected by OpenAI-style
+       * streaming clients.
+       */
+      res.setHeader(
+        "Content-Type",
+        "text/event-stream; charset=utf-8"
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "no-cache, no-transform"
+      );
+
+      res.setHeader(
+        "Connection",
+        "keep-alive"
+      );
+
+      /*
+       * Don't let intermediary compression/buffering interfere
+       * with token streaming.
+       */
+      res.setHeader(
+        "X-Accel-Buffering",
+        "no"
+      );
+
+      res.flushHeaders?.();
+
+      /*
+       * If reasoning stripping is disabled, the cleanest thing
+       * to do is relay the upstream SSE stream directly.
+       *
+       * This avoids altering the provider's formatting at all.
+       */
+      if (
+        !STRIP_REASONING
+      ) {
+        upstream.data.on(
+          "data",
+          (chunk) => {
+            if (
+              !res.writableEnded
+            ) {
+              res.write(
+                chunk
+              );
+            }
+          }
+        );
+
+        upstream.data.on(
+          "end",
+          () => {
+            if (
+              !res.writableEnded
+            ) {
+              res.end();
+            }
+          }
+        );
+
+        upstream.data.on(
+          "error",
+          () => {
+            if (
+              !res.writableEnded
+            ) {
+              res.end();
+            }
+          }
+        );
+
+        req.on(
+          "close",
+          () => {
+            if (
+              !res.writableEnded &&
+              upstream.data &&
+              typeof
+                upstream.data.destroy ===
+                "function"
+            ) {
+              upstream.data.destroy();
+            }
+          }
+        );
+
+        return;
+      }
+
+      /*
+       * Stateful reasoning filter.
+       */
+      const thinkingFilter =
+        new ThinkingStreamFilter();
+
+      /*
+       * Proper SSE parser.
+       *
+       * We do NOT treat arbitrary chunks as complete events.
+       */
+      const parser =
+        new SSEParser(
+          (event) => {
+            if (
+              res.writableEnded
+            ) {
+              return;
+            }
+
+            /*
+             * OpenAI/NIM uses:
+             *
+             * data: [DONE]
+             *
+             * at the end.
+             */
+            if (
+              event.data ===
+              "[DONE]"
+            ) {
+              /*
+               * Flush anything that is still pending.
+               */
+              thinkingFilter.flush();
+
+              writeSSEEvent(
+                res,
+                {
+                  event:
+                    event.event,
+
+                  id:
+                    event.id,
+
+                  data:
+                    "[DONE]"
+                }
+              );
+
+              return;
+            }
+
+            const parsed =
+              safeJsonParse(
+                event.data
+              );
+
+            /*
+             * If this isn't JSON, preserve it rather than
+             * inventing a new format.
+             */
+            if (
+              !parsed
+            ) {
+              writeSSEEvent(
+                res,
+                event
+              );
+
+              return;
+            }
+
+            const cleaned =
+              cleanSSEJson(
+                parsed,
+                thinkingFilter
+              );
+
+            writeSSEEvent(
+              res,
+              {
+                event:
+                  event.event,
+
+                id:
+                  event.id,
+
+                data:
+                  JSON.stringify(
+                    cleaned
+                  )
+              }
+            );
+          }
+        );
+
+      upstream.data.on(
+        "data",
+        (chunk) => {
+          if (
+            !res.writableEnded
+          ) {
+            parser.push(
+              chunk.toString(
+                "utf8"
+              )
+            );
+          }
+        }
+      );
+
+      upstream.data.on(
+        "end",
+        () => {
+          if (
+            res.writableEnded
+          ) {
+            return;
+          }
+
+          parser.end();
+
+          /*
+           * If NIM ended without sending [DONE], don't fabricate
+           * another JSON event. Just close the SSE stream cleanly.
+           */
+          thinkingFilter.flush();
+
+          res.end();
+        }
+      );
+
+      upstream.data.on(
+        "error",
+        (streamError) => {
+          console.error(
+            `[proxy] upstream stream error for ${resolution.model}: ` +
+              `${streamError?.message || "unknown error"}`
+          );
+
+          if (
+            !res.writableEnded
+          ) {
+            res.end();
+          }
+        }
+      );
+
+      /*
+       * If Janitor disconnects, stop reading from NVIDIA.
+       */
+      req.on(
+        "close",
+        () => {
+          if (
+            upstream.data &&
+            typeof
+              upstream.data.destroy ===
+              "function"
+          ) {
+            upstream.data.destroy();
+          }
+        }
+      );
+    } catch (error) {
+      const elapsedMs =
+        Date.now() -
+        startedAt;
+
+      console.error(
+        `[proxy] request failed for ` +
+          `${resolution.model}: ` +
+          `${error?.message || "unknown error"}`
+      );
+
+      if (
+        res.headersSent
+      ) {
+        return res.end();
+      }
+
+      return res
+        .status(
+          Number(
+            error?.response?.status
+          ) || 502
+        )
+        .json(
+          makeProxyError(
+            error,
+            resolution,
+            elapsedMs
+          )
+        );
+    }
+  }
+);
+
+/* ============================================================
    404
 ============================================================ */
 
@@ -2899,6 +3725,7 @@ app.use(
       error: {
         message:
           "Not found",
+
         type:
           "not_found"
       }
@@ -2918,8 +3745,8 @@ app.use(
     next
   ) => {
     console.error(
-      "Unhandled Express error:",
-      error
+      `[proxy] unhandled error: ` +
+        `${error?.message || "unknown error"}`
     );
 
     if (
@@ -2946,7 +3773,7 @@ app.use(
 );
 
 /* ============================================================
-   SERVER
+   START SERVER
 ============================================================ */
 
 const server =
@@ -2955,98 +3782,35 @@ const server =
     "0.0.0.0",
     () => {
       console.log(
-        "============================================================"
+        `[proxy] listening on port ${PORT}`
       );
 
       console.log(
-        " NVIDIA NIM OpenAI-Compatible Proxy"
+        `[proxy] upstream=${NIM_API_BASE}`
       );
 
       console.log(
-        "============================================================"
+        `[proxy] default_model=${DEFAULT_MODEL}`
       );
 
       console.log(
-        `Port:          ${PORT}`
+        `[proxy] api_key_configured=${Boolean(
+          NIM_API_KEY
+        )}`
       );
 
       console.log(
-        `NIM endpoint:  ${NIM_API_BASE}`
+        `[proxy] debug=${DEBUG_PROXY}`
       );
 
       console.log(
-        `Default model: ${DEFAULT_MODEL}`
+        `[proxy] reasoning_stripping=${STRIP_REASONING}`
       );
 
       console.log(
-        `Debug:         ${DEBUG_PROXY}`
-      );
-
-      console.log(
-        `API key set:   ${Boolean(NIM_API_KEY)}`
-      );
-
-      console.log(
-        ""
-      );
-
-      console.log(
-        "Available profiles:"
-      );
-
-      for (
-        const id of
-          Object.keys(
-            PROFILES
-          )
-      ) {
-        console.log(
-          `  - ${id}`
-        );
-      }
-
-      console.log(
-        ""
-      );
-
-      console.log(
-        "Nemotron reasoning profiles:"
-      );
-
-      console.log(
-        "  - nvidia/nemotron-3-ultra-550b-a55b-no"
-      );
-
-      console.log(
-        "      enable_thinking=false"
-      );
-
-      console.log(
-        "  - nvidia/nemotron-3-ultra-550b-a55b-fast"
-      );
-
-      console.log(
-        "      enable_thinking=false"
-      );
-
-      console.log(
-        "  - nvidia/nemotron-3-ultra-550b-a55b-balanced"
-      );
-
-      console.log(
-        "      enable_thinking=true, medium_effort=true"
-      );
-
-      console.log(
-        "  - nvidia/nemotron-3-ultra-550b-a55b-deep"
-      );
-
-      console.log(
-        "      enable_thinking=true, thinking_token_budget=32768"
-      );
-
-      console.log(
-        "============================================================"
+        `[proxy] profiles=${Object.keys(
+          PROFILES
+        ).length}`
       );
     }
   );
@@ -3059,7 +3823,7 @@ function shutdown(
   signal
 ) {
   console.log(
-    `Received ${signal}; shutting down...`
+    `[proxy] received ${signal}; shutting down`
   );
 
   server.close(
