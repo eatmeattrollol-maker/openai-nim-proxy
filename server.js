@@ -426,9 +426,9 @@ const MODELS = {
       "nemotron"
   },
 
-  "deepseek-ai/deepseek-v4-flash-0731": {
+  "deepseek-ai/deepseek-v4.1-flash": {
     name:
-      "DeepSeek V4 Flash 0731",
+      "DeepSeek V4.1 Flash",
 
     provider:
       "DeepSeek AI",
@@ -1624,7 +1624,7 @@ function buildNimRequest(
 
   if (
     model ===
-    "deepseek-ai/deepseek-v4-flash-0731"
+    "deepseek-ai/deepseek-v4.1-flash"
   ) {
     const effort =
       requestedEffort(
