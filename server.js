@@ -8,7 +8,6 @@ const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
 
-// Create the Express app before declaring any routes or middleware.
 const app = express();
 app.disable("x-powered-by");
 
@@ -24,24 +23,17 @@ const NIM_API_KEY =
   process.env.NVIDIA_API_KEY ||
   "";
 
-const PROXY_API_KEY = String(
-  process.env.PROXY_API_KEY || ""
-);
+const PROXY_API_KEY = String(process.env.PROXY_API_KEY || "");
 
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
   "nvidia/nemotron-3-ultra-550b-a55b";
 
-const DEBUG_PROXY = parseBoolean(
-  process.env.DEBUG_PROXY,
-  false
-);
-
+const DEBUG_PROXY = parseBoolean(process.env.DEBUG_PROXY, false);
 const ALLOW_UNKNOWN_MODELS = parseBoolean(
   process.env.ALLOW_UNKNOWN_MODELS,
   true
 );
-
 const STRIP_REASONING = parseBoolean(
   process.env.STRIP_REASONING_FROM_RESPONSE,
   true
@@ -51,36 +43,21 @@ const NIM_TIMEOUT_MS = positiveNumber(
   process.env.NIM_TIMEOUT_MS,
   900000
 );
-
 const MODEL_CACHE_TTL_MS = positiveNumber(
   process.env.MODEL_CACHE_TTL_MS,
   300000
 );
-
 const DEFAULT_MAX_TOKENS = positiveNumber(
   process.env.DEFAULT_MAX_TOKENS,
   16384
 );
-
-const DEFAULT_TEMPERATURE = numberOrDefault(
-  process.env.DEFAULT_TEMPERATURE,
-  1.0
-);
-
-const DEFAULT_TOP_P = numberOrDefault(
-  process.env.DEFAULT_TOP_P,
-  0.95
-);
-
 const DEFAULT_REASONING_EFFORT = String(
   process.env.DEFAULT_REASONING_EFFORT || "high"
 ).trim().toLowerCase();
-
 const DEFAULT_REASONING_BUDGET = positiveNumber(
   process.env.DEFAULT_REASONING_BUDGET,
   16384
 );
-
 const DEFAULT_NEMOTRON_THINKING = parseBoolean(
   process.env.NEMOTRON_ENABLE_THINKING,
   true
@@ -99,85 +76,53 @@ const httpsAgent = new https.Agent({
 });
 
 /* ============================================================
-   BASIC HELPERS
+   HELPERS
 ============================================================ */
 
 function parseBoolean(value, fallback) {
-  if (value === undefined || value === null) {
-    return fallback;
-  }
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
 
-  if (typeof value === "boolean") {
-    return value;
-  }
+  const normalized = String(value).trim().toLowerCase();
 
-  if (typeof value === "number") {
-    return value !== 0;
-  }
-
-  const normalized = String(value)
-    .trim()
-    .toLowerCase();
-
-  if (["true", "1", "yes", "on"].includes(normalized)) {
-    return true;
-  }
-
-  if (["false", "0", "no", "off"].includes(normalized)) {
-    return false;
-  }
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
 
   return fallback;
 }
 
 function isObject(value) {
-  return (
-    value !== null &&
+  return value !== null &&
     typeof value === "object" &&
-    !Array.isArray(value)
-  );
+    !Array.isArray(value);
 }
 
 function isFiniteNumber(value) {
-  if (typeof value === "number") {
-    return Number.isFinite(value);
-  }
+  if (typeof value === "number") return Number.isFinite(value);
 
-  return (
-    typeof value === "string" &&
+  return typeof value === "string" &&
     value.trim() !== "" &&
-    Number.isFinite(Number(value))
-  );
+    Number.isFinite(Number(value));
 }
 
 function numberOrDefault(value, fallback) {
-  return isFiniteNumber(value)
-    ? Number(value)
-    : fallback;
+  return isFiniteNumber(value) ? Number(value) : fallback;
 }
 
 function positiveNumber(value, fallback) {
   const number = Number(value);
-
-  return (
-    Number.isFinite(number) &&
-    number > 0
-  )
+  return Number.isFinite(number) && number > 0
     ? number
     : fallback;
 }
 
 function clamp(value, minimum, maximum) {
-  return Math.min(
-    maximum,
-    Math.max(minimum, value)
-  );
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 function normalizeModel(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase();
+  return String(value || "").trim().toLowerCase();
 }
 
 function safeJsonParse(value) {
@@ -191,9 +136,9 @@ function safeJsonParse(value) {
 /* ============================================================
    MODEL CONFIGURATION
 
-   These entries are local proxy configuration, not a guarantee
-   that every NVIDIA Free Endpoint remains available indefinitely.
-   Check NVIDIA's current catalog if an upstream model returns 404.
+   This configuration records the models configured in the
+   proxy. It does not guarantee continued NVIDIA endpoint
+   availability or free-tier access.
 ============================================================ */
 
 const MODELS = {
@@ -203,11 +148,12 @@ const MODELS = {
     endpointStatus: "free-endpoint",
     maxOutputTokens: 16384,
     contextTokens: 1048576,
-    adapter: "nemotron"
+    adapter: "nemotron",
+    reasoningType: "thinking-toggle"
   },
 
   "nvidia/nemotron-3-super-120b-a12b": {
-    name: "NVIDIA Nemotron 3 Super 120B - verify availability",
+    name: "NVIDIA Nemotron 3 Super 120B - availability unverified",
     provider: "NVIDIA",
     endpointStatus: "unverified-legacy",
     maxOutputTokens: 16384,
@@ -220,8 +166,9 @@ const MODELS = {
     provider: "NVIDIA",
     endpointStatus: "free-endpoint",
     maxOutputTokens: 16384,
-    contextTokens: 262144,
-    adapter: "generic"
+    contextTokens: 1048576,
+    adapter: "nemotron-vl",
+    reasoningType: "thinking-toggle"
   },
 
   "nvidia/nemotron-3.5-bolt-e4b": {
@@ -241,14 +188,14 @@ const MODELS = {
   },
 
   "z-ai/glm-5.3": {
-    name: "GLM 5.3 - check deprecation status",
+    name: "GLM 5.3",
     provider: "Z.ai",
     endpointStatus: "deprecation-announced",
-    reasoningLevels: ["none", "low", "high", "max"],
+    reasoningLevels: ["low", "high", "max"],
     defaultReasoningEffort: "high",
     maxOutputTokens: 32768,
     contextTokens: 1048576,
-    adapter: "glm53"
+    adapter: "glm"
   },
 
   "z-ai/glm-5.3-flash": {
@@ -259,7 +206,7 @@ const MODELS = {
     defaultReasoningEffort: "max",
     maxOutputTokens: 32768,
     contextTokens: 1048576,
-    adapter: "glm53-flash"
+    adapter: "glm-flash"
   },
 
   "deepseek-ai/deepseek-v4.1-flash": {
@@ -285,8 +232,10 @@ const MODELS = {
     provider: "MiniMax AI",
     endpointStatus: "free-endpoint",
     maxOutputTokens: 16384,
-    contextTokens: 262144,
-    adapter: "generic"
+    contextTokens: 1048576,
+    reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+    defaultReasoningEffort: "high",
+    adapter: "minimax"
   },
 
   "poolside/laguna-xs-2.1": {
@@ -294,7 +243,7 @@ const MODELS = {
     provider: "Poolside",
     endpointStatus: "free-endpoint",
     maxOutputTokens: 8192,
-    contextTokens: 131072,
+    contextTokens: 262144,
     adapter: "generic"
   },
 
@@ -322,93 +271,85 @@ const MODELS = {
     endpointStatus: "free-endpoint",
     maxOutputTokens: 8192,
     contextTokens: 131072,
-    adapter: "generic"
+    reasoningLevels: ["low", "medium", "high", "xhigh"],
+    defaultReasoningEffort: "high",
+    adapter: "muse-glimmer"
   }
 };
 
 /* ============================================================
-   MODEL PROFILES
+   PROFILE GENERATION
 
-   JanitorAI can select these profile IDs as if they were models.
-   The proxy maps each profile to its actual NVIDIA model.
+   Each profile maps a selectable JanitorAI model ID to its
+   actual upstream model and documented reasoning control.
+
+   Profiles intentionally do not set temperature or top_p.
+   JanitorAI's values are passed through unchanged.
 ============================================================ */
 
-const PROFILES = {
-  "z-ai/glm-5.3-no": {
-    baseModel: "z-ai/glm-5.3",
-    label: "No Thinking",
-    reasoningEffort: "none"
-  },
+const PROFILES = {};
 
-  "z-ai/glm-5.3-fast": {
-    baseModel: "z-ai/glm-5.3",
-    label: "Fast",
-    reasoningEffort: "low"
-  },
+function addEffortProfiles(modelId, levels) {
+  const config = MODELS[modelId];
 
-  "z-ai/glm-5.3-balanced": {
-    baseModel: "z-ai/glm-5.3",
-    label: "Balanced",
-    reasoningEffort: "high"
-  },
-
-  "z-ai/glm-5.3-deep": {
-    baseModel: "z-ai/glm-5.3",
-    label: "Deep",
-    reasoningEffort: "max"
-  },
-
-  "z-ai/glm-5.3-flash-minimum": {
-    baseModel: "z-ai/glm-5.3-flash",
-    label: "Minimum Reasoning",
-    reasoningEffort: "low"
-  },
-
-  "z-ai/glm-5.3-flash-fast": {
-    baseModel: "z-ai/glm-5.3-flash",
-    label: "Fast",
-    reasoningEffort: "low"
-  },
-
-  "z-ai/glm-5.3-flash-balanced": {
-    baseModel: "z-ai/glm-5.3-flash",
-    label: "Balanced",
-    reasoningEffort: "high"
-  },
-
-  "z-ai/glm-5.3-flash-deep": {
-    baseModel: "z-ai/glm-5.3-flash",
-    label: "Deep",
-    reasoningEffort: "max"
-  },
-
-  "nvidia/nemotron-3-ultra-550b-a55b-no": {
-    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "No Thinking",
-    thinking: false
-  },
-
-  "nvidia/nemotron-3-ultra-550b-a55b-fast": {
-    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "Fast",
-    thinking: false
-  },
-
-  "nvidia/nemotron-3-ultra-550b-a55b-balanced": {
-    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "Balanced",
-    thinking: true,
-    mediumEffort: true
-  },
-
-  "nvidia/nemotron-3-ultra-550b-a55b-deep": {
-    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
-    label: "Deep",
-    thinking: true,
-    mediumEffort: false,
-    thinkingTokenBudget: 32768
+  for (const level of levels) {
+    PROFILES[`${modelId}-${level}`] = {
+      baseModel: modelId,
+      label: `Reasoning: ${level}`,
+      reasoningEffort: level
+    };
   }
-};
+}
+
+function addThinkingProfiles(modelId, options = {}) {
+  PROFILES[`${modelId}-no-thinking`] = {
+    baseModel: modelId,
+    label: "Thinking Off",
+    thinking: false
+  };
+
+  PROFILES[`${modelId}-thinking`] = {
+    baseModel: modelId,
+    label: "Thinking On",
+    thinking: true
+  };
+
+  if (options.mediumEffort) {
+    PROFILES[`${modelId}-medium-thinking`] = {
+      baseModel: modelId,
+      label: "Thinking On - Medium Effort",
+      thinking: true,
+      mediumEffort: true
+    };
+  }
+
+  if (options.deepBudget) {
+    PROFILES[`${modelId}-deep-thinking`] = {
+      baseModel: modelId,
+      label: "Thinking On - Larger Budget",
+      thinking: true,
+      thinkingTokenBudget: options.deepBudget
+    };
+  }
+}
+
+for (const [modelId, config] of Object.entries(MODELS)) {
+  if (Array.isArray(config.reasoningLevels)) {
+    addEffortProfiles(modelId, config.reasoningLevels);
+  }
+}
+
+addThinkingProfiles(
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  {
+    mediumEffort: true,
+    deepBudget: 32768
+  }
+);
+
+addThinkingProfiles(
+  "nvidia/nemotron-3.5-super-vl-120b-a12b"
+);
 
 /* ============================================================
    MODEL RESOLUTION
@@ -451,38 +392,39 @@ function resolveModel(requestedModel) {
 function normalizeEffort(value, config) {
   const levels = Array.isArray(config?.reasoningLevels)
     ? config.reasoningLevels
-    : ["none", "low", "medium", "high", "max"];
+    : [];
 
-  const effort = String(value || "")
-    .trim()
-    .toLowerCase();
+  const effort = String(value || "").trim().toLowerCase();
 
-  if (levels.includes(effort)) {
-    return effort;
-  }
+  if (levels.includes(effort)) return effort;
 
-  if (["off", "disabled", "false", "none"].includes(effort)) {
-    return levels.includes("none") ? "none" : levels[0];
-  }
-
-  if (["fast", "minimal"].includes(effort)) {
-    return levels.includes("low") ? "low" : levels[0];
+  if (["fast", "minimal", "minimum"].includes(effort)) {
+    if (levels.includes("low")) return "low";
+    return levels[0] || DEFAULT_REASONING_EFFORT;
   }
 
   if (["balanced", "medium"].includes(effort)) {
     if (levels.includes("medium")) return "medium";
     if (levels.includes("high")) return "high";
-    return levels[0];
+    return levels[0] || DEFAULT_REASONING_EFFORT;
   }
 
-  if (effort === "deep") {
+  if (["deep", "maximum"].includes(effort)) {
     if (levels.includes("max")) return "max";
+    if (levels.includes("xhigh")) return "xhigh";
     if (levels.includes("high")) return "high";
-    return levels[0];
+    return levels[levels.length - 1] || DEFAULT_REASONING_EFFORT;
   }
 
-  return config?.defaultReasoningEffort ||
-    DEFAULT_REASONING_EFFORT;
+  if (levels.includes(config?.defaultReasoningEffort)) {
+    return config.defaultReasoningEffort;
+  }
+
+  if (levels.includes(DEFAULT_REASONING_EFFORT)) {
+    return DEFAULT_REASONING_EFFORT;
+  }
+
+  return levels[0] || DEFAULT_REASONING_EFFORT;
 }
 
 function requestedEffort(body, resolution) {
@@ -494,49 +436,42 @@ function requestedEffort(body, resolution) {
   }
 
   if (body.reasoning_effort !== undefined) {
-    return normalizeEffort(
-      body.reasoning_effort,
-      resolution.config
-    );
+    return normalizeEffort(body.reasoning_effort, resolution.config);
   }
 
   if (body.reasoning_mode !== undefined) {
-    return normalizeEffort(
-      body.reasoning_mode,
-      resolution.config
-    );
+    return normalizeEffort(body.reasoning_mode, resolution.config);
   }
 
   if (body.reasoning_budget !== undefined) {
     const budget = Number(body.reasoning_budget);
 
-    if (!Number.isFinite(budget)) {
+    if (Number.isFinite(budget)) {
+      if (budget <= 4096) {
+        return normalizeEffort("low", resolution.config);
+      }
+
+      if (budget <= 16384) {
+        return normalizeEffort("high", resolution.config);
+      }
+
       return normalizeEffort("max", resolution.config);
     }
-
-    if (budget <= 0) {
-      return normalizeEffort("none", resolution.config);
-    }
-
-    if (budget <= 4096) {
-      return normalizeEffort("low", resolution.config);
-    }
-
-    if (budget <= 16384) {
-      return normalizeEffort("high", resolution.config);
-    }
-
-    return normalizeEffort("max", resolution.config);
   }
 
   return normalizeEffort(
-    DEFAULT_REASONING_EFFORT,
+    resolution.config?.defaultReasoningEffort ||
+      DEFAULT_REASONING_EFFORT,
     resolution.config
   );
 }
 
 /* ============================================================
    REQUEST CONSTRUCTION
+
+   Sampling controls are never invented by this proxy.
+   If JanitorAI sends temperature/top_p, they are forwarded.
+   If it omits them, they remain omitted.
 ============================================================ */
 
 function buildBaseRequest(body, resolution) {
@@ -554,29 +489,26 @@ function buildBaseRequest(body, resolution) {
 
   const request = {
     model: resolution.model,
-
     messages: Array.isArray(body.messages)
       ? body.messages.map(message =>
           isObject(message) ? { ...message } : message
         )
       : [],
-
     max_tokens: maxTokens,
-
-    temperature: clamp(
-      numberOrDefault(body.temperature, DEFAULT_TEMPERATURE),
-      0,
-      2
-    ),
-
     stream: Boolean(body.stream)
   };
 
-  // Do not silently override model sampling defaults when top_p
-  // was not provided by the client.
+  if (body.temperature !== undefined) {
+    request.temperature = clamp(
+      numberOrDefault(body.temperature, 1),
+      0,
+      2
+    );
+  }
+
   if (body.top_p !== undefined) {
     request.top_p = clamp(
-      numberOrDefault(body.top_p, DEFAULT_TOP_P),
+      numberOrDefault(body.top_p, 0.95),
       0,
       1
     );
@@ -601,7 +533,13 @@ function buildBaseRequest(body, resolution) {
     "stream_options",
     "service_tier",
     "modalities",
-    "audio"
+    "audio",
+    "reasoning_effort",
+    "reasoning_budget",
+    "reasoning_mode",
+    "thinking_token_budget",
+    "enable_thinking",
+    "nvext"
   ];
 
   for (const key of passthrough) {
@@ -620,32 +558,25 @@ function buildBaseRequest(body, resolution) {
     Object.assign(request, body.extra_body);
   }
 
-  // The resolved model must remain authoritative.
+  // The selected model must always win over passthrough fields.
   request.model = resolution.model;
 
   return request;
 }
 
 /* ============================================================
-   MODEL-SPECIFIC ADAPTERS
+   MODEL-SPECIFIC REQUEST ADAPTERS
 ============================================================ */
 
 function buildNimRequest(body, resolution) {
   const request = buildBaseRequest(body, resolution);
   const model = resolution.model;
   const profile = resolution.profile;
+  const adapter = resolution.config?.adapter || "generic";
 
   // GLM 5.3 and GLM 5.3 Flash.
-  if (
-    model === "z-ai/glm-5.3" ||
-    model === "z-ai/glm-5.3-flash"
-  ) {
-    let effort = requestedEffort(body, resolution);
-
-    // GLM 5.3 Flash does not expose a true no-reasoning profile.
-    if (model === "z-ai/glm-5.3-flash" && effort === "none") {
-      effort = "low";
-    }
+  if (adapter === "glm" || adapter === "glm-flash") {
+    const effort = requestedEffort(body, resolution);
 
     request.reasoning_effort = effort;
 
@@ -663,8 +594,45 @@ function buildNimRequest(body, resolution) {
     return request;
   }
 
+  // MiniMax M3.1 Flash:
+  // NVIDIA documents reasoning_effort inside chat_template_kwargs.
+  if (adapter === "minimax") {
+    const effort = requestedEffort(body, resolution);
+
+    request.chat_template_kwargs = {
+      ...(request.chat_template_kwargs || {}),
+      reasoning_effort: effort
+    };
+
+    // Avoid sending the same control in a second, conflicting form.
+    delete request.reasoning_effort;
+    delete request.reasoning_mode;
+    delete request.reasoning_budget;
+    delete request.enable_thinking;
+    delete request.thinking_token_budget;
+    delete request.nvext;
+
+    return request;
+  }
+
+  // Muse Glimmer:
+  // NVIDIA documents low/medium/high/xhigh reasoning strengths.
+  if (adapter === "muse-glimmer") {
+    const effort = requestedEffort(body, resolution);
+
+    request.reasoning_effort = effort;
+
+    delete request.reasoning_mode;
+    delete request.reasoning_budget;
+    delete request.enable_thinking;
+    delete request.thinking_token_budget;
+    delete request.nvext;
+
+    return request;
+  }
+
   // NVIDIA Nemotron 3 Ultra.
-  if (model === "nvidia/nemotron-3-ultra-550b-a55b") {
+  if (adapter === "nemotron") {
     let thinking = profile?.thinking;
 
     if (
@@ -739,10 +707,43 @@ function buildNimRequest(body, resolution) {
     delete request.reasoning_mode;
     delete request.enable_thinking;
     delete request.nvext;
+
+    return request;
   }
 
-  // Other models receive the standard OpenAI-compatible request.
-  // Avoid guessing vendor-specific reasoning parameters.
+  // Nemotron 3.5 Super VL:
+  // NVIDIA documents configurable thinking via chat_template_kwargs.
+  if (adapter === "nemotron-vl") {
+    let thinking = profile?.thinking;
+
+    if (
+      thinking === undefined &&
+      body.enable_thinking !== undefined
+    ) {
+      thinking = parseBoolean(body.enable_thinking, true);
+    }
+
+    if (
+      thinking === undefined &&
+      typeof body.chat_template_kwargs?.enable_thinking === "boolean"
+    ) {
+      thinking = body.chat_template_kwargs.enable_thinking;
+    }
+
+    if (thinking !== undefined) {
+      request.chat_template_kwargs = {
+        ...(request.chat_template_kwargs || {}),
+        enable_thinking: Boolean(thinking)
+      };
+    }
+
+    delete request.enable_thinking;
+
+    return request;
+  }
+
+  // Other models receive standard OpenAI-compatible parameters.
+  // Their vendor-specific reasoning controls are not guessed here.
   return request;
 }
 
@@ -753,9 +754,7 @@ function buildNimRequest(body, resolution) {
 function buildHeaders(streaming) {
   const headers = {
     "Content-Type": "application/json",
-    Accept: streaming
-      ? "text/event-stream"
-      : "application/json"
+    Accept: streaming ? "text/event-stream" : "application/json"
   };
 
   if (NIM_API_KEY) {
@@ -768,21 +767,10 @@ function buildHeaders(streaming) {
 function debugLog(label, data) {
   if (!DEBUG_PROXY) return;
 
-  // Do not log prompts, conversation history, or generated text.
-  console.log(
-    `[proxy:debug] ${label} ${JSON.stringify(data)}`
-  );
+  // Never log prompts, generated text, authorization headers or keys.
+  console.log(`[proxy:debug] ${label} ${JSON.stringify(data)}`);
 }
 
-/*
- * Diagnostic timing logger.
- *
- * Every elapsed_ms value is measured from the moment the proxy
- * receives the chat-completion request.
- *
- * These logs intentionally exclude prompt text, generated text,
- * authorization headers, and API keys.
- */
 function timingLog(stage, startedAt, metadata = {}) {
   debugLog("ttft", {
     stage,
@@ -801,16 +789,11 @@ function stripThinkTags(text) {
       /<think(?:ing)?\b[^>]*>[\s\S]*?<\/(?:think|thinking)>/gi,
       ""
     )
-    .replace(
-      /<\/?(?:think|thinking)\b[^>]*>/gi,
-      ""
-    );
+    .replace(/<\/?(?:think|thinking)\b[^>]*>/gi, "");
 }
 
 function stripReasoningObject(data) {
-  if (!data || typeof data !== "object") {
-    return data;
-  }
+  if (!data || typeof data !== "object") return data;
 
   if (Array.isArray(data)) {
     return data.map(stripReasoningObject);
@@ -843,26 +826,17 @@ function extractErrorBody(data) {
   }
 
   if (typeof data === "string") {
-    return safeJsonParse(data) || {
-      message: data.slice(0, 4000)
-    };
+    return safeJsonParse(data) || { message: data.slice(0, 4000) };
   }
 
-  if (isObject(data)) {
-    return data;
-  }
+  if (isObject(data)) return data;
 
-  return {
-    message: String(data || "Upstream error")
-  };
+  return { message: String(data || "Upstream error") };
 }
 
 function makeProxyError(error, resolution, elapsedMs) {
   const status = Number(error?.response?.status) || 502;
-
-  const upstream = extractErrorBody(
-    error?.response?.data
-  );
+  const upstream = extractErrorBody(error?.response?.data);
 
   const message =
     upstream?.error?.message ||
@@ -928,16 +902,13 @@ async function fetchRemoteModels() {
   }
 
   try {
-    const response = await axios.get(
-      `${NIM_API_BASE}/models`,
-      {
-        headers: buildHeaders(false),
-        timeout: 30000,
-        httpAgent,
-        httpsAgent,
-        validateStatus: () => true
-      }
-    );
+    const response = await axios.get(`${NIM_API_BASE}/models`, {
+      headers: buildHeaders(false),
+      timeout: 30000,
+      httpAgent,
+      httpsAgent,
+      validateStatus: () => true
+    });
 
     if (
       response.status >= 200 &&
@@ -962,23 +933,13 @@ async function fetchRemoteModels() {
 
 /* ============================================================
    OPTIONAL PROXY AUTHENTICATION
-
-   If PROXY_API_KEY is configured on Render, requests to /v1
-   must include Authorization: Bearer YOUR_PROXY_API_KEY.
 ============================================================ */
 
 function proxyAuth(req, res, next) {
-  if (!PROXY_API_KEY) {
-    return next();
-  }
+  if (!PROXY_API_KEY) return next();
 
-  const authorization = String(
-    req.get("authorization") || ""
-  );
-
-  const match = authorization.match(
-    /^Bearer\s+(.+)$/i
-  );
+  const authorization = String(req.get("authorization") || "");
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
 
   if (!match) {
     return res.status(401).json({
@@ -1008,12 +969,11 @@ function proxyAuth(req, res, next) {
 }
 
 /* ============================================================
-   SERVER-SENT EVENTS HELPERS
+   SERVER-SENT EVENTS
 ============================================================ */
 
 function writeSSEEvent(res, eventText) {
   const lines = eventText.split(/\r?\n/);
-
   const dataLines = [];
   let eventName = null;
   let eventId = null;
@@ -1028,13 +988,8 @@ function writeSSEEvent(res, eventText) {
     }
   }
 
-  if (eventName) {
-    res.write(`event: ${eventName}\n`);
-  }
-
-  if (eventId) {
-    res.write(`id: ${eventId}\n`);
-  }
+  if (eventName) res.write(`event: ${eventName}\n`);
+  if (eventId) res.write(`id: ${eventId}\n`);
 
   if (dataLines.length === 0) {
     res.write("\n");
@@ -1051,10 +1006,7 @@ function writeSSEEvent(res, eventText) {
   const parsed = safeJsonParse(raw);
 
   if (!parsed) {
-    for (const line of dataLines) {
-      res.write(`data: ${line}\n`);
-    }
-
+    for (const line of dataLines) res.write(`data: ${line}\n`);
     res.write("\n");
     return;
   }
@@ -1078,21 +1030,14 @@ function createSSEParser(onEvent) {
       while ((match = /\r?\n\r?\n/.exec(buffer)) !== null) {
         const event = buffer.slice(0, match.index);
 
-        buffer = buffer.slice(
-          match.index + match[0].length
-        );
+        buffer = buffer.slice(match.index + match[0].length);
 
-        if (event.trim()) {
-          onEvent(event);
-        }
+        if (event.trim()) onEvent(event);
       }
     },
 
     end() {
-      if (buffer.trim()) {
-        onEvent(buffer);
-      }
-
+      if (buffer.trim()) onEvent(buffer);
       buffer = "";
     }
   };
@@ -1147,19 +1092,15 @@ app.get("/v1/models", async (req, res) => {
 
   if (Array.isArray(remote?.data)) {
     const seen = new Set(
-      remote.data
-        .filter(isObject)
-        .map(model => model.id)
+      remote.data.filter(isObject).map(model => model.id)
     );
-
-    const merged = [
-      ...remote.data,
-      ...local.filter(model => !seen.has(model.id))
-    ];
 
     return res.json({
       object: "list",
-      data: merged
+      data: [
+        ...remote.data,
+        ...local.filter(model => !seen.has(model.id))
+      ]
     });
   }
 
@@ -1176,12 +1117,25 @@ app.post("/v1/models/refresh", async (req, res) => {
   };
 
   const remote = await fetchRemoteModels();
+  const local = localModelList();
+
+  if (Array.isArray(remote?.data)) {
+    const seen = new Set(
+      remote.data.filter(isObject).map(model => model.id)
+    );
+
+    return res.json({
+      object: "list",
+      data: [
+        ...remote.data,
+        ...local.filter(model => !seen.has(model.id))
+      ]
+    });
+  }
 
   return res.json({
     object: "list",
-    data: Array.isArray(remote?.data)
-      ? remote.data
-      : localModelList()
+    data: local
   });
 });
 
@@ -1192,14 +1146,8 @@ app.post("/v1/models/refresh", async (req, res) => {
 app.post("/v1/chat/completions", async (req, res) => {
   const startedAt = Date.now();
 
-  const body = isObject(req.body)
-    ? req.body
-    : {};
-
-  const requestedModel = normalizeModel(
-    body.model || DEFAULT_MODEL
-  );
-
+  const body = isObject(req.body) ? req.body : {};
+  const requestedModel = normalizeModel(body.model || DEFAULT_MODEL);
   const resolution = resolveModel(requestedModel);
 
   if (!resolution) {
@@ -1216,14 +1164,12 @@ app.post("/v1/chat/completions", async (req, res) => {
     model: resolution.model,
     requested_model: requestedModel,
     profile: resolution.profile?.label || null,
+    reasoning_effort: resolution.profile?.reasoningEffort || null,
+    thinking: resolution.profile?.thinking ?? null,
     stream: Boolean(body.stream)
   };
 
-  timingLog(
-    "request_received",
-    startedAt,
-    diagnosticMetadata
-  );
+  timingLog("request_received", startedAt, diagnosticMetadata);
 
   if (!Array.isArray(body.messages)) {
     return res.status(400).json({
@@ -1234,14 +1180,9 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
   }
 
-  const upstreamBody = buildNimRequest(
-    body,
-    resolution
-  );
-
+  const upstreamBody = buildNimRequest(body, resolution);
   const streaming = Boolean(upstreamBody.stream);
 
-  // These flags ensure each milestone is logged only once.
   let firstUpstreamChunkLogged = false;
   let firstSSEEventLogged = false;
   let firstOutputLogged = false;
@@ -1250,25 +1191,27 @@ app.post("/v1/chat/completions", async (req, res) => {
     model: resolution.model,
     requested_model: requestedModel,
     profile: resolution.profile?.label || null,
+    reasoning_effort:
+      upstreamBody.reasoning_effort ||
+      upstreamBody.chat_template_kwargs?.reasoning_effort ||
+      null,
+    thinking_enabled:
+      upstreamBody.chat_template_kwargs?.enable_thinking ?? null,
     stream: streaming,
     message_count: body.messages.length,
     max_tokens: upstreamBody.max_tokens,
-    temperature: upstreamBody.temperature,
+    temperature: upstreamBody.temperature ?? null,
+    top_p: upstreamBody.top_p ?? null,
     adapter: resolution.config?.adapter || "generic"
   });
 
-  let upstream;
+  timingLog("upstream_request_started", startedAt, {
+    ...diagnosticMetadata,
+    message_count: body.messages.length,
+    max_tokens: upstreamBody.max_tokens
+  });
 
-  // Record when the proxy begins waiting for NVIDIA.
-  timingLog(
-    "upstream_request_started",
-    startedAt,
-    {
-      ...diagnosticMetadata,
-      message_count: body.messages.length,
-      max_tokens: upstreamBody.max_tokens
-    }
-  );
+  let upstream;
 
   try {
     upstream = await axios.post(
@@ -1288,50 +1231,31 @@ app.post("/v1/chat/completions", async (req, res) => {
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
 
-    timingLog(
-      "upstream_request_failed",
-      startedAt,
-      {
-        ...diagnosticMetadata,
-        elapsed_ms: elapsedMs,
-        error_code: error?.code || null,
-        error_message: error?.message || "unknown error"
-      }
-    );
+    timingLog("upstream_request_failed", startedAt, {
+      ...diagnosticMetadata,
+      elapsed_ms: elapsedMs,
+      error_code: error?.code || null,
+      error_message: error?.message || "unknown error"
+    });
 
     console.error(
       `[proxy] request failed for ${resolution.model}: ` +
       `${error?.message || "unknown error"}`
     );
 
-    if (res.headersSent) {
-      return res.end();
-    }
+    if (res.headersSent) return res.end();
 
     return res
       .status(Number(error?.response?.status) || 502)
-      .json(
-        makeProxyError(
-          error,
-          resolution,
-          elapsedMs
-        )
-      );
+      .json(makeProxyError(error, resolution, elapsedMs));
   }
 
-  // Axios resolves a streaming request once upstream response
-  // headers are available, not when generation has finished.
-  timingLog(
-    "upstream_headers_received",
-    startedAt,
-    {
-      ...diagnosticMetadata,
-      upstream_status: upstream.status,
-      content_type: upstream.headers?.["content-type"] || null
-    }
-  );
+  timingLog("upstream_headers_received", startedAt, {
+    ...diagnosticMetadata,
+    upstream_status: upstream.status,
+    content_type: upstream.headers?.["content-type"] || null
+  });
 
-  // Forward upstream errors in a useful JSON format.
   if (upstream.status < 200 || upstream.status >= 300) {
     let data = upstream.data;
 
@@ -1341,13 +1265,9 @@ app.post("/v1/chat/completions", async (req, res) => {
           const chunks = [];
 
           data.on("data", chunk => chunks.push(chunk));
-
           data.on("end", () => {
-            resolve(
-              Buffer.concat(chunks).toString("utf8")
-            );
+            resolve(Buffer.concat(chunks).toString("utf8"));
           });
-
           data.on("error", reject);
         });
       } catch {
@@ -1374,56 +1294,31 @@ app.post("/v1/chat/completions", async (req, res) => {
     debugLog("upstream_error", {
       status: upstream.status,
       model: resolution.model,
+      profile: resolution.profile?.label || null,
       message: errorObject.error.message
     });
 
-    return res
-      .status(upstream.status)
-      .json(errorObject);
+    return res.status(upstream.status).json(errorObject);
   }
 
-  // Non-streaming response.
   if (!streaming) {
     const data = STRIP_REASONING
       ? stripReasoningObject(upstream.data)
       : upstream.data;
 
-    timingLog(
-      "nonstream_response_forwarded",
-      startedAt,
-      {
-        ...diagnosticMetadata,
-        upstream_status: upstream.status
-      }
-    );
+    timingLog("nonstream_response_forwarded", startedAt, {
+      ...diagnosticMetadata,
+      upstream_status: upstream.status
+    });
 
-    return res
-      .status(upstream.status)
-      .json(data);
+    return res.status(upstream.status).json(data);
   }
 
-  // Streaming response.
   res.status(upstream.status);
-
-  res.setHeader(
-    "Content-Type",
-    "text/event-stream; charset=utf-8"
-  );
-
-  res.setHeader(
-    "Cache-Control",
-    "no-cache, no-transform"
-  );
-
-  res.setHeader(
-    "Connection",
-    "keep-alive"
-  );
-
-  res.setHeader(
-    "X-Accel-Buffering",
-    "no"
-  );
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
 
   if (typeof res.flushHeaders === "function") {
     res.flushHeaders();
@@ -1432,21 +1327,15 @@ app.post("/v1/chat/completions", async (req, res) => {
   const stream = upstream.data;
 
   const parser = createSSEParser(event => {
-    if (res.writableEnded) {
-      return;
-    }
+    if (res.writableEnded) return;
 
     if (!firstSSEEventLogged) {
       firstSSEEventLogged = true;
 
-      timingLog(
-        "first_sse_event",
-        startedAt,
-        {
-          ...diagnosticMetadata,
-          event_chars: event.length
-        }
-      );
+      timingLog("first_sse_event", startedAt, {
+        ...diagnosticMetadata,
+        event_chars: event.length
+      });
     }
 
     if (!STRIP_REASONING) {
@@ -1455,14 +1344,10 @@ app.post("/v1/chat/completions", async (req, res) => {
       if (!firstOutputLogged) {
         firstOutputLogged = true;
 
-        timingLog(
-          "first_output_forwarded",
-          startedAt,
-          {
-            ...diagnosticMetadata,
-            output_mode: "raw_sse"
-          }
-        );
+        timingLog("first_output_forwarded", startedAt, {
+          ...diagnosticMetadata,
+          output_mode: "raw_sse"
+        });
       }
 
       return;
@@ -1473,14 +1358,10 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (!firstOutputLogged) {
       firstOutputLogged = true;
 
-      timingLog(
-        "first_output_forwarded",
-        startedAt,
-        {
-          ...diagnosticMetadata,
-          output_mode: "processed_sse"
-        }
-      );
+      timingLog("first_output_forwarded", startedAt, {
+        ...diagnosticMetadata,
+        output_mode: "processed_sse"
+      });
     }
   });
 
@@ -1488,16 +1369,12 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (!firstUpstreamChunkLogged) {
       firstUpstreamChunkLogged = true;
 
-      timingLog(
-        "first_upstream_chunk",
-        startedAt,
-        {
-          ...diagnosticMetadata,
-          chunk_bytes: Buffer.isBuffer(chunk)
-            ? chunk.length
-            : Buffer.byteLength(String(chunk))
-        }
-      );
+      timingLog("first_upstream_chunk", startedAt, {
+        ...diagnosticMetadata,
+        chunk_bytes: Buffer.isBuffer(chunk)
+          ? chunk.length
+          : Buffer.byteLength(String(chunk))
+      });
     }
 
     if (!res.writableEnded) {
@@ -1510,57 +1387,42 @@ app.post("/v1/chat/completions", async (req, res) => {
       parser.end();
       res.end();
 
-      timingLog(
-        "upstream_stream_ended",
-        startedAt,
-        {
-          ...diagnosticMetadata,
-          received_chunk: firstUpstreamChunkLogged,
-          received_sse_event: firstSSEEventLogged,
-          forwarded_output: firstOutputLogged
-        }
-      );
+      timingLog("upstream_stream_ended", startedAt, {
+        ...diagnosticMetadata,
+        received_chunk: firstUpstreamChunkLogged,
+        received_sse_event: firstSSEEventLogged,
+        forwarded_output: firstOutputLogged
+      });
     }
   });
 
   stream.on("error", error => {
-    timingLog(
-      "upstream_stream_error",
-      startedAt,
-      {
-        ...diagnosticMetadata,
-        error_code: error?.code || null,
-        error_message: error?.message || "unknown error"
-      }
-    );
+    timingLog("upstream_stream_error", startedAt, {
+      ...diagnosticMetadata,
+      error_code: error?.code || null,
+      error_message: error?.message || "unknown error"
+    });
 
     console.error(
       `[proxy] upstream stream error for ${resolution.model}: ` +
       `${error?.message || "unknown error"}`
     );
 
-    if (!res.writableEnded) {
-      res.end();
-    }
+    if (!res.writableEnded) res.end();
   });
 
-  // Stop consuming the upstream stream if the client disconnects.
   res.on("close", () => {
     if (
       !res.writableEnded &&
       stream &&
       typeof stream.destroy === "function"
     ) {
-      timingLog(
-        "client_disconnected",
-        startedAt,
-        {
-          ...diagnosticMetadata,
-          received_chunk: firstUpstreamChunkLogged,
-          received_sse_event: firstSSEEventLogged,
-          forwarded_output: firstOutputLogged
-        }
-      );
+      timingLog("client_disconnected", startedAt, {
+        ...diagnosticMetadata,
+        received_chunk: firstUpstreamChunkLogged,
+        received_sse_event: firstSSEEventLogged,
+        forwarded_output: firstOutputLogged
+      });
 
       stream.destroy();
     }
@@ -1585,9 +1447,7 @@ app.use((error, req, res, next) => {
     `[proxy] unhandled error: ${error?.message || "unknown error"}`
   );
 
-  if (res.headersSent) {
-    return next(error);
-  }
+  if (res.headersSent) return next(error);
 
   return res.status(500).json({
     error: {
@@ -1611,10 +1471,6 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[proxy] model profiles=${Object.keys(PROFILES).length}`);
   console.log(`[proxy] diagnostic timing enabled=${DEBUG_PROXY}`);
 });
-
-/* ============================================================
-   GRACEFUL SHUTDOWN
-============================================================ */
 
 function shutdown(signal) {
   console.log(`[proxy] received ${signal}; shutting down`);
