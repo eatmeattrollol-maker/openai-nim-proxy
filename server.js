@@ -1,3 +1,4 @@
+
 "use strict";
 
 const express = require("express");
@@ -773,6 +774,23 @@ function debugLog(label, data) {
   );
 }
 
+/*
+ * Diagnostic timing logger.
+ *
+ * Every elapsed_ms value is measured from the moment the proxy
+ * receives the chat-completion request.
+ *
+ * These logs intentionally exclude prompt text, generated text,
+ * authorization headers, and API keys.
+ */
+function timingLog(stage, startedAt, metadata = {}) {
+  debugLog("ttft", {
+    stage,
+    elapsed_ms: Date.now() - startedAt,
+    ...metadata
+  });
+}
+
 /* ============================================================
    RESPONSE CLEANUP
 ============================================================ */
@@ -1082,9 +1100,6 @@ function createSSEParser(onEvent) {
 
 /* ============================================================
    EXPRESS MIDDLEWARE
-
-   app is initialized above. Keep it above every app.use/app.get/
-   app.post call; otherwise Node throws "app is not defined".
 ============================================================ */
 
 app.use(cors({
@@ -1197,6 +1212,19 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
   }
 
+  const diagnosticMetadata = {
+    model: resolution.model,
+    requested_model: requestedModel,
+    profile: resolution.profile?.label || null,
+    stream: Boolean(body.stream)
+  };
+
+  timingLog(
+    "request_received",
+    startedAt,
+    diagnosticMetadata
+  );
+
   if (!Array.isArray(body.messages)) {
     return res.status(400).json({
       error: {
@@ -1213,6 +1241,11 @@ app.post("/v1/chat/completions", async (req, res) => {
 
   const streaming = Boolean(upstreamBody.stream);
 
+  // These flags ensure each milestone is logged only once.
+  let firstUpstreamChunkLogged = false;
+  let firstSSEEventLogged = false;
+  let firstOutputLogged = false;
+
   debugLog("request", {
     model: resolution.model,
     requested_model: requestedModel,
@@ -1225,6 +1258,17 @@ app.post("/v1/chat/completions", async (req, res) => {
   });
 
   let upstream;
+
+  // Record when the proxy begins waiting for NVIDIA.
+  timingLog(
+    "upstream_request_started",
+    startedAt,
+    {
+      ...diagnosticMetadata,
+      message_count: body.messages.length,
+      max_tokens: upstreamBody.max_tokens
+    }
+  );
 
   try {
     upstream = await axios.post(
@@ -1242,6 +1286,19 @@ app.post("/v1/chat/completions", async (req, res) => {
       }
     );
   } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+
+    timingLog(
+      "upstream_request_failed",
+      startedAt,
+      {
+        ...diagnosticMetadata,
+        elapsed_ms: elapsedMs,
+        error_code: error?.code || null,
+        error_message: error?.message || "unknown error"
+      }
+    );
+
     console.error(
       `[proxy] request failed for ${resolution.model}: ` +
       `${error?.message || "unknown error"}`
@@ -1257,10 +1314,22 @@ app.post("/v1/chat/completions", async (req, res) => {
         makeProxyError(
           error,
           resolution,
-          Date.now() - startedAt
+          elapsedMs
         )
       );
   }
+
+  // Axios resolves a streaming request once upstream response
+  // headers are available, not when generation has finished.
+  timingLog(
+    "upstream_headers_received",
+    startedAt,
+    {
+      ...diagnosticMetadata,
+      upstream_status: upstream.status,
+      content_type: upstream.headers?.["content-type"] || null
+    }
+  );
 
   // Forward upstream errors in a useful JSON format.
   if (upstream.status < 200 || upstream.status >= 300) {
@@ -1319,6 +1388,15 @@ app.post("/v1/chat/completions", async (req, res) => {
       ? stripReasoningObject(upstream.data)
       : upstream.data;
 
+    timingLog(
+      "nonstream_response_forwarded",
+      startedAt,
+      {
+        ...diagnosticMetadata,
+        upstream_status: upstream.status
+      }
+    );
+
     return res
       .status(upstream.status)
       .json(data);
@@ -1358,15 +1436,70 @@ app.post("/v1/chat/completions", async (req, res) => {
       return;
     }
 
+    if (!firstSSEEventLogged) {
+      firstSSEEventLogged = true;
+
+      timingLog(
+        "first_sse_event",
+        startedAt,
+        {
+          ...diagnosticMetadata,
+          event_chars: event.length
+        }
+      );
+    }
+
     if (!STRIP_REASONING) {
       res.write(`${event}\n\n`);
+
+      if (!firstOutputLogged) {
+        firstOutputLogged = true;
+
+        timingLog(
+          "first_output_forwarded",
+          startedAt,
+          {
+            ...diagnosticMetadata,
+            output_mode: "raw_sse"
+          }
+        );
+      }
+
       return;
     }
 
     writeSSEEvent(res, event);
+
+    if (!firstOutputLogged) {
+      firstOutputLogged = true;
+
+      timingLog(
+        "first_output_forwarded",
+        startedAt,
+        {
+          ...diagnosticMetadata,
+          output_mode: "processed_sse"
+        }
+      );
+    }
   });
 
   stream.on("data", chunk => {
+    if (!firstUpstreamChunkLogged) {
+      firstUpstreamChunkLogged = true;
+
+      timingLog(
+        "first_upstream_chunk",
+        startedAt,
+        {
+          ...diagnosticMetadata,
+          chunk_bytes: Buffer.isBuffer(chunk)
+            ? chunk.length
+            : Buffer.byteLength(String(chunk))
+        }
+      );
+    }
+
     if (!res.writableEnded) {
       parser.push(chunk.toString("utf8"));
     }
@@ -1376,10 +1509,31 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (!res.writableEnded) {
       parser.end();
       res.end();
+
+      timingLog(
+        "upstream_stream_ended",
+        startedAt,
+        {
+          ...diagnosticMetadata,
+          received_chunk: firstUpstreamChunkLogged,
+          received_sse_event: firstSSEEventLogged,
+          forwarded_output: firstOutputLogged
+        }
+      );
     }
   });
 
   stream.on("error", error => {
+    timingLog(
+      "upstream_stream_error",
+      startedAt,
+      {
+        ...diagnosticMetadata,
+        error_code: error?.code || null,
+        error_message: error?.message || "unknown error"
+      }
+    );
+
     console.error(
       `[proxy] upstream stream error for ${resolution.model}: ` +
       `${error?.message || "unknown error"}`
@@ -1397,6 +1551,17 @@ app.post("/v1/chat/completions", async (req, res) => {
       stream &&
       typeof stream.destroy === "function"
     ) {
+      timingLog(
+        "client_disconnected",
+        startedAt,
+        {
+          ...diagnosticMetadata,
+          received_chunk: firstUpstreamChunkLogged,
+          received_sse_event: firstSSEEventLogged,
+          forwarded_output: firstOutputLogged
+        }
+      );
+
       stream.destroy();
     }
   });
@@ -1444,6 +1609,7 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[proxy] proxy authentication enabled=${Boolean(PROXY_API_KEY)}`);
   console.log(`[proxy] reasoning stripping=${STRIP_REASONING}`);
   console.log(`[proxy] model profiles=${Object.keys(PROFILES).length}`);
+  console.log(`[proxy] diagnostic timing enabled=${DEBUG_PROXY}`);
 });
 
 /* ============================================================
