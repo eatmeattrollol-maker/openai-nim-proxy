@@ -33,7 +33,7 @@ const NIM_API_KEY =
 
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ||
-  "z-ai/glm-5.3";
+  "nvidia/nemotron-3-ultra-550b-a55b";
 
 const DEBUG_PROXY =
   parseBoolean(
@@ -302,158 +302,111 @@ function safeJsonParse(
 ============================================================ */
 
 const MODELS = {
-  "z-ai/glm-5.3": {
-    name:
-      "GLM 5.3",
-
-    provider:
-      "Z.ai",
-
-    reasoningLevels: [
-      "none",
-      "low",
-      "high",
-      "max"
-    ],
-
-    defaultReasoningEffort:
-      "high",
-
-    maxOutputTokens:
-      32768,
-
-    maxReasoningBudget:
-      null,
-
-    contextTokens:
-      1048576,
-
-    adapter:
-      "glm53"
-  },
-
-  "z-ai/glm-5.3-flash": {
-    name:
-      "GLM 5.3 Flash",
-
-    provider:
-      "Z.ai",
-
-    /*
-     * Flash does not expose a true no-thinking mode.
-     * Its lowest reasoning setting is "low".
-     */
-    reasoningLevels: [
-      "low",
-      "high",
-      "max"
-    ],
-
-    defaultReasoningEffort:
-      "max",
-
-    maxOutputTokens:
-      32768,
-
-    maxReasoningBudget:
-      null,
-
-    contextTokens:
-      1048576,
-
-    adapter:
-      "glm53-flash"
-  },
-
-  "moonshotai/kimi-k3": {
-    name:
-      "Kimi K3",
-
-    provider:
-      "Moonshot AI",
-
-    reasoningLevels: [
-      "low",
-      "high",
-      "max"
-    ],
-
-    defaultReasoningEffort:
-      "max",
-
-    maxOutputTokens:
-      8192,
-
-    maxReasoningBudget:
-      32768,
-
-    contextTokens:
-      1048576,
-
-    adapter:
-      "kimi-k3"
-  },
-
   "nvidia/nemotron-3-ultra-550b-a55b": {
-    name:
-      "NVIDIA Nemotron 3 Ultra 550B",
-
-    provider:
-      "NVIDIA",
-
-    reasoningLevels: [
-      "none",
-      "medium",
-      "high"
-    ],
-
-    defaultReasoningEffort:
-      "high",
-
-    defaultThinking:
-      true,
-
-    maxReasoningBudget:
-      32768,
-
-    maxOutputTokens:
-      32768,
-
-    contextTokens:
-      1048576,
-
-    adapter:
-      "nemotron"
+    name: "NVIDIA Nemotron 3 Ultra 550B",
+    provider: "NVIDIA",
+    reasoningLevels: ["none", "medium", "high"],
+    defaultReasoningEffort: "high",
+    defaultThinking: true,
+    maxReasoningBudget: 32768,
+    maxOutputTokens: 16384,
+    contextTokens: 1048576,
+    adapter: "nemotron"
   },
-
+  "nvidia/nemotron-3-super-120b-a12b": {
+    name: "NVIDIA Nemotron 3 Super 120B",
+    provider: "NVIDIA",
+    maxOutputTokens: 16384,
+    contextTokens: 1048576,
+    adapter: "generic"
+  },
+  "nvidia/nemotron-3.5-super-vl-120b-a12b": {
+    name: "NVIDIA Nemotron 3.5 Super VL 120B",
+    provider: "NVIDIA",
+    maxOutputTokens: 16384,
+    contextTokens: 262144,
+    adapter: "generic"
+  },
+  "nvidia/nemotron-3.5-bolt-e4b": {
+    name: "NVIDIA Nemotron 3.5 Bolt E4B",
+    provider: "NVIDIA",
+    maxOutputTokens: 8192,
+    contextTokens: 262144,
+    adapter: "generic"
+  },
+  "nvidia/nemotron-3.5-lightning-30b-a3b": {
+    name: "NVIDIA Nemotron 3.5 Lightning 30B A3B",
+    provider: "NVIDIA",
+    maxOutputTokens: 8192,
+    contextTokens: 262144,
+    adapter: "generic"
+  },
+  "z-ai/glm-5.3": {
+    name: "GLM 5.3 (deprecated soon)",
+    provider: "Z.ai",
+    reasoningLevels: ["none", "low", "high", "max"],
+    defaultReasoningEffort: "high",
+    maxOutputTokens: 32768,
+    contextTokens: 1048576,
+    adapter: "glm53"
+  },
+  "z-ai/glm-5.3-flash": {
+    name: "GLM 5.3 Flash",
+    provider: "Z.ai",
+    reasoningLevels: ["low", "high", "max"],
+    defaultReasoningEffort: "max",
+    maxOutputTokens: 32768,
+    contextTokens: 1048576,
+    adapter: "glm53-flash"
+  },
   "deepseek-ai/deepseek-v4.1-flash": {
-    name:
-      "DeepSeek V4.1 Flash",
-
-    provider:
-      "DeepSeek AI",
-
-    reasoningLevels: [
-      "none",
-      "low",
-      "high",
-      "max"
-    ],
-
-    defaultReasoningEffort:
-      "max",
-
-    maxOutputTokens:
-      8192,
-
-    maxReasoningBudget:
-      16384,
-
-    contextTokens:
-      1048576,
-
-    adapter:
-      "deepseek-flash"
+    name: "DeepSeek V4.1 Flash",
+    provider: "DeepSeek AI",
+    maxOutputTokens: 16384,
+    contextTokens: 1048576,
+    adapter: "generic"
+  },
+  "stepfun-ai/step-5-preview": {
+    name: "Step 5 Preview",
+    provider: "StepFun AI",
+    maxOutputTokens: 16384,
+    contextTokens: 1048576,
+    adapter: "generic"
+  },
+  "minimaxai/minimax-m3.1-flash": {
+    name: "MiniMax M3.1 Flash",
+    provider: "MiniMax AI",
+    maxOutputTokens: 16384,
+    contextTokens: 262144,
+    adapter: "generic"
+  },
+  "poolside/laguna-xs-2.1": {
+    name: "Laguna XS 2.1",
+    provider: "Poolside",
+    maxOutputTokens: 8192,
+    contextTokens: 131072,
+    adapter: "generic"
+  },
+  "openai/gpt-oss-20b": {
+    name: "GPT-OSS 20B",
+    provider: "OpenAI",
+    maxOutputTokens: 8192,
+    contextTokens: 131072,
+    adapter: "generic"
+  },
+  "google/gemma-4-31b-it": {
+    name: "Gemma 4 31B IT",
+    provider: "Google",
+    maxOutputTokens: 8192,
+    contextTokens: 131072,
+    adapter: "generic"
+  },
+  "meta/muse-glimmer-30b": {
+    name: "Muse Glimmer 30B",
+    provider: "Meta / Muse",
+    maxOutputTokens: 8192,
+    contextTokens: 131072,
+    adapter: "generic"
   }
 };
 
@@ -462,249 +415,69 @@ const MODELS = {
 ============================================================ */
 
 const PROFILES = {
-  /* ----------------------------------------------------------
-     GLM 5.3
-  ---------------------------------------------------------- */
-
+  /* GLM 5.3 is currently listed with a deprecation notice. */
   "z-ai/glm-5.3-no": {
-    baseModel:
-      "z-ai/glm-5.3",
-
-    label:
-      "No Thinking",
-
-    reasoningEffort:
-      "none"
+    baseModel: "z-ai/glm-5.3",
+    label: "No Thinking",
+    reasoningEffort: "none"
   },
-
   "z-ai/glm-5.3-fast": {
-    baseModel:
-      "z-ai/glm-5.3",
-
-    label:
-      "Fast",
-
-    reasoningEffort:
-      "low"
+    baseModel: "z-ai/glm-5.3",
+    label: "Fast",
+    reasoningEffort: "low"
   },
-
   "z-ai/glm-5.3-balanced": {
-    baseModel:
-      "z-ai/glm-5.3",
-
-    label:
-      "Balanced",
-
-    reasoningEffort:
-      "high"
+    baseModel: "z-ai/glm-5.3",
+    label: "Balanced",
+    reasoningEffort: "high"
   },
-
   "z-ai/glm-5.3-deep": {
-    baseModel:
-      "z-ai/glm-5.3",
-
-    label:
-      "Deep",
-
-    reasoningEffort:
-      "max"
+    baseModel: "z-ai/glm-5.3",
+    label: "Deep",
+    reasoningEffort: "max"
   },
-
-  /* ----------------------------------------------------------
-     GLM 5.3 FLASH
-  ---------------------------------------------------------- */
-
-  /*
-   * GLM-5.3-Flash does not provide a genuine disabled
-   * reasoning mode, so "-no" maps to its minimum reasoning
-   * level instead of pretending thinking is disabled.
-   */
-
-  "z-ai/glm-5.3-flash-no": {
-    baseModel:
-      "z-ai/glm-5.3-flash",
-
-    label:
-      "No Thinking / Minimum",
-
-    reasoningEffort:
-      "low"
+  /* Flash's minimum is low; it does not offer true no-thinking. */
+  "z-ai/glm-5.3-flash-minimum": {
+    baseModel: "z-ai/glm-5.3-flash",
+    label: "Minimum Reasoning",
+    reasoningEffort: "low"
   },
-
   "z-ai/glm-5.3-flash-fast": {
-    baseModel:
-      "z-ai/glm-5.3-flash",
-
-    label:
-      "Fast",
-
-    reasoningEffort:
-      "low"
+    baseModel: "z-ai/glm-5.3-flash",
+    label: "Fast",
+    reasoningEffort: "low"
   },
-
   "z-ai/glm-5.3-flash-balanced": {
-    baseModel:
-      "z-ai/glm-5.3-flash",
-
-    label:
-      "Balanced",
-
-    reasoningEffort:
-      "high"
+    baseModel: "z-ai/glm-5.3-flash",
+    label: "Balanced",
+    reasoningEffort: "high"
   },
-
   "z-ai/glm-5.3-flash-deep": {
-    baseModel:
-      "z-ai/glm-5.3-flash",
-
-    label:
-      "Deep",
-
-    reasoningEffort:
-      "max"
+    baseModel: "z-ai/glm-5.3-flash",
+    label: "Deep",
+    reasoningEffort: "max"
   },
-
-  /* ----------------------------------------------------------
-     KIMI K3
-  ---------------------------------------------------------- */
-
-  /*
-   * Intentionally NO moonshotai/kimi-k3-no profile.
-   */
-
-  "moonshotai/kimi-k3-fast": {
-    baseModel:
-      "moonshotai/kimi-k3",
-
-    label:
-      "Fast",
-
-    reasoningEffort:
-      "low"
-  },
-
-  "moonshotai/kimi-k3-balanced": {
-    baseModel:
-      "moonshotai/kimi-k3",
-
-    label:
-      "Balanced",
-
-    reasoningEffort:
-      "high"
-  },
-
-  "moonshotai/kimi-k3-deep": {
-    baseModel:
-      "moonshotai/kimi-k3",
-
-    label:
-      "Deep",
-
-    reasoningEffort:
-      "max"
-  },
-
-  /* ----------------------------------------------------------
-     NEMOTRON 3 ULTRA
-  ---------------------------------------------------------- */
-
   "nvidia/nemotron-3-ultra-550b-a55b-no": {
-    baseModel:
-      "nvidia/nemotron-3-ultra-550b-a55b",
-
-    label:
-      "No Thinking",
-
-    thinking:
-      false
+    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
+    label: "No Thinking",
+    thinking: false
   },
-
   "nvidia/nemotron-3-ultra-550b-a55b-fast": {
-    baseModel:
-      "nvidia/nemotron-3-ultra-550b-a55b",
-
-    label:
-      "Fast",
-
-    thinking:
-      false
+    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
+    label: "Fast",
+    thinking: false
   },
-
   "nvidia/nemotron-3-ultra-550b-a55b-balanced": {
-    baseModel:
-      "nvidia/nemotron-3-ultra-550b-a55b",
-
-    label:
-      "Balanced",
-
-    thinking:
-      true,
-
-    mediumEffort:
-      true
+    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
+    label: "Balanced",
+    thinking: true,
+    mediumEffort: true
   },
-
   "nvidia/nemotron-3-ultra-550b-a55b-deep": {
-    baseModel:
-      "nvidia/nemotron-3-ultra-550b-a55b",
-
-    label:
-      "Deep",
-
-    thinking:
-      true,
-
-    thinkingTokenBudget:
-      32768
-  },
-
-  /* ----------------------------------------------------------
-     DEEPSEEK
-  ---------------------------------------------------------- */
-
-  "deepseek-ai/deepseek-v4-flash-0731-no": {
-    baseModel:
-      "deepseek-ai/deepseek-v4-flash-0731",
-
-    label:
-      "No Thinking",
-
-    reasoningEffort:
-      "none"
-  },
-
-  "deepseek-ai/deepseek-v4-flash-0731-fast": {
-    baseModel:
-      "deepseek-ai/deepseek-v4-flash-0731",
-
-    label:
-      "Fast",
-
-    reasoningEffort:
-      "low"
-  },
-
-  "deepseek-ai/deepseek-v4-flash-0731-balanced": {
-    baseModel:
-      "deepseek-ai/deepseek-v4-flash-0731",
-
-    label:
-      "Balanced",
-
-    reasoningEffort:
-      "high"
-  },
-
-  "deepseek-ai/deepseek-v4-flash-0731-deep": {
-    baseModel:
-      "deepseek-ai/deepseek-v4-flash-0731",
-
-    label:
-      "Deep",
-
-    reasoningEffort:
-      "max"
+    baseModel: "nvidia/nemotron-3-ultra-550b-a55b",
+    label: "Deep",
+    thinking: true,
+    thinkingTokenBudget: 32768
   }
 };
 
@@ -1013,7 +786,6 @@ function requestedEffort(
     config
   );
 }
-
 /* ============================================================
    NEMOTRON HELPERS
 ============================================================ */
@@ -1276,7 +1048,6 @@ function buildBaseRequest(
 
   /*
    * Only include top_p if the client actually provided it.
-   *
    * This prevents us from unexpectedly changing upstream
    * sampling behavior.
    */
@@ -1619,80 +1390,15 @@ function buildNimRequest(
   }
 
   /* ----------------------------------------------------------
-     DEEPSEEK
+     GENERIC MODELS
   ---------------------------------------------------------- */
 
-  if (
-    model ===
-    "deepseek-ai/deepseek-v4.1-flash"
-  ) {
-    const effort =
-      requestedEffort(
-        body,
-        resolution
-      );
-
-    request.reasoning_effort =
-      effort;
-
-    request.chat_template_kwargs = {
-      ...(request.chat_template_kwargs ||
-        {}),
-
-      thinking:
-        effort !== "none",
-
-      reasoning_effort:
-        effort
-    };
-
-    return request;
-  }
-
-  /* ----------------------------------------------------------
-     KIMI K3
-  ---------------------------------------------------------- */
-
-  if (
-    model ===
-    "moonshotai/kimi-k3"
-  ) {
-    let effort =
-      requestedEffort(
-        body,
-        resolution
-      );
-
-    /*
-     * Kimi has no -no profile in this proxy.
-     * Never turn it into a fake non-thinking request.
-     */
-    if (
-      effort ===
-      "none"
-    ) {
-      effort =
-        "max";
-    }
-
-    request.reasoning_effort =
-      effort;
-
-    /*
-     * Do not inject an enable_thinking flag.
-     */
-    if (
-      isPlainObject(
-        request.chat_template_kwargs
-      )
-    ) {
-      delete request
-        .chat_template_kwargs
-        .enable_thinking;
-    }
-
-    return request;
-  }
+  /*
+   * For models without a verified model-specific template,
+   * preserve the OpenAI-compatible request and do not invent
+   * reasoning/template flags. This avoids sending unsupported
+   * vendor-specific parameters to newly added endpoints.
+   */
 
   /* ----------------------------------------------------------
      UNKNOWN MODELS
@@ -1700,24 +1406,14 @@ function buildNimRequest(
 
   return request;
 }
-
 /* ============================================================
    SAFE DEBUG LOGGING
 ============================================================ */
 
 /*
- * IMPORTANT:
- *
- * This deliberately NEVER logs:
- *
- *   - messages
- *   - prompts
- *   - conversation history
- *   - assistant content
- *   - tool arguments
- *   - request bodies
- *
- * Even DEBUG_PROXY=true only prints metadata.
+ * This deliberately NEVER logs messages, prompts, conversation
+ * history, assistant content, tool arguments, or request bodies.
+ * DEBUG_PROXY only prints metadata.
  */
 
 function debugLog(
@@ -1785,10 +1481,6 @@ function requestMetadata(
    RESPONSE CLEANING
 ============================================================ */
 
-/*
- * Remove explicit reasoning fields from a normal JSON
- * OpenAI-compatible response.
- */
 function cleanResponseObject(
   response
 ) {
@@ -1894,9 +1586,6 @@ function cleanChoice(
   return output;
 }
 
-/*
- * Non-streaming cleanup.
- */
 function removeThinkBlocks(
   text
 ) {
@@ -1927,15 +1616,7 @@ function removeThinkBlocks(
  * Streaming is different from normal JSON because a <think>
  * block can be split across arbitrary SSE chunks.
  *
- * Example:
- *
- *   chunk 1: "<thi"
- *   chunk 2: "nk>secret"
- *   chunk 3: "</think>Hello"
- *
- * A simple regex on each chunk would fail.
- *
- * This stateful filter keeps track of whether we're currently
+ * This stateful filter tracks whether the stream is currently
  * inside a thinking block.
  */
 
@@ -1984,10 +1665,6 @@ class ThinkingStreamFilter {
           closeIndex ===
           -1
         ) {
-          /*
-           * Keep a small suffix in case the closing tag is split
-           * across chunks.
-           */
           const keep =
             partialTagSuffix(
               text,
@@ -2052,10 +1729,6 @@ class ThinkingStreamFilter {
       if (
         !openMatch
       ) {
-        /*
-         * The end of this text could be the beginning of a
-         * split <think> tag.
-         */
         const keep =
           partialTagSuffix(
             text,
@@ -2108,10 +1781,6 @@ class ThinkingStreamFilter {
   }
 
   flush() {
-    /*
-     * If the stream ends while inside a thinking block, don't
-     * leak the unfinished reasoning.
-     */
     if (
       this.insideThink
     ) {
@@ -2321,9 +1990,6 @@ class SSEParser {
     this.buffer +=
       chunk;
 
-    /*
-     * Normalize CRLF/CR to LF.
-     */
     this.buffer =
       this.buffer.replace(
         /\r\n/g,
@@ -2373,102 +2039,93 @@ class SSEParser {
       this.parseEvent(
         this.buffer
       );
-    }
 
-    this.buffer =
-      "";
+      this.buffer =
+        "";
+    }
   }
 
   parseEvent(
     rawEvent
   ) {
     if (
-      !rawEvent
+      !rawEvent ||
+      rawEvent.startsWith(":")
     ) {
       return;
     }
 
-    const lines =
-      rawEvent.split(
-        "\n"
-      );
+    const event = {
+      event: "",
+      id: "",
+      data: ""
+    };
 
     const dataLines =
       [];
 
-    let eventName =
-      null;
-
-    let eventId =
-      null;
-
     for (
       const line of
-        lines
+        rawEvent.split("\n")
     ) {
       if (
-        line.startsWith(
-          "data:"
-        )
+        line.startsWith(":")
+      ) {
+        continue;
+      }
+
+      const colon =
+        line.indexOf(":");
+
+      const field =
+        colon === -1
+          ? line
+          : line.slice(
+              0,
+              colon
+            );
+
+      let value =
+        colon === -1
+          ? ""
+          : line.slice(
+              colon + 1
+            );
+
+      if (
+        value.startsWith(" ")
+      ) {
+        value =
+          value.slice(1);
+      }
+
+      if (
+        field === "event"
+      ) {
+        event.event =
+          value;
+      } else if (
+        field === "id"
+      ) {
+        event.id =
+          value;
+      } else if (
+        field === "data"
       ) {
         dataLines.push(
-          line.slice(
-            5
-          ).replace(
-            /^ /,
-            ""
-          )
+          value
         );
-
-        continue;
-      }
-
-      if (
-        line.startsWith(
-          "event:"
-        )
-      ) {
-        eventName =
-          line.slice(
-            6
-          ).trim();
-        continue;
-      }
-
-      if (
-        line.startsWith(
-          "id:"
-        )
-      ) {
-        eventId =
-          line.slice(
-            3
-          ).trim();
       }
     }
 
-    if (
-      dataLines.length ===
-      0
-    ) {
-      return;
-    }
+    event.data =
+      dataLines.join("\n");
 
-    this.onEvent({
-      data:
-        dataLines.join(
-          "\n"
-        ),
-
-      event:
-        eventName,
-
-      id:
-        eventId
-    });
+    this.onEvent(
+      event
+    );
   }
 }
-
 /* ============================================================
    SSE EVENT CLEANING
 ============================================================ */
@@ -2519,10 +2176,6 @@ function cleanSSEJson(
               ...cleaned.delta
             };
 
-            /*
-             * These fields are what can cause reasoning to
-             * appear as visible content in clients.
-             */
             delete cleaned.delta
               .reasoning_content;
 
@@ -2577,10 +2230,6 @@ function cleanSSEJson(
       );
   }
 
-  /*
-   * Some upstream responses can expose reasoning at the top
-   * level. Remove it as well.
-   */
   delete output.reasoning;
   delete output.reasoning_content;
   delete output.thinking;
@@ -2596,13 +2245,6 @@ function writeSSEEvent(
   res,
   event
 ) {
-  /*
-   * We intentionally output standard OpenAI-compatible SSE:
-   *
-   * data: {...}
-   *
-   * No extra prefixes, JSON wrappers, markdown, or logging.
-   */
   if (
     event.event
   ) {
@@ -2988,16 +2630,6 @@ app.use(
   })
 );
 
-/*
- * IMPORTANT:
- *
- * There is deliberately NO middleware here that logs
- * req.body.
- *
- * This is what prevents full Janitor conversations from being
- * dumped into Render logs.
- */
-
 /* ============================================================
    ROOT
 ============================================================ */
@@ -3147,7 +2779,6 @@ app.post(
     });
   }
 );
-
 /* ============================================================
    CHAT COMPLETIONS
 ============================================================ */
@@ -3206,11 +2837,6 @@ app.post(
         nimRequest.stream
       );
 
-    /*
-     * Safe debug logging ONLY.
-     *
-     * No conversation content.
-     */
     debugLog(
       "request",
       requestMetadata(
@@ -3335,10 +2961,6 @@ app.post(
             elapsedMs
           );
 
-        /*
-         * Only log status/model metadata, never the upstream
-         * conversation/error body.
-         */
         console.error(
           `[proxy] NIM ${upstream.status} ` +
             `${resolution.model} ` +
@@ -3400,11 +3022,6 @@ app.post(
               )
             : upstream.data;
 
-        /*
-         * Send the JSON object directly.
-         * Do NOT stringify it ourselves.
-         * Express handles the correct JSON response.
-         */
         return res
           .status(
             upstream.status
@@ -3422,10 +3039,6 @@ app.post(
         upstream.status
       );
 
-      /*
-       * These are the standard headers expected by OpenAI-style
-       * streaming clients.
-       */
       res.setHeader(
         "Content-Type",
         "text/event-stream; charset=utf-8"
@@ -3441,10 +3054,6 @@ app.post(
         "keep-alive"
       );
 
-      /*
-       * Don't let intermediary compression/buffering interfere
-       * with token streaming.
-       */
       res.setHeader(
         "X-Accel-Buffering",
         "no"
@@ -3453,10 +3062,8 @@ app.post(
       res.flushHeaders?.();
 
       /*
-       * If reasoning stripping is disabled, the cleanest thing
-       * to do is relay the upstream SSE stream directly.
-       *
-       * This avoids altering the provider's formatting at all.
+       * If reasoning stripping is disabled, relay the upstream
+       * SSE stream directly without modifying its formatting.
        */
       if (
         !STRIP_REASONING
@@ -3514,17 +3121,9 @@ app.post(
         return;
       }
 
-      /*
-       * Stateful reasoning filter.
-       */
       const thinkingFilter =
         new ThinkingStreamFilter();
 
-      /*
-       * Proper SSE parser.
-       *
-       * We do NOT treat arbitrary chunks as complete events.
-       */
       const parser =
         new SSEParser(
           (event) => {
@@ -3534,20 +3133,10 @@ app.post(
               return;
             }
 
-            /*
-             * OpenAI/NIM uses:
-             *
-             * data: [DONE]
-             *
-             * at the end.
-             */
             if (
               event.data ===
               "[DONE]"
             ) {
-              /*
-               * Flush anything that is still pending.
-               */
               thinkingFilter.flush();
 
               writeSSEEvent(
@@ -3572,10 +3161,6 @@ app.post(
                 event.data
               );
 
-            /*
-             * If this isn't JSON, preserve it rather than
-             * inventing a new format.
-             */
             if (
               !parsed
             ) {
@@ -3636,13 +3221,7 @@ app.post(
           }
 
           parser.end();
-
-          /*
-           * If NIM ended without sending [DONE], don't fabricate
-           * another JSON event. Just close the SSE stream cleanly.
-           */
           thinkingFilter.flush();
-
           res.end();
         }
       );
@@ -3673,7 +3252,7 @@ app.post(
             upstream.data &&
             typeof
               upstream.data.destroy ===
-              "function"
+                "function"
           ) {
             upstream.data.destroy();
           }
