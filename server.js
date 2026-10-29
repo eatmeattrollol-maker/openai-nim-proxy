@@ -458,7 +458,21 @@ function getProfile(requestedModel) {
 // ============================================================
 // Helper: apply model-specific options
 // ============================================================
+function normalizeMessagesForNvidia(messages) {
+  const normalized = messages.map((message) => ({ ...message }));
 
+  // NVIDIA chat endpoints may reject an assistant-final prompt.
+  // Preserve the existing conversation by removing trailing
+  // assistant messages until the last message is from the user.
+  while (
+    normalized.length > 0 &&
+    normalized[normalized.length - 1].role === 'assistant'
+  ) {
+    normalized.pop();
+  }
+
+  return normalized;
+}
 function applyProfile(requestBody, profile) {
   const body = { ...requestBody };
 
@@ -903,6 +917,17 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 
   const body = applyProfile(requestBody, profile);
+
+body.messages = normalizeMessagesForNvidia(body.messages);
+
+if (body.messages.length === 0) {
+  return jsonError(
+    res,
+    400,
+    'No user message remains after normalizing the conversation.',
+    'invalid_request_error'
+  );
+}
 
   // Preserve the client's token limits.
   if (
