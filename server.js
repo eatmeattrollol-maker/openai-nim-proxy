@@ -12,7 +12,6 @@ const app = express();
 // ============================================================
 
 const PORT = Number(process.env.PORT || 3000);
-
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 const NVIDIA_BASE_URL = (
@@ -50,12 +49,11 @@ const ALLOWED_ORIGINS = (
   process.env.CORS_ORIGINS || 'https://janitorai.com'
 )
   .split(',')
-  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .map((value) => value.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
 if (!NVIDIA_API_KEY) {
-  console.error('FATAL: NVIDIA_API_KEY is missing.');
-  process.exit(1);
+  throw new Error('NVIDIA_API_KEY is missing.');
 }
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
@@ -77,8 +75,8 @@ if (!Number.isInteger(DEFAULT_MAX_TOKENS) || DEFAULT_MAX_TOKENS < 1) {
   throw new Error('DEFAULT_MAX_TOKENS must be a positive integer.');
 }
 
-if (PROXY_API_KEY && PROXY_API_KEY.length < 32) {
-  throw new Error('PROXY_API_KEY must be at least 32 characters.');
+if (PROXY_API_KEY && Buffer.byteLength(PROXY_API_KEY, 'utf8') < 32) {
+  throw new Error('PROXY_API_KEY must contain at least 32 bytes.');
 }
 
 if (!NVIDIA_BASE_URL.startsWith('https://')) {
@@ -91,12 +89,11 @@ app.set('trust proxy', 1);
 // ============================================================
 // MODEL PROFILES
 //
-// Only hosted NVIDIA Free Endpoint models are registered here.
-// A JanitorAI alias is resolved to the actual upstream model ID.
+// Curated around hosted NVIDIA Free Endpoint listings.
+// "id" is the selectable JanitorAI model name.
+// "upstream" is the real model ID sent to NVIDIA.
 //
-// Different models expose different reasoning controls.
-// Profiles are only created where the documented API supports
-// the relevant setting; unsupported levels are not fabricated.
+// Only documented reasoning controls are applied.
 // ============================================================
 
 const MODEL_PROFILES = Object.create(null);
@@ -114,10 +111,8 @@ function addModel(id, label, upstream, settings = {}) {
 // ------------------------------------------------------------
 // MISTRAL LARGE 4
 //
-// Current NVIDIA API reference documents:
-//   reasoning_effort: none | high
-//
-// It does not document low/medium/high for this endpoint.
+// NVIDIA's hosted API accepts reasoning_effort "high" or "none".
+// It does not honor chat_template_kwargs.enable_thinking.
 // ------------------------------------------------------------
 
 const MISTRAL4 = 'mistralai/mistral-large-4-1t-a52b';
@@ -126,152 +121,28 @@ addModel(
   MISTRAL4,
   'Mistral Large 4 - High Reasoning',
   MISTRAL4,
-  {
-    adapter: 'mistral4',
-    effort: 'high'
-  }
+  { adapter: 'mistral4', effort: 'high' }
 );
 
 addModel(
   `${MISTRAL4}-thinking`,
   'Mistral Large 4 - Thinking',
   MISTRAL4,
-  {
-    adapter: 'mistral4',
-    effort: 'high'
-  }
+  { adapter: 'mistral4', effort: 'high' }
 );
 
 addModel(
   `${MISTRAL4}-no-thinking`,
   'Mistral Large 4 - No Thinking',
   MISTRAL4,
-  {
-    adapter: 'mistral4',
-    effort: 'none'
-  }
-);
-
-// ------------------------------------------------------------
-// MISTRAL NEMOTRON
-//
-// Hosted Free Endpoint. No special reasoning adapter is added
-// without a documented endpoint-specific reasoning control.
-// ------------------------------------------------------------
-
-addModel(
-  'mistralai/mistral-nemotron',
-  'Mistral Nemotron',
-  'mistralai/mistral-nemotron'
-);
-
-// ------------------------------------------------------------
-// NEMOTRON 3 ULTRA
-//
-// reasoning_effort: none | medium | high
-// reasoning_budget: integer from -1 to 32768
-// ------------------------------------------------------------
-
-const NEMOTRON_ULTRA = 'nvidia/nemotron-3-ultra-550b-a55b';
-
-addModel(
-  NEMOTRON_ULTRA,
-  'Nemotron 3 Ultra - High Reasoning',
-  NEMOTRON_ULTRA,
-  {
-    adapter: 'nemotron-ultra',
-    effort: 'high',
-    reasoningBudget: 4096
-  }
-);
-
-addModel(
-  `${NEMOTRON_ULTRA}-no-thinking`,
-  'Nemotron 3 Ultra - No Thinking',
-  NEMOTRON_ULTRA,
-  {
-    adapter: 'nemotron-ultra',
-    effort: 'none'
-  }
-);
-
-addModel(
-  `${NEMOTRON_ULTRA}-medium`,
-  'Nemotron 3 Ultra - Medium Reasoning',
-  NEMOTRON_ULTRA,
-  {
-    adapter: 'nemotron-ultra',
-    effort: 'medium',
-    reasoningBudget: 2048
-  }
-);
-
-addModel(
-  `${NEMOTRON_ULTRA}-high`,
-  'Nemotron 3 Ultra - High Reasoning',
-  NEMOTRON_ULTRA,
-  {
-    adapter: 'nemotron-ultra',
-    effort: 'high',
-    reasoningBudget: 4096
-  }
-);
-
-// ------------------------------------------------------------
-// NEMOTRON 3.5 SUPER VL
-//
-// reasoning_effort: none | low | high
-// ------------------------------------------------------------
-
-const NEMOTRON_VL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
-
-addModel(
-  NEMOTRON_VL,
-  'Nemotron 3.5 Super VL - High Reasoning',
-  NEMOTRON_VL,
-  {
-    adapter: 'nemotron-vl',
-    effort: 'high'
-  }
-);
-
-addModel(
-  `${NEMOTRON_VL}-no-thinking`,
-  'Nemotron 3.5 Super VL - No Thinking',
-  NEMOTRON_VL,
-  {
-    adapter: 'nemotron-vl',
-    effort: 'none'
-  }
-);
-
-addModel(
-  `${NEMOTRON_VL}-low`,
-  'Nemotron 3.5 Super VL - Low Reasoning',
-  NEMOTRON_VL,
-  {
-    adapter: 'nemotron-vl',
-    effort: 'low'
-  }
-);
-
-addModel(
-  `${NEMOTRON_VL}-high`,
-  'Nemotron 3.5 Super VL - High Reasoning',
-  NEMOTRON_VL,
-  {
-    adapter: 'nemotron-vl',
-    effort: 'high'
-  }
+  { adapter: 'mistral4', effort: 'none' }
 );
 
 // ------------------------------------------------------------
 // GLM 5.3 FLASH
 //
-// reasoning_effort: low | high | max
-// "Medium" is mapped to the documented API level "high".
-// "High" is mapped to "max".
-// There is no no-thinking alias: low does not mean no thinking.
+// reasoning_effort: low | high | max.
+// "medium" maps to "high"; "high" maps to "max".
 // ------------------------------------------------------------
 
 const GLM = 'z-ai/glm-5.3-flash';
@@ -280,115 +151,35 @@ addModel(
   GLM,
   'GLM 5.3 Flash - High Reasoning',
   GLM,
-  {
-    adapter: 'glm',
-    effort: 'high'
-  }
+  { adapter: 'glm', effort: 'high' }
 );
 
 addModel(
   `${GLM}-low`,
   'GLM 5.3 Flash - Low Reasoning',
   GLM,
-  {
-    adapter: 'glm',
-    effort: 'low'
-  }
+  { adapter: 'glm', effort: 'low' }
 );
 
 addModel(
   `${GLM}-medium`,
   'GLM 5.3 Flash - Medium (API High)',
   GLM,
-  {
-    adapter: 'glm',
-    effort: 'high'
-  }
+  { adapter: 'glm', effort: 'high' }
 );
 
 addModel(
   `${GLM}-high`,
   'GLM 5.3 Flash - High (API Max)',
   GLM,
-  {
-    adapter: 'glm',
-    effort: 'max'
-  }
-);
-
-// ------------------------------------------------------------
-// DEEPSEEK V4.1 FLASH
-//
-// NVIDIA documents continuously controlled numeric reasoning
-// effort from 1 through 100.
-// ------------------------------------------------------------
-
-const DEEPSEEK = 'deepseek-ai/deepseek-v4.1-flash';
-
-addModel(
-  DEEPSEEK,
-  'DeepSeek V4.1 Flash - Medium Reasoning',
-  DEEPSEEK,
-  {
-    adapter: 'deepseek',
-    effort: 50
-  }
-);
-
-addModel(
-  `${DEEPSEEK}-low`,
-  'DeepSeek V4.1 Flash - Low Reasoning',
-  DEEPSEEK,
-  {
-    adapter: 'deepseek',
-    effort: 25
-  }
-);
-
-addModel(
-  `${DEEPSEEK}-medium`,
-  'DeepSeek V4.1 Flash - Medium Reasoning',
-  DEEPSEEK,
-  {
-    adapter: 'deepseek',
-    effort: 50
-  }
-);
-
-addModel(
-  `${DEEPSEEK}-high`,
-  'DeepSeek V4.1 Flash - High Reasoning',
-  DEEPSEEK,
-  {
-    adapter: 'deepseek',
-    effort: 100
-  }
-);
-
-// ------------------------------------------------------------
-// STEP 5 PREVIEW
-//
-// NVIDIA documents that reasoning remains enabled and that
-// enable_thinking=false does not disable it for this checkpoint.
-// No fake reasoning levels are added.
-// ------------------------------------------------------------
-
-addModel(
-  'stepfun-ai/step-5-preview',
-  'Step 5 Preview',
-  'stepfun-ai/step-5-preview',
-  {
-    adapter: 'step'
-  }
+  { adapter: 'glm', effort: 'max' }
 );
 
 // ------------------------------------------------------------
 // MINIMAX M3.1 FLASH
 //
-// NVIDIA's model documentation describes the levels:
-// low | medium | high | xhigh | max
-//
-// The reasoning setting is passed through chat_template_kwargs.
+// NVIDIA's model card documents low, medium, high, xhigh, max.
+// It describes reasoning_effort as a chat-template setting.
 // ------------------------------------------------------------
 
 const MINIMAX = 'minimaxai/minimax-m3.1-flash';
@@ -397,10 +188,7 @@ addModel(
   MINIMAX,
   'MiniMax M3.1 Flash - Medium Reasoning',
   MINIMAX,
-  {
-    adapter: 'minimax',
-    effort: 'medium'
-  }
+  { adapter: 'minimax', effort: 'medium' }
 );
 
 for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
@@ -408,17 +196,61 @@ for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
     `${MINIMAX}-${effort}`,
     `MiniMax M3.1 Flash - ${effort.toUpperCase()} Reasoning`,
     MINIMAX,
-    {
-      adapter: 'minimax',
-      effort
-    }
+    { adapter: 'minimax', effort }
   );
 }
 
 // ------------------------------------------------------------
-// POOLSIDE LAGUNA XS 2.1
+// NEMOTRON 3.5 SUPER VL
 //
-// Hosted Free Endpoint. Primarily an agentic coding model.
+// reasoning_effort: none | low | high.
+// ------------------------------------------------------------
+
+const NEMOTRON_VL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
+
+addModel(
+  NEMOTRON_VL,
+  'Nemotron 3.5 Super VL - High Reasoning',
+  NEMOTRON_VL,
+  { adapter: 'nemotron-vl', effort: 'high' }
+);
+
+addModel(
+  `${NEMOTRON_VL}-no-thinking`,
+  'Nemotron 3.5 Super VL - No Thinking',
+  NEMOTRON_VL,
+  { adapter: 'nemotron-vl', effort: 'none' }
+);
+
+addModel(
+  `${NEMOTRON_VL}-low`,
+  'Nemotron 3.5 Super VL - Low Reasoning',
+  NEMOTRON_VL,
+  { adapter: 'nemotron-vl', effort: 'low' }
+);
+
+addModel(
+  `${NEMOTRON_VL}-high`,
+  'Nemotron 3.5 Super VL - High Reasoning',
+  NEMOTRON_VL,
+  { adapter: 'nemotron-vl', effort: 'high' }
+);
+
+// ------------------------------------------------------------
+// STEP 5 PREVIEW
+//
+// Keep the documented base profile. No invented effort aliases.
+// ------------------------------------------------------------
+
+addModel(
+  'stepfun-ai/step-5-preview',
+  'Step 5 Preview',
+  'stepfun-ai/step-5-preview',
+  { adapter: 'step' }
+);
+
+// ------------------------------------------------------------
+// LAGUNA XS 2.1
 // ------------------------------------------------------------
 
 addModel(
@@ -428,102 +260,24 @@ addModel(
 );
 
 // ------------------------------------------------------------
-// GPT OSS 20B
+// NEMOTRON 3.5 BOLT E4B
 // ------------------------------------------------------------
 
 addModel(
-  'openai/gpt-oss-20b',
-  'GPT OSS 20B',
-  'openai/gpt-oss-20b'
+  'nvidia/nemotron-3.5-bolt-e4b',
+  'Nemotron 3.5 Bolt E4B',
+  'nvidia/nemotron-3.5-bolt-e4b'
 );
 
-// ------------------------------------------------------------
-// GEMMA 4 31B IT
-//
-// NVIDIA supports enable_thinking through chat_template_kwargs.
-// ------------------------------------------------------------
-
-const GEMMA = 'google/gemma-4-31b-it';
-
-addModel(
-  GEMMA,
-  'Gemma 4 31B IT - Thinking',
-  GEMMA,
-  {
-    adapter: 'gemma',
-    thinking: true
-  }
-);
-
-addModel(
-  `${GEMMA}-thinking`,
-  'Gemma 4 31B IT - Thinking',
-  GEMMA,
-  {
-    adapter: 'gemma',
-    thinking: true
-  }
-);
-
-addModel(
-  `${GEMMA}-no-thinking`,
-  'Gemma 4 31B IT - No Thinking',
-  GEMMA,
-  {
-    adapter: 'gemma',
-    thinking: false
-  }
-);
-
-// ------------------------------------------------------------
-// MUSE GLIMMER 30B
-//
-// reasoning_effort: none | minimal | low | medium | high | max
-// ------------------------------------------------------------
-
-const MUSE = 'meta/muse-glimmer-30b';
-
-addModel(
-  MUSE,
-  'Muse Glimmer 30B - Medium Reasoning',
-  MUSE,
-  {
-    adapter: 'muse',
-    effort: 'medium'
-  }
-);
-
-addModel(
-  `${MUSE}-no-thinking`,
-  'Muse Glimmer 30B - No Thinking',
-  MUSE,
-  {
-    adapter: 'muse',
-    effort: 'none'
-  }
-);
-
-for (const effort of ['low', 'medium', 'high', 'max']) {
-  addModel(
-    `${MUSE}-${effort}`,
-    `Muse Glimmer 30B - ${effort.toUpperCase()} Reasoning`,
-    MUSE,
-    {
-      adapter: 'muse',
-      effort
-    }
-  );
-}
-
-// Ensure a typo in DEFAULT_MODEL cannot silently create a broken server.
+// Refuse to start if the configured default isn't registered.
 if (!Object.prototype.hasOwnProperty.call(MODEL_PROFILES, DEFAULT_MODEL)) {
   throw new Error(
-    `DEFAULT_MODEL "${DEFAULT_MODEL}" is not in the registered model profiles.`
+    `DEFAULT_MODEL "${DEFAULT_MODEL}" is not a registered model profile.`
   );
 }
 
 // ============================================================
-// REQUEST LOGGING
+// LOGGING
 // Never log prompts, message content, or API keys.
 // ============================================================
 
@@ -546,9 +300,7 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
   const rawOrigin = req.get('origin');
-  const origin = rawOrigin
-    ? rawOrigin.replace(/\/+$/, '')
-    : '';
+  const origin = rawOrigin ? rawOrigin.replace(/\/+$/, '') : '';
 
   const allowed =
     !origin ||
@@ -558,18 +310,15 @@ app.use((req, res, next) => {
   if (rawOrigin && allowed) {
     res.setHeader('Access-Control-Allow-Origin', rawOrigin);
     res.setHeader('Vary', 'Origin');
-
     res.setHeader(
       'Access-Control-Allow-Methods',
       'GET, POST, OPTIONS'
     );
-
     res.setHeader(
       'Access-Control-Allow-Headers',
       req.get('access-control-request-headers') ||
         'Authorization, Content-Type'
     );
-
     res.setHeader('Access-Control-Max-Age', '86400');
   }
 
@@ -590,7 +339,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// JSON PARSING
+// JSON BODY PARSER
 // ============================================================
 
 app.use(express.json({
@@ -600,20 +349,19 @@ app.use(express.json({
 
 // ============================================================
 // OPTIONAL PROXY AUTHENTICATION
-//
-// For a public Render URL, set PROXY_API_KEY to a random,
-// private string of at least 32 characters.
-// Use that key in JanitorAI as the API key for this proxy.
 // ============================================================
 
 if (PROXY_API_KEY) {
-  const expectedKey = Buffer.from(PROXY_API_KEY);
+  const expectedKey = Buffer.from(PROXY_API_KEY, 'utf8');
 
   app.use('/v1', (req, res, next) => {
     const match = (req.get('authorization') || '')
       .match(/^Bearer\s+(.+)$/i);
 
-    const suppliedKey = Buffer.from(match ? match[1] : '');
+    const suppliedKey = Buffer.from(
+      match ? match[1] : '',
+      'utf8'
+    );
 
     const valid =
       suppliedKey.length === expectedKey.length &&
@@ -632,16 +380,12 @@ if (PROXY_API_KEY) {
   });
 } else {
   console.warn(
-    'WARNING: PROXY_API_KEY is unset; /v1 endpoints are publicly accessible.'
+    'WARNING: PROXY_API_KEY is unset; the public /v1 endpoints have no proxy authentication.'
   );
 }
 
 // ============================================================
-// CONCURRENCY CONTROL
-//
-// One generation at a time by default. Only chat completions
-// use a slot; health and model-list requests remain available.
-// No queue, Redis, or other external service.
+// CONCURRENCY
 // ============================================================
 
 let activeRequests = 0;
@@ -669,12 +413,11 @@ function concurrencyMiddleware(req, res, next) {
 
   res.once('finish', release);
   res.once('close', release);
-
   next();
 }
 
 // ============================================================
-// ERROR HELPERS
+// ERRORS
 // ============================================================
 
 function jsonError(res, status, message, type = 'proxy_error') {
@@ -693,25 +436,32 @@ function jsonError(res, status, message, type = 'proxy_error') {
   });
 }
 
+function parseJsonOrText(value) {
+  if (typeof value !== 'string') return value;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
 function upstreamErrorMessage(
   data,
   fallback = 'Unknown NVIDIA error.'
 ) {
-  let parsed = data;
+  const parsed = parseJsonOrText(data);
 
   if (typeof parsed === 'string') {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      return parsed.slice(0, 3000) || fallback;
-    }
+    return parsed.slice(0, 3000) || fallback;
   }
 
   if (parsed && typeof parsed === 'object') {
     const message =
       parsed.error?.message ||
       parsed.message ||
-      parsed.detail;
+      parsed.detail ||
+      parsed.title;
 
     if (typeof message === 'string') {
       return message.slice(0, 3000);
@@ -721,145 +471,21 @@ function upstreamErrorMessage(
   return fallback;
 }
 
-function parseJsonOrText(text) {
+function safeErrorForLog(data) {
+  let value = data;
+
+  if (Buffer.isBuffer(value)) {
+    value = value.toString('utf8');
+  }
+
+  if (typeof value === 'string') {
+    return value.slice(0, 4000);
+  }
+
   try {
-    return JSON.parse(text);
+    return JSON.stringify(value).slice(0, 4000);
   } catch {
-    return text;
-  }
-}
-
-function extractRequestId(headers, payload) {
-  const headerId =
-    headers?.['nvcf-reqid'] ||
-    headers?.['nvcf-request-id'] ||
-    headers?.['x-request-id'] ||
-    headers?.['request-id'];
-
-  if (headerId) return String(headerId);
-
-  if (payload && typeof payload === 'object') {
-    const bodyId =
-      payload.requestId ||
-      payload.request_id ||
-      payload.id;
-
-    if (bodyId) return String(bodyId);
-  }
-
-  return null;
-}
-
-async function readStreamText(stream, maxBytes = 1024 * 1024) {
-  const chunks = [];
-  let total = 0;
-
-  for await (const chunk of stream) {
-    const part = Buffer.from(chunk);
-    const remaining = maxBytes - total;
-
-    if (remaining <= 0) break;
-
-    const accepted = part.subarray(0, remaining);
-    chunks.push(accepted);
-    total += accepted.length;
-
-    if (total >= maxBytes) break;
-  }
-
-  if (!stream.destroyed && !stream.readableEnded) {
-    stream.destroy();
-  }
-
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      return reject(
-        signal.reason || new Error('Request was cancelled.')
-      );
-    }
-
-    const timer = setTimeout(cleanupResolve, ms);
-
-    function cleanup() {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
-    }
-
-    function cleanupResolve() {
-      cleanup();
-      resolve();
-    }
-
-    function onAbort() {
-      cleanup();
-      reject(signal.reason || new Error('Request was cancelled.'));
-    }
-
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-// ============================================================
-// NVIDIA ASYNC RESULT POLLING
-//
-// Some NVIDIA endpoints return 202 Accepted and a request ID.
-// Poll /v1/status/{requestId} until the result is ready.
-// The generation timeout and AbortController cover polling too.
-// ============================================================
-
-async function pollNvidiaResult(requestId, signal) {
-  const statusUrl =
-    `${NVIDIA_BASE_URL}/status/${encodeURIComponent(requestId)}`;
-
-  let pollCount = 0;
-
-  while (true) {
-    if (signal.aborted) {
-      throw signal.reason || new Error('Request was cancelled.');
-    }
-
-    pollCount += 1;
-
-    // Avoid hammering the status API while inference is pending.
-    await sleep(Math.min(1000 + pollCount * 250, 3000), signal);
-
-    const response = await axios.get(statusUrl, {
-      headers: {
-        Authorization: `Bearer ${NVIDIA_API_KEY}`,
-        Accept: 'application/json'
-      },
-      responseType: 'json',
-      timeout: 0,
-      signal,
-      validateStatus: () => true,
-      maxRedirects: 0
-    });
-
-    if (response.status === 200) {
-      return response.data;
-    }
-
-    if (response.status === 202) {
-      continue;
-    }
-
-    const error = new Error(
-      upstreamErrorMessage(
-        response.data,
-        `NVIDIA status polling returned HTTP ${response.status}.`
-      )
-    );
-
-    error.response = {
-      status: response.status,
-      data: response.data
-    };
-
-    throw error;
+    return '[unprintable upstream error]';
   }
 }
 
@@ -897,85 +523,264 @@ function getProfile(requestedModel) {
 }
 
 // ============================================================
-// MODEL-SPECIFIC REQUEST ADAPTERS
+// MISTRAL MESSAGE NORMALIZATION
+//
+// NVIDIA's Mistral API declares system/user/assistant/tool roles
+// and a defined set of message fields. Extra JanitorAI/OpenAI
+// metadata is removed; conversational content is preserved.
+//
+// "developer" is normalized to "system" because Mistral's
+// declared role enum does not include "developer".
 // ============================================================
+
+const MISTRAL_ROLES = new Set([
+  'system',
+  'user',
+  'assistant',
+  'tool'
+]);
+
+function normalizeMistralMessages(messages) {
+  return messages.map((message, index) => {
+    let role = message.role;
+
+    if (role === 'developer' || role === 'context') {
+      role = 'system';
+    }
+
+    if (!MISTRAL_ROLES.has(role)) {
+      throw new Error(
+        `Mistral message ${index + 1} has unsupported role "${role}".`
+      );
+    }
+
+    const output = { role };
+
+    if (Object.prototype.hasOwnProperty.call(message, 'content')) {
+      const content = message.content;
+
+      if (
+        content !== null &&
+        typeof content !== 'string' &&
+        !Array.isArray(content)
+      ) {
+        throw new Error(
+          `Mistral message ${index + 1} has invalid content.`
+        );
+      }
+
+      output.content = content;
+    }
+
+    if (
+      typeof message.name === 'string' &&
+      message.name.length > 0
+    ) {
+      output.name = message.name;
+    }
+
+    // NVIDIA explicitly supports reasoning_content in historical
+    // assistant messages. Preserve it rather than deleting history.
+    if (
+      role === 'assistant' &&
+      (
+        typeof message.reasoning_content === 'string' ||
+        message.reasoning_content === null
+      )
+    ) {
+      if ('reasoning_content' in message) {
+        output.reasoning_content = message.reasoning_content;
+      }
+    }
+
+    if (role === 'assistant' && Array.isArray(message.tool_calls)) {
+      output.tool_calls = message.tool_calls.map((call) => {
+        if (!call || typeof call !== 'object') return call;
+
+        const cleanCall = {};
+
+        if (typeof call.id === 'string') {
+          cleanCall.id = call.id;
+        }
+
+        if (typeof call.type === 'string') {
+          cleanCall.type = call.type;
+        }
+
+        if (call.function && typeof call.function === 'object') {
+          cleanCall.function = {};
+
+          if (typeof call.function.name === 'string') {
+            cleanCall.function.name = call.function.name;
+          }
+
+          if (typeof call.function.arguments === 'string') {
+            cleanCall.function.arguments = call.function.arguments;
+          }
+        }
+
+        return cleanCall;
+      });
+    }
+
+    if (role === 'tool') {
+      if (typeof message.tool_call_id === 'string') {
+        output.tool_call_id = message.tool_call_id;
+      }
+
+      if (!output.tool_call_id) {
+        throw new Error(
+          `Mistral tool message ${index + 1} is missing tool_call_id.`
+        );
+      }
+    }
+
+    return output;
+  });
+}
+
+// ============================================================
+// MODEL-SPECIFIC UPSTREAM REQUEST
+// ============================================================
+
+const MISTRAL_ALLOWED_FIELDS = new Set([
+  'model',
+  'messages',
+  'max_tokens',
+  'stream',
+  'temperature',
+  'top_p',
+  'frequency_penalty',
+  'presence_penalty',
+  'seed',
+  'stop',
+  'tools',
+  'tool_choice',
+  'reasoning_effort'
+]);
+
+const COMMON_ALLOWED_FIELDS = new Set([
+  'model',
+  'messages',
+  'max_tokens',
+  'stream',
+  'temperature',
+  'top_p',
+  'frequency_penalty',
+  'presence_penalty',
+  'seed',
+  'stop',
+  'tools',
+  'tool_choice',
+  'parallel_tool_calls',
+  'response_format',
+  'stream_options',
+  'chat_template_kwargs',
+  'reasoning_effort',
+  'repetition_penalty',
+  'top_k',
+  'min_p',
+  'n',
+  'user'
+]);
+
+function copyAllowedFields(source, allowedFields) {
+  const output = {};
+
+  for (const [key, value] of Object.entries(source)) {
+    if (allowedFields.has(key)) {
+      output[key] = value;
+    }
+  }
+
+  return output;
+}
 
 function applyProfile(requestBody, profile) {
   const body = { ...requestBody };
-
   body.model = profile.upstream;
 
   const template = {
-    ...(body.chat_template_kwargs || {})
+    ...(
+      body.chat_template_kwargs &&
+      typeof body.chat_template_kwargs === 'object' &&
+      !Array.isArray(body.chat_template_kwargs)
+        ? body.chat_template_kwargs
+        : {}
+    )
   };
 
   switch (profile.adapter) {
     case 'mistral4': {
+      // This is the documented control for this NIM endpoint.
       body.reasoning_effort = profile.effort;
 
-      // This recipe does not honor enable_thinking.
-      delete template.enable_thinking;
-      break;
-    }
-
-    case 'nemotron-vl': {
-      body.reasoning_effort = profile.effort;
-
-      // NVIDIA recommends reasoning_effort for this endpoint.
-      delete template.enable_thinking;
+      // Remove template overrides entirely for Mistral.
+      // The NIM recipe doesn't honor enable_thinking.
+      delete body.chat_template_kwargs;
       break;
     }
 
     case 'glm': {
       body.reasoning_effort = profile.effort;
-
-      // Keep thinking traces separate from the chat answer.
       template.clear_thinking = true;
+      body.chat_template_kwargs = template;
       break;
     }
 
     case 'minimax': {
-      // Important: use the top-level field expected by the
-      // hosted NVIDIA endpoint, not chat_template_kwargs.
+      // NVIDIA's MiniMax model card specifies the effort in
+      // chat_template_kwargs rather than the top-level field.
+      template.reasoning_effort = profile.effort;
+      body.chat_template_kwargs = template;
+      delete body.reasoning_effort;
+      break;
+    }
+
+    case 'nemotron-vl': {
+      // NVIDIA's NIM API documents none/low/high and translates
+      // reasoning_effort to the model's template settings.
       body.reasoning_effort = profile.effort;
-      delete template.reasoning_effort;
+      delete template.enable_thinking;
+      body.chat_template_kwargs = template;
       break;
     }
 
     case 'step': {
-      // Do not pretend enable_thinking=false disables reasoning
-      // for this checkpoint.
-      delete template.enable_thinking;
+      // Don't add fake reasoning controls to Step 5 Preview.
       break;
     }
 
     default: {
-      // Leave settings untouched for profiles without an
-      // endpoint-specific adapter.
       break;
     }
   }
 
-  if (Object.keys(template).length > 0) {
-    body.chat_template_kwargs = template;
-  } else {
+  if (
+    body.chat_template_kwargs &&
+    Object.keys(body.chat_template_kwargs).length === 0
+  ) {
     delete body.chat_template_kwargs;
   }
 
-  return body;
+  if (profile.adapter === 'mistral4') {
+    // Strict Mistral allowlist: unknown JanitorAI fields such as
+    // client-side extensions or unsupported knobs are removed.
+    const filtered = copyAllowedFields(body, MISTRAL_ALLOWED_FIELDS);
+    filtered.messages = normalizeMistralMessages(body.messages);
+    return filtered;
+  }
+
+  // Other endpoints use only known, common API fields.
+  return copyAllowedFields(body, COMMON_ALLOWED_FIELDS);
 }
 
 // ============================================================
 // REQUEST VALIDATION
-// Does not rewrite or remove any conversation messages.
 // ============================================================
 
 function validateChatRequest(body) {
-  if (
-    !body ||
-    typeof body !== 'object' ||
-    Array.isArray(body)
-  ) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return 'Request body must be a JSON object.';
   }
 
@@ -993,27 +798,39 @@ function validateChatRequest(body) {
     return 'messages must be a non-empty array.';
   }
 
-  for (const message of body.messages) {
+  for (const [index, message] of body.messages.entries()) {
     if (
       !message ||
       typeof message !== 'object' ||
       Array.isArray(message) ||
       typeof message.role !== 'string'
     ) {
-      return 'Each message must be an object with a string role.';
+      return `Message ${index + 1} must be an object with a string role.`;
     }
   }
 
-  for (const key of ['temperature', 'top_p']) {
-    if (
-      body[key] !== undefined &&
-      (
-        typeof body[key] !== 'number' ||
-        !Number.isFinite(body[key])
-      )
-    ) {
-      return `${key} must be a finite number.`;
-    }
+  if (
+    body.temperature !== undefined &&
+    (
+      typeof body.temperature !== 'number' ||
+      !Number.isFinite(body.temperature) ||
+      body.temperature < 0 ||
+      body.temperature > 2
+    )
+  ) {
+    return 'temperature must be a number between 0 and 2.';
+  }
+
+  if (
+    body.top_p !== undefined &&
+    (
+      typeof body.top_p !== 'number' ||
+      !Number.isFinite(body.top_p) ||
+      body.top_p < 0 ||
+      body.top_p > 1
+    )
+  ) {
+    return 'top_p must be a number between 0 and 1.';
   }
 
   for (const key of ['max_tokens', 'max_completion_tokens']) {
@@ -1028,10 +845,7 @@ function validateChatRequest(body) {
     }
   }
 
-  if (
-    body.stream !== undefined &&
-    typeof body.stream !== 'boolean'
-  ) {
+  if (body.stream !== undefined && typeof body.stream !== 'boolean') {
     return 'stream must be a boolean.';
   }
 
@@ -1039,10 +853,10 @@ function validateChatRequest(body) {
 }
 
 // ============================================================
-// REASONING FIELD FILTER
+// REASONING OUTPUT FILTER
 //
-// Removes separate reasoning fields from responses while leaving
-// normal message content, tool calls, and request history alone.
+// Strips separate reasoning fields from responses only.
+// Never strips or rewrites request history.
 // ============================================================
 
 const REASONING_KEYS = new Set([
@@ -1064,10 +878,7 @@ function stripReasoningFields(value) {
   const output = {};
 
   for (const [key, child] of Object.entries(value)) {
-    if (
-      STRIP_REASONING &&
-      REASONING_KEYS.has(key.toLowerCase())
-    ) {
+    if (REASONING_KEYS.has(key.toLowerCase())) {
       continue;
     }
 
@@ -1078,23 +889,140 @@ function stripReasoningFields(value) {
 }
 
 // ============================================================
-// UPSTREAM HEADERS
+// UPSTREAM HELPERS
 // ============================================================
 
 function upstreamHeaders(streaming) {
   return {
     Authorization: `Bearer ${NVIDIA_API_KEY}`,
     'Content-Type': 'application/json',
-    Accept: streaming
-      ? 'text/event-stream'
-      : 'application/json'
+    Accept: streaming ? 'text/event-stream' : 'application/json'
   };
 }
 
+async function readStreamText(stream, maxBytes = 65536) {
+  const chunks = [];
+  let total = 0;
+
+  try {
+    for await (const chunk of stream) {
+      const part = Buffer.from(chunk);
+      const remaining = maxBytes - total;
+
+      if (remaining <= 0) break;
+
+      const accepted = part.subarray(0, remaining);
+      chunks.push(accepted);
+      total += accepted.length;
+
+      if (total >= maxBytes) break;
+    }
+  } finally {
+    if (!stream.destroyed && !stream.readableEnded) {
+      stream.destroy();
+    }
+  }
+
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function extractRequestId(headers, payload) {
+  const headerId =
+    headers?.['nvcf-reqid'] ||
+    headers?.['nvcf-request-id'] ||
+    headers?.['x-request-id'] ||
+    headers?.['request-id'];
+
+  if (headerId) return String(headerId);
+
+  if (payload && typeof payload === 'object') {
+    const bodyId =
+      payload.requestId ||
+      payload.request_id ||
+      payload.id;
+
+    if (bodyId) return String(bodyId);
+  }
+
+  return null;
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      return reject(signal.reason || new Error('Request aborted.'));
+    }
+
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    function cleanup() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    }
+
+    function onAbort() {
+      cleanup();
+      reject(signal.reason || new Error('Request aborted.'));
+    }
+
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function pollNvidiaResult(requestId, signal) {
+  const url =
+    `${NVIDIA_BASE_URL}/status/${encodeURIComponent(requestId)}`;
+
+  let count = 0;
+
+  while (true) {
+    if (signal.aborted) {
+      throw signal.reason || new Error('Request aborted.');
+    }
+
+    count += 1;
+    await sleep(Math.min(1000 + count * 250, 3000), signal);
+
+    const response = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${NVIDIA_API_KEY}`,
+        Accept: 'application/json'
+      },
+      timeout: 0,
+      signal,
+      validateStatus: () => true,
+      maxRedirects: 0
+    });
+
+    if (response.status === 200) {
+      return response.data;
+    }
+
+    if (response.status === 202) {
+      continue;
+    }
+
+    const error = new Error(
+      upstreamErrorMessage(
+        response.data,
+        `NVIDIA status endpoint returned HTTP ${response.status}.`
+      )
+    );
+
+    error.response = {
+      status: response.status,
+      data: response.data
+    };
+
+    throw error;
+  }
+}
+
 // ============================================================
-// SSE PARSER
-// Parses complete SSE events rather than modifying arbitrary
-// network chunks. UTF-8 data is decoded safely by StringDecoder.
+// SSE HELPERS
 // ============================================================
 
 function extractSseEvents(buffer) {
@@ -1146,7 +1074,6 @@ function transformSseEvent(eventText) {
         stripReasoningFields(JSON.parse(data))
       );
     } catch {
-      // Preserve an event that cannot safely be parsed.
       outputData = data;
     }
   }
@@ -1154,13 +1081,9 @@ function transformSseEvent(eventText) {
   return `${prefix}data: ${outputData}\n\n`;
 }
 
-function isDoneEvent(output) {
-  return /(?:^|\n)data:\s*\[DONE\]\s*(?:\n|$)/.test(output);
+function isDoneEvent(eventText) {
+  return /(?:^|\n)data:\s*\[DONE\]\s*(?:\n|$)/.test(eventText);
 }
-
-// ============================================================
-// SSE BACKPRESSURE
-// ============================================================
 
 function writeChunk(res, chunk) {
   if (res.destroyed || res.writableEnded) {
@@ -1204,103 +1127,75 @@ function startSseResponse(res) {
   res.flushHeaders?.();
 }
 
-// ============================================================
-// ADAPT A POLLED COMPLETION TO SSE
-//
-// If NVIDIA answers the original streaming POST with 202, the
-// status endpoint eventually returns a completed JSON response.
-// Convert that response to OpenAI-compatible SSE for JanitorAI.
-// ============================================================
-
-async function sendCompletionAsSse(res, originalData) {
-  const data = STRIP_REASONING
-    ? stripReasoningFields(originalData)
-    : originalData;
+async function sendCompletionAsSse(res, data) {
+  const result = STRIP_REASONING
+    ? stripReasoningFields(data)
+    : data;
 
   startSseResponse(res);
 
-  if (!data || !Array.isArray(data.choices)) {
-    await writeChunk(res, `data: ${JSON.stringify(data)}\n\n`);
+  if (!result || !Array.isArray(result.choices)) {
+    await writeChunk(res, `data: ${JSON.stringify(result)}\n\n`);
     await writeChunk(res, 'data: [DONE]\n\n');
 
-    if (!res.destroyed && !res.writableEnded) {
-      res.end();
-    }
-
+    if (!res.destroyed && !res.writableEnded) res.end();
     return;
   }
 
-  const id = data.id || `chatcmpl-${crypto.randomUUID()}`;
-  const created = data.created || Math.floor(Date.now() / 1000);
-  const model = data.model || 'nvidia-nim-proxy';
+  const id = result.id || `chatcmpl-${crypto.randomUUID()}`;
+  const created = result.created || Math.floor(Date.now() / 1000);
+  const model = result.model || 'nvidia-nim-proxy';
 
-  for (const choice of data.choices) {
+  for (const choice of result.choices) {
     const message = choice.message || {};
     const index = Number.isInteger(choice.index) ? choice.index : 0;
-
     const delta = { ...message };
 
-    // A streamed delta uses role, not the full message object.
     delete delta.role;
 
-    const contentChunk = {
+    await writeChunk(res, `data: ${JSON.stringify({
       id,
       object: 'chat.completion.chunk',
       created,
       model,
-      choices: [
-        {
-          index,
-          delta: {
-            role: 'assistant',
-            ...delta
-          },
-          finish_reason: null
-        }
-      ]
-    };
+      choices: [{
+        index,
+        delta: { role: 'assistant', ...delta },
+        finish_reason: null
+      }]
+    })}\n\n`);
 
-    await writeChunk(res, `data: ${JSON.stringify(contentChunk)}\n\n`);
-
-    const finishChunk = {
+    await writeChunk(res, `data: ${JSON.stringify({
       id,
       object: 'chat.completion.chunk',
       created,
       model,
-      choices: [
-        {
-          index,
-          delta: {},
-          finish_reason: choice.finish_reason || 'stop'
-        }
-      ]
-    };
-
-    await writeChunk(res, `data: ${JSON.stringify(finishChunk)}\n\n`);
+      choices: [{
+        index,
+        delta: {},
+        finish_reason: choice.finish_reason || 'stop'
+      }]
+    })}\n\n`);
   }
 
-  if (data.usage) {
-    const usageChunk = {
+  if (result.usage) {
+    await writeChunk(res, `data: ${JSON.stringify({
       id,
       object: 'chat.completion.chunk',
       created,
       model,
       choices: [],
-      usage: data.usage
-    };
-
-    await writeChunk(res, `data: ${JSON.stringify(usageChunk)}\n\n`);
+      usage: result.usage
+    })}\n\n`);
   }
 
   await writeChunk(res, 'data: [DONE]\n\n');
 
-  if (!res.destroyed && !res.writableEnded) {
-    res.end();
-  }
+  if (!res.destroyed && !res.writableEnded) res.end();
 }
 
 // ============================================================
-// HEALTH ENDPOINTS
+// STATUS ENDPOINTS
 // ============================================================
 
 app.get('/', (req, res) => {
@@ -1328,24 +1223,18 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ============================================================
-// OPENAI-COMPATIBLE MODEL LIST
-// ============================================================
-
 app.get('/v1/models', (req, res) => {
   const created = Math.floor(Date.now() / 1000);
 
-  const data = Object.values(MODEL_PROFILES).map((profile) => ({
-    id: profile.id,
-    object: 'model',
-    created,
-    owned_by: 'nvidia-nim-proxy',
-    name: profile.label
-  }));
-
   res.json({
     object: 'list',
-    data
+    data: Object.values(MODEL_PROFILES).map((profile) => ({
+      id: profile.id,
+      object: 'model',
+      created,
+      owned_by: 'nvidia-nim-proxy',
+      name: profile.label
+    }))
   });
 });
 
@@ -1394,32 +1283,55 @@ app.post(
       );
     }
 
-    // Crucial: do not remove, reorder, or truncate assistant
-    // prefixes or previous conversation messages.
-    const body = applyProfile(requestBody, profile);
+    let body;
 
-    // Translate OpenAI's newer token-limit field to NVIDIA's
-    // documented max_tokens field without overwriting max_tokens.
-    if (
-      body.max_tokens === undefined &&
-      body.max_completion_tokens !== undefined
-    ) {
-      body.max_tokens = body.max_completion_tokens;
+    try {
+      body = applyProfile(requestBody, profile);
+    } catch (error) {
+      return jsonError(
+        res,
+        400,
+        error.message || 'Invalid request.',
+        'invalid_request_error'
+      );
     }
 
-    delete body.max_completion_tokens;
+    // Translate OpenAI's newer token field to NVIDIA's max_tokens.
+    if (
+      body.max_tokens === undefined &&
+      requestBody.max_completion_tokens !== undefined
+    ) {
+      body.max_tokens = requestBody.max_completion_tokens;
+    }
 
     if (body.max_tokens === undefined) {
       body.max_tokens = DEFAULT_MAX_TOKENS;
     }
 
     const streaming = body.stream === true;
+
+    // Mistral Large 4's hosted API accepts max_tokens up to 262144.
+    if (
+      profile.adapter === 'mistral4' &&
+      (
+        !Number.isInteger(body.max_tokens) ||
+        body.max_tokens < 1 ||
+        body.max_tokens > 262144
+      )
+    ) {
+      return jsonError(
+        res,
+        400,
+        'For Mistral Large 4, max_tokens must be between 1 and 262144.',
+        'invalid_request_error'
+      );
+    }
+
     const controller = new AbortController();
 
     let upstreamStream = null;
     let clientDisconnected = false;
     let timedOut = false;
-    let timeout;
 
     const cancelUpstream = () => {
       if (clientDisconnected) return;
@@ -1435,15 +1347,13 @@ app.post(
     const onRequestAborted = () => cancelUpstream();
 
     const onResponseClose = () => {
-      if (!res.writableEnded) {
-        cancelUpstream();
-      }
+      if (!res.writableEnded) cancelUpstream();
     };
 
     req.once('aborted', onRequestAborted);
     res.once('close', onResponseClose);
 
-    timeout = setTimeout(() => {
+    const timeout = setTimeout(() => {
       if (clientDisconnected) return;
 
       timedOut = true;
@@ -1452,11 +1362,6 @@ app.post(
         new Error('NVIDIA request timed out.'),
         { code: 'UPSTREAM_TIMEOUT' }
       );
-
-      console.warn('NVIDIA request timed out:', {
-        model: requestedModel,
-        timeoutMs: REQUEST_TIMEOUT_MS
-      });
 
       controller.abort(error);
 
@@ -1489,50 +1394,40 @@ app.post(
         ) {
           upstream.data.destroy();
         }
-
         return;
       }
 
       let completedByPolling = false;
 
-      // ------------------------------------------------------
-      // ASYNC ACCEPTED RESPONSE
-      // ------------------------------------------------------
-
+      // Some NVIDIA endpoints return 202 and a request ID.
       if (upstream.status === 202) {
-        let pendingPayload = upstream.data;
+        let pendingData = upstream.data;
 
         if (streaming && upstream.data) {
           upstreamStream = upstream.data;
-
-          const pendingText = await readStreamText(
+          const text = await readStreamText(
             upstreamStream,
             1024 * 1024
           );
-
           upstreamStream = null;
-          pendingPayload = parseJsonOrText(pendingText);
+          pendingData = parseJsonOrText(text);
         }
 
         const requestId = extractRequestId(
           upstream.headers,
-          pendingPayload
+          pendingData
         );
 
         if (!requestId) {
           return jsonError(
             res,
             502,
-            'NVIDIA returned 202 Accepted without a usable request ID.',
+            'NVIDIA returned 202 Accepted without a request ID.',
             'upstream_error'
           );
         }
 
-        console.log('NVIDIA accepted asynchronous request:', {
-          model: requestedModel
-        });
-
-        const completedData = await pollNvidiaResult(
+        const completed = await pollNvidiaResult(
           requestId,
           controller.signal
         );
@@ -1540,34 +1435,30 @@ app.post(
         upstream = {
           ...upstream,
           status: 200,
-          data: completedData
+          data: completed
         };
 
         completedByPolling = true;
       }
 
-      if (clientDisconnected || res.destroyed) {
-        return;
-      }
+      if (clientDisconnected || res.destroyed) return;
 
-      // ------------------------------------------------------
-      // UPSTREAM ERRORS
-      // ------------------------------------------------------
-
+      // Upstream error response. Capture the actual response body
+      // rather than only the generic "Invalid request" message.
       if (upstream.status < 200 || upstream.status >= 300) {
         let errorData = upstream.data;
 
         if (streaming && upstream.data) {
           upstreamStream = upstream.data;
-
-          errorData = await readStreamText(upstreamStream, 64 * 1024);
+          const text = await readStreamText(
+            upstreamStream,
+            65536
+          );
           upstreamStream = null;
-          errorData = parseJsonOrText(errorData);
+          errorData = parseJsonOrText(text);
         }
 
-        if (clientDisconnected || res.destroyed) {
-          return;
-        }
+        if (clientDisconnected || res.destroyed) return;
 
         const message = upstreamErrorMessage(
           errorData,
@@ -1576,10 +1467,16 @@ app.post(
 
         console.error('NVIDIA API error:', {
           status: upstream.status,
-          model: requestedModel,
+          requestedModel,
           upstreamModel: profile.upstream,
           streaming,
-          message
+          adapter: profile.adapter,
+          reasoningEffort: body.reasoning_effort,
+          requestFields: Object.keys(body),
+          messageRoles: Array.isArray(body.messages)
+            ? body.messages.map((m) => m.role)
+            : [],
+          upstreamError: safeErrorForLog(errorData)
         });
 
         return jsonError(
@@ -1590,18 +1487,15 @@ app.post(
         );
       }
 
-      // ------------------------------------------------------
-      // COMPLETED RESPONSE AFTER POLLING
-      // ------------------------------------------------------
-
+      // Completed asynchronous inference is converted to SSE if needed.
       if (streaming && completedByPolling) {
         await sendCompletionAsSse(res, upstream.data);
         return;
       }
 
-      // ------------------------------------------------------
-      // NORMAL STREAMING RESPONSE
-      // ------------------------------------------------------
+      // --------------------------------------------------------
+      // STREAMING RESPONSE
+      // --------------------------------------------------------
 
       if (streaming) {
         upstreamStream = upstream.data;
@@ -1614,9 +1508,7 @@ app.post(
 
         try {
           for await (const chunk of upstreamStream) {
-            if (clientDisconnected || res.destroyed) {
-              return;
-            }
+            if (clientDisconnected || res.destroyed) return;
 
             buffer += decoder.write(chunk);
 
@@ -1624,20 +1516,14 @@ app.post(
             buffer = parsed.remaining;
 
             for (const eventText of parsed.events) {
-              if (clientDisconnected || res.destroyed) {
-                return;
-              }
+              if (clientDisconnected || res.destroyed) return;
 
               const output = transformSseEvent(eventText);
-
               if (!output) continue;
 
-              if (isDoneEvent(output)) {
-                receivedDone = true;
-              }
+              if (isDoneEvent(output)) receivedDone = true;
 
               const writable = await writeChunk(res, output);
-
               if (!writable) return;
 
               if (receivedDone) break;
@@ -1646,9 +1532,7 @@ app.post(
             if (receivedDone) break;
           }
 
-          if (clientDisconnected || res.destroyed) {
-            return;
-          }
+          if (clientDisconnected || res.destroyed) return;
 
           if (!receivedDone) {
             buffer += decoder.end();
@@ -1665,74 +1549,50 @@ app.post(
                 const writable = await writeChunk(res, output);
                 if (!writable) return;
 
-                if (isDoneEvent(output)) {
-                  receivedDone = true;
-                }
+                receivedDone = isDoneEvent(output);
               }
             }
           }
 
-          if (clientDisconnected || res.destroyed) {
-            return;
-          }
-
           if (!receivedDone) {
-            const writable = await writeChunk(
-              res,
-              'data: [DONE]\n\n'
-            );
-
-            if (!writable) return;
+            await writeChunk(res, 'data: [DONE]\n\n');
           }
 
-          if (!res.destroyed && !res.writableEnded) {
-            res.end();
-          }
+          if (!res.destroyed && !res.writableEnded) res.end();
         } catch (error) {
-          if (
-            clientDisconnected ||
-            res.destroyed ||
-            error?.code === 'ERR_CANCELED' ||
-            error?.code === 'ABORT_ERR'
-          ) {
-            return;
-          }
+          if (clientDisconnected || res.destroyed) return;
 
-          console.error('NVIDIA streaming failed:', {
+          console.error('NVIDIA stream failed:', {
+            requestedModel,
             code: error?.code || 'UNKNOWN',
             message: error?.message || 'Unknown stream error',
-            model: requestedModel,
             timedOut
           });
 
           if (!res.destroyed && !res.writableEnded) {
-            const message = timedOut
+            const text = timedOut
               ? 'NVIDIA generation timed out.'
               : 'NVIDIA streaming connection failed.';
 
-            const errorEvent = `data: ${JSON.stringify({
+            await writeChunk(res, `data: ${JSON.stringify({
               error: {
-                message,
+                message: text,
                 type: timedOut
                   ? 'upstream_timeout'
                   : 'upstream_error'
               }
-            })}\n\n`;
+            })}\n\n`);
 
-            await writeChunk(res, errorEvent);
-
-            if (!res.destroyed && !res.writableEnded) {
-              res.end();
-            }
+            if (!res.destroyed && !res.writableEnded) res.end();
           }
         }
 
         return;
       }
 
-      // ------------------------------------------------------
-      // NORMAL NON-STREAMING RESPONSE
-      // ------------------------------------------------------
+      // --------------------------------------------------------
+      // NON-STREAMING RESPONSE
+      // --------------------------------------------------------
 
       const responseData = STRIP_REASONING
         ? stripReasoningFields(upstream.data)
@@ -1740,14 +1600,11 @@ app.post(
 
       return res.status(upstream.status).json(responseData);
     } catch (error) {
-      if (clientDisconnected || res.destroyed) {
-        return;
-      }
+      if (clientDisconnected || res.destroyed) return;
 
       const isTimeout =
         timedOut ||
         error?.code === 'UPSTREAM_TIMEOUT' ||
-        error?.cause?.code === 'UPSTREAM_TIMEOUT' ||
         controller.signal.reason?.code === 'UPSTREAM_TIMEOUT';
 
       if (isTimeout) {
@@ -1759,12 +1616,7 @@ app.post(
         );
       }
 
-      if (
-        error?.code === 'ERR_CANCELED' ||
-        controller.signal.aborted
-      ) {
-        return;
-      }
+      if (controller.signal.aborted) return;
 
       const status = error?.response?.status || 502;
 
@@ -1775,10 +1627,10 @@ app.post(
 
       console.error('Proxy request failed:', {
         status,
+        requestedModel,
+        upstreamModel: profile.upstream,
         code: error?.code || 'UNKNOWN',
-        message,
-        model: requestedModel,
-        upstreamModel: profile.upstream
+        message
       });
 
       return jsonError(
@@ -1789,7 +1641,6 @@ app.post(
       );
     } finally {
       clearTimeout(timeout);
-
       req.removeListener('aborted', onRequestAborted);
       res.removeListener('close', onResponseClose);
 
@@ -1805,13 +1656,11 @@ app.post(
 );
 
 // ============================================================
-// ERROR HANDLING
+// FINAL ERROR HANDLER
 // ============================================================
 
 app.use((err, req, res, next) => {
-  if (res.headersSent) {
-    return next(err);
-  }
+  if (res.headersSent) return next(err);
 
   if (err?.type === 'entity.too.large') {
     return jsonError(
@@ -1861,14 +1710,13 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Model profiles: ${Object.keys(MODEL_PROFILES).length}`);
   console.log(`Reasoning stripping: ${STRIP_REASONING}`);
   console.log(`Unknown models: ${ALLOW_UNKNOWN_MODELS}`);
-  console.log(`Max concurrent generations: ${MAX_CONCURRENT_REQUESTS}`);
+  console.log(`Concurrent generations: ${MAX_CONCURRENT_REQUESTS}`);
   console.log(`Default max tokens: ${DEFAULT_MAX_TOKENS}`);
   console.log(`Timeout: ${REQUEST_TIMEOUT_MS}ms`);
-  console.log(`Proxy authentication: ${PROXY_API_KEY ? 'enabled' : 'DISABLED'}`);
+  console.log(`Proxy authentication: ${PROXY_API_KEY ? 'enabled' : 'disabled'}`);
   console.log('========================================');
 });
 
-// Long generations are controlled by REQUEST_TIMEOUT_MS.
 server.requestTimeout = 0;
 server.timeout = 0;
 server.headersTimeout = 65000;
