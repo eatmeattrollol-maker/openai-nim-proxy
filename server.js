@@ -21,7 +21,7 @@ const NVIDIA_BASE_URL = (
 ).replace(/\/+$/, '');
 
 const DEFAULT_MODEL =
-  process.env.DEFAULT_MODEL || 'moonshotai/kimi-k3';
+  process.env.DEFAULT_MODEL || 'mistralai/mistral-large-4-1t-a52b';
 
 const REQUEST_TIMEOUT_MS = Number(
   process.env.REQUEST_TIMEOUT_MS || 600000
