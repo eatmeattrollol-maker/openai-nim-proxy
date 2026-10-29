@@ -3,7 +3,8 @@
 
 const express = require('express');
 const axios = require('axios');
-const { StringDecoder } = require('string_decoder');
+const crypto = require('node:crypto');
+const { StringDecoder } = require('node:string_decoder');
 
 const app = express();
 
@@ -21,7 +22,8 @@ const NVIDIA_BASE_URL = (
 ).replace(/\/+$/, '');
 
 const DEFAULT_MODEL =
-  process.env.DEFAULT_MODEL || 'mistralai/mistral-large-4-1t-a52b';
+  process.env.DEFAULT_MODEL ||
+  'mistralai/mistral-large-4-1t-a52b';
 
 const REQUEST_TIMEOUT_MS = Number(
   process.env.REQUEST_TIMEOUT_MS || 600000
@@ -30,34 +32,31 @@ const REQUEST_TIMEOUT_MS = Number(
 const MAX_BODY_BYTES = process.env.MAX_BODY_BYTES || '5mb';
 
 const MAX_CONCURRENT_REQUESTS = Number(
-  process.env.MAX_CONCURRENT_REQUESTS || 4
+  process.env.MAX_CONCURRENT_REQUESTS || 1
 );
 
 const STRIP_REASONING =
   (process.env.STRIP_REASONING || 'true').toLowerCase() === 'true';
 
 const ALLOW_UNKNOWN_MODELS =
-  (process.env.ALLOW_UNKNOWN_MODELS || 'false').toLowerCase() === 'true';
+  (process.env.ALLOW_UNKNOWN_MODELS || 'true').toLowerCase() === 'true';
 
-// This proxy uses NVIDIA_API_KEY for outbound NVIDIA requests.
-// Incoming JanitorAI API keys are not validated by this server.
+const PROXY_API_KEY = process.env.PROXY_API_KEY || '';
+
+const ALLOWED_ORIGINS = (
+  process.env.CORS_ORIGINS || 'https://janitorai.com'
+)
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 if (!NVIDIA_API_KEY) {
-  console.error(
-    'FATAL: NVIDIA_API_KEY is missing. Check Render Environment.'
-  );
+  console.error('FATAL: NVIDIA_API_KEY is missing in Render Environment.');
   process.exit(1);
 }
 
-if (!Number.isFinite(PORT) || PORT < 1 || PORT > 65535) {
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error('PORT must be a valid TCP port.');
-}
-
-if (
-  !Number.isFinite(MAX_CONCURRENT_REQUESTS) ||
-  MAX_CONCURRENT_REQUESTS < 1
-) {
-  throw new Error('MAX_CONCURRENT_REQUESTS must be at least 1.');
 }
 
 if (
@@ -67,144 +66,30 @@ if (
   throw new Error('REQUEST_TIMEOUT_MS must be at least 1000.');
 }
 
+if (
+  !Number.isInteger(MAX_CONCURRENT_REQUESTS) ||
+  MAX_CONCURRENT_REQUESTS < 1
+) {
+  throw new Error('MAX_CONCURRENT_REQUESTS must be at least 1.');
+}
+
+if (PROXY_API_KEY && PROXY_API_KEY.length < 32) {
+  throw new Error('PROXY_API_KEY must be at least 32 characters.');
+}
+
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-
-// ============================================================
-// Request logging
-// ============================================================
-
-// Logs request method, path, status, and duration.
-// Does not log API keys, prompts, or response contents.
-
-app.use((req, res, next) => {
-  const started = Date.now();
-
-  res.on('finish', () => {
-    console.log(
-      `${req.method} ${req.path} -> ${res.statusCode} ` +
-      `(${Date.now() - started}ms)`
-    );
-  });
-
-  next();
-});
-
-// ============================================================
-// Middleware
-// ============================================================
-
-app.use(express.json({ limit: MAX_BODY_BYTES }));
-
-// CORS support for browser-based clients.
-const allowedOrigins = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
-app.use((req, res, next) => {
-  const origin = req.get('origin');
-  const allowAll = allowedOrigins.includes('*');
-  const originAllowed =
-    origin && (allowAll || allowedOrigins.includes(origin));
-
-  // Log preflight diagnostics without exposing keys or prompts.
-  if (req.method === 'OPTIONS') {
-    console.log('CORS preflight:', {
-      origin: origin || '(no Origin header)',
-      requestedMethod:
-        req.get('access-control-request-method') || '(not specified)',
-      requestedHeaders:
-        req.get('access-control-request-headers') || '(not specified)',
-      originAllowed: Boolean(originAllowed)
-    });
-  }
-
-  if (originAllowed) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader(
-      'Access-Control-Allow-Methods',
-      'GET, POST, OPTIONS'
-    );
-
-    // Allow the headers the browser actually requests.
-    res.setHeader(
-      'Access-Control-Allow-Headers',
-      req.get('access-control-request-headers') ||
-        'Authorization, Content-Type'
-    );
-  }
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
-
-// Limit concurrent requests to the proxy.
-
-let activeRequests = 0;
-
-app.use((req, res, next) => {
-  if (!req.path.startsWith('/v1/')) {
-    return next();
-  }
-
-  if (activeRequests >= MAX_CONCURRENT_REQUESTS) {
-    res.setHeader('Retry-After', '3');
-
-    return res.status(503).json({
-      error: {
-        message: 'Proxy is busy. Try again shortly.',
-        type: 'server_overloaded'
-      }
-    });
-  }
-
-  activeRequests += 1;
-
-  let released = false;
-
-  const release = () => {
-    if (released) return;
-
-    released = true;
-    activeRequests = Math.max(0, activeRequests - 1);
-  };
-
-  res.once('finish', release);
-  res.once('close', release);
-
-  next();
-});
 
 // ============================================================
 // Model profiles
 // ============================================================
 
-// The profile ID is what JanitorAI sends.
-// The upstream ID is what NVIDIA receives.
-//
-// Profiles can apply model-specific reasoning options.
-// They do not guarantee that NVIDIA currently provides access
-// to the corresponding upstream model.
-
 const MODEL_PROFILES = {
-  // ----------------------------------------------------------
-  // Kimi K3
-  // ----------------------------------------------------------
-
   'moonshotai/kimi-k3': {
     upstream: 'moonshotai/kimi-k3',
     label: 'Kimi K3',
     adapter: 'generic'
   },
-
-  // ----------------------------------------------------------
-  // Mistral Large 4
-  // ----------------------------------------------------------
 
   'mistralai/mistral-large-4-1t-a52b': {
     upstream: 'mistralai/mistral-large-4-1t-a52b',
@@ -233,19 +118,11 @@ const MODEL_PROFILES = {
     reasoningEffort: 'high'
   },
 
-  // ----------------------------------------------------------
-  // Mistral Nemotron
-  // ----------------------------------------------------------
-
   'mistralai/mistral-nemotron': {
     upstream: 'mistralai/mistral-nemotron',
     label: 'Mistral Nemotron',
     adapter: 'generic'
   },
-
-  // ----------------------------------------------------------
-  // Nemotron 3 Ultra
-  // ----------------------------------------------------------
 
   'nvidia/nemotron-3-ultra-550b-a55b': {
     upstream: 'nvidia/nemotron-3-ultra-550b-a55b',
@@ -278,10 +155,6 @@ const MODEL_PROFILES = {
     thinkingBudget: 8192
   },
 
-  // ----------------------------------------------------------
-  // Nemotron 3.5 Super VL
-  // ----------------------------------------------------------
-
   'nvidia/nemotron-3.5-super-vl-120b-a12b': {
     upstream: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
     label: 'Nemotron 3.5 Super VL',
@@ -295,10 +168,6 @@ const MODEL_PROFILES = {
     adapter: 'nemotron-vl',
     thinking: false
   },
-
-  // ----------------------------------------------------------
-  // GLM 5.3 Flash
-  // ----------------------------------------------------------
 
   'z-ai/glm-5.3-flash': {
     upstream: 'z-ai/glm-5.3-flash',
@@ -320,29 +189,17 @@ const MODEL_PROFILES = {
     thinking: false
   },
 
-  // ----------------------------------------------------------
-  // DeepSeek V4.1 Flash
-  // ----------------------------------------------------------
-
   'deepseek-ai/deepseek-v4.1-flash': {
     upstream: 'deepseek-ai/deepseek-v4.1-flash',
     label: 'DeepSeek V4.1 Flash',
     adapter: 'deepseek'
   },
 
-  // ----------------------------------------------------------
-  // Step 5 Preview
-  // ----------------------------------------------------------
-
   'stepfun-ai/step-5-preview': {
     upstream: 'stepfun-ai/step-5-preview',
     label: 'Step 5 Preview',
     adapter: 'step'
   },
-
-  // ----------------------------------------------------------
-  // MiniMax M3.1 Flash
-  // ----------------------------------------------------------
 
   'minimaxai/minimax-m3.1-flash': {
     upstream: 'minimaxai/minimax-m3.1-flash',
@@ -371,10 +228,6 @@ const MODEL_PROFILES = {
     reasoningEffort: 'high'
   },
 
-  // ----------------------------------------------------------
-  // Other models
-  // ----------------------------------------------------------
-
   'poolside/laguna-xs-2.1': {
     upstream: 'poolside/laguna-xs-2.1',
     label: 'Laguna XS 2.1',
@@ -399,96 +252,212 @@ const MODEL_PROFILES = {
     adapter: 'muse-glimmer'
   }
 };
+ 
+// ============================================================
+// Request logging
+// ============================================================
+
+app.use((req, res, next) => {
+  const started = Date.now();
+
+  res.once('finish', () => {
+    console.log(
+      `${req.method} ${req.path} -> ${res.statusCode} ` +
+      `(${Date.now() - started}ms)`
+    );
+  });
+
+  next();
+});
 
 // ============================================================
-// Helper functions
+// CORS
 // ============================================================
 
-function jsonError(res, status, message, type = 'proxy_error') {
+app.use((req, res, next) => {
+  const origin = req.get('origin');
+
+  const allowed =
+    !origin ||
+    ALLOWED_ORIGINS.includes('*') ||
+    ALLOWED_ORIGINS.includes(origin);
+
+  if (origin && allowed) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader(
+      'Access-Control-Allow-Methods',
+      'GET, POST, OPTIONS'
+    );
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      req.get('access-control-request-headers') ||
+        'Authorization, Content-Type'
+    );
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(allowed ? 204 : 403);
+  }
+
+  if (!allowed) {
+    return res.status(403).json({
+      error: {
+        message: 'Origin not allowed.',
+        type: 'cors_error'
+      }
+    });
+  }
+
+  next();
+});
+
+// ============================================================
+// JSON parsing
+// ============================================================
+
+app.use(express.json({
+  limit: MAX_BODY_BYTES,
+  strict: true
+}));
+
+// ============================================================
+// Optional proxy authentication
+// ============================================================
+
+// Leave PROXY_API_KEY unset if your client cannot supply a
+// separate proxy key. If set, JanitorAI must send it as:
+// Authorization: Bearer YOUR_PROXY_API_KEY
+//
+// NVIDIA_API_KEY remains private on the server.
+
+if (PROXY_API_KEY) {
+  const expectedKey = Buffer.from(PROXY_API_KEY);
+
+  app.use('/v1', (req, res, next) => {
+    const match = (req.get('authorization') || '')
+      .match(/^Bearer\s+(.+)$/i);
+
+    const suppliedKey = Buffer.from(match ? match[1] : '');
+
+    const valid =
+      suppliedKey.length === expectedKey.length &&
+      crypto.timingSafeEqual(suppliedKey, expectedKey);
+
+    if (!valid) {
+      return res.status(401).json({
+        error: {
+          message: 'Invalid or missing proxy API key.',
+          type: 'authentication_error'
+        }
+      });
+    }
+
+    next();
+  });
+}
+
+// ============================================================
+// Concurrency control
+// ============================================================
+
+// One user, one active generation by default.
+// This prevents overlapping requests from consuming the
+// free Render instance's resources.
+
+let activeRequests = 0;
+
+app.use('/v1', (req, res, next) => {
+  if (activeRequests >= MAX_CONCURRENT_REQUESTS) {
+    res.setHeader('Retry-After', '3');
+
+    return res.status(503).json({
+      error: {
+        message: 'Proxy is busy. Try again shortly.',
+        type: 'server_overloaded'
+      }
+    });
+  }
+
+  activeRequests += 1;
+
+  let released = false;
+
+  const release = () => {
+    if (released) return;
+
+    released = true;
+    activeRequests = Math.max(0, activeRequests - 1);
+  };
+
+  res.once('finish', release);
+  res.once('close', release);
+
+  next();
+});
+
+// ============================================================
+// Helper: standard JSON error
+// ============================================================
+
+function jsonError(
+  res,
+  status,
+  message,
+  type = 'proxy_error'
+) {
   if (res.headersSent) {
-    res.end();
+    if (!res.destroyed && !res.writableEnded) {
+      res.end();
+    }
+
     return;
   }
 
-  res.status(status).json({
+  return res.status(status).json({
     error: {
-      message,
+      message: String(message || 'Unknown error').slice(0, 4000),
       type
     }
   });
 }
 
-function getProfile(requestedModel) {
-  const profile = MODEL_PROFILES[requestedModel];
+// ============================================================
+// Helper: resolve model profiles
+// ============================================================
 
-  if (profile) {
-    return {
-      requestedModel,
-      profile
-    };
+function getProfile(requestedModel) {
+  if (
+    typeof requestedModel === 'string' &&
+    Object.prototype.hasOwnProperty.call(
+      MODEL_PROFILES,
+      requestedModel
+    )
+  ) {
+    return MODEL_PROFILES[requestedModel];
   }
 
+  // Unknown models are enabled by default.
+  // NVIDIA still must recognize and provide access to the model.
   if (
     ALLOW_UNKNOWN_MODELS &&
     typeof requestedModel === 'string' &&
     requestedModel.trim()
   ) {
     return {
-      requestedModel,
-      profile: {
-        upstream: requestedModel,
-        label: requestedModel,
-        adapter: 'generic'
-      }
+      upstream: requestedModel.trim(),
+      label: requestedModel.trim(),
+      adapter: 'generic'
     };
   }
 
   return null;
 }
 
-function cleanText(value) {
-  if (typeof value !== 'string') {
-    return value;
-  }
-
-  return value
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .replace(
-      /<\|begin_of_thought\|>[\s\S]*?<\|end_of_thought\|>/gi,
-      ''
-    )
-    .replace(/^\s*<think>\s*/i, '')
-    .trim();
-}
-
-const REASONING_KEYS = new Set([
-  'reasoning',
-  'reasoning_content',
-  'thinking',
-  'internal_reasoning'
-]);
-
-function stripReasoningFields(value) {
-  if (Array.isArray(value)) {
-    return value.map(stripReasoningFields);
-  }
-
-  if (!value || typeof value !== 'object') {
-    return typeof value === 'string' ? cleanText(value) : value;
-  }
-
-  const output = {};
-
-  for (const [key, child] of Object.entries(value)) {
-    if (STRIP_REASONING && REASONING_KEYS.has(key.toLowerCase())) {
-      continue;
-    }
-
-    output[key] = stripReasoningFields(child);
-  }
-
-  return output;
-}
+// ============================================================
+// Helper: apply model-specific options
+// ============================================================
 
 function applyProfile(requestBody, profile) {
   const body = { ...requestBody };
@@ -540,14 +509,7 @@ function applyProfile(requestBody, profile) {
       break;
     }
 
-    case 'mistral-large-4': {
-      if (profile.reasoningEffort) {
-        body.reasoning_effort = profile.reasoningEffort;
-      }
-
-      break;
-    }
-
+    case 'mistral-large-4':
     case 'muse-glimmer': {
       if (profile.reasoningEffort) {
         body.reasoning_effort = profile.reasoningEffort;
@@ -556,27 +518,41 @@ function applyProfile(requestBody, profile) {
       break;
     }
 
-    case 'deepseek':
-    case 'step':
-    case 'generic':
     default:
-      // Preserve the client's generation settings.
+      // Generic profiles preserve client generation settings.
       break;
   }
 
   return body;
 }
 
+// ============================================================
+// Helper: validate chat requests
+// ============================================================
+
 function validateChatRequest(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    Array.isArray(body)
+  ) {
     return 'Request body must be a JSON object.';
   }
 
-  if (typeof body.model !== 'string' || !body.model.trim()) {
-    return 'A model name is required.';
+  if (
+    body.model !== undefined &&
+    (
+      typeof body.model !== 'string' ||
+      !body.model.trim()
+    )
+  ) {
+    return 'model must be a non-empty string.';
   }
 
-  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+  if (
+    !Array.isArray(body.messages) ||
+    body.messages.length === 0
+  ) {
     return 'messages must be a non-empty array.';
   }
 
@@ -584,66 +560,69 @@ function validateChatRequest(body) {
     if (
       !message ||
       typeof message !== 'object' ||
+      Array.isArray(message) ||
       typeof message.role !== 'string'
     ) {
       return 'Each message must be an object with a role.';
     }
   }
 
-  if (
-    body.temperature !== undefined &&
-    (
-      typeof body.temperature !== 'number' ||
-      !Number.isFinite(body.temperature)
-    )
-  ) {
-    return 'temperature must be a finite number.';
+  for (const key of ['temperature', 'top_p']) {
+    if (
+      body[key] !== undefined &&
+      (
+        typeof body[key] !== 'number' ||
+        !Number.isFinite(body[key])
+      )
+    ) {
+      return `${key} must be a finite number.`;
+    }
+  }
+
+  for (const key of ['max_tokens', 'max_completion_tokens']) {
+    if (
+      body[key] !== undefined &&
+      (
+        !Number.isInteger(body[key]) ||
+        body[key] < 1
+      )
+    ) {
+      return `${key} must be a positive integer.`;
+    }
   }
 
   if (
-    body.top_p !== undefined &&
-    (
-      typeof body.top_p !== 'number' ||
-      !Number.isFinite(body.top_p)
-    )
+    body.stream !== undefined &&
+    typeof body.stream !== 'boolean'
   ) {
-    return 'top_p must be a finite number.';
-  }
-
-  if (
-    body.max_tokens !== undefined &&
-    (
-      !Number.isInteger(body.max_tokens) ||
-      body.max_tokens < 1
-    )
-  ) {
-    return 'max_tokens must be a positive integer.';
-  }
-
-  if (
-    body.max_completion_tokens !== undefined &&
-    (
-      !Number.isInteger(body.max_completion_tokens) ||
-      body.max_completion_tokens < 1
-    )
-  ) {
-    return 'max_completion_tokens must be a positive integer.';
+    return 'stream must be a boolean.';
   }
 
   return null;
 }
 
+// ============================================================
+// Helper: upstream request headers
+// ============================================================
+
 function upstreamHeaders(streaming = false) {
   return {
     Authorization: `Bearer ${NVIDIA_API_KEY}`,
     'Content-Type': 'application/json',
-    Accept: streaming ? 'text/event-stream' : 'application/json'
+    Accept: streaming
+      ? 'text/event-stream'
+      : 'application/json'
   };
 }
 
-function getUpstreamErrorMessage(error) {
-  const data = error?.response?.data;
+// ============================================================
+// Helper: extract upstream errors
+// ============================================================
 
+function upstreamErrorMessage(
+  data,
+  fallback = 'Unknown NVIDIA error.'
+) {
   if (data && typeof data === 'object') {
     const message =
       data.error?.message ||
@@ -651,51 +630,63 @@ function getUpstreamErrorMessage(error) {
       data.detail;
 
     if (typeof message === 'string') {
-      return message.slice(0, 2000);
+      return message.slice(0, 3000);
     }
   }
 
   if (typeof data === 'string') {
-    return data.slice(0, 2000);
+    return data.slice(0, 3000);
   }
 
-  if (error?.code === 'ECONNABORTED') {
-    return 'The NVIDIA request timed out.';
-  }
-
-  if (error?.code === 'ERR_CANCELED') {
-    return 'The upstream request was canceled.';
-  }
-
-  return error?.message || 'Unknown upstream error.';
-}
-
-function parseUpstreamError(rawError, status) {
-  let message =
-    rawError || `NVIDIA returned HTTP ${status}`;
-
-  try {
-    const parsed = JSON.parse(rawError);
-
-    message =
-      parsed.error?.message ||
-      parsed.message ||
-      message;
-  } catch {
-    // Keep the raw response when it is not JSON.
-  }
-
-  return String(message).slice(0, 2000);
+  return fallback;
 }
 
 // ============================================================
-// Health and model endpoints
+// Helper: strip reasoning fields from JSON responses
+// ============================================================
+
+const REASONING_KEYS = new Set([
+  'reasoning',
+  'reasoning_content',
+  'thinking',
+  'internal_reasoning'
+]);
+
+function stripReasoningFields(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripReasoningFields);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const output = {};
+
+  for (const [key, child] of Object.entries(value)) {
+    if (
+      STRIP_REASONING &&
+      REASONING_KEYS.has(key.toLowerCase())
+    ) {
+      continue;
+    }
+
+    output[key] = stripReasoningFields(child);
+  }
+
+  return output;
+}
+
+ 
+// ============================================================
+// Health endpoint
 // ============================================================
 
 app.get('/', (req, res) => {
   res.json({
     name: 'NVIDIA NIM JanitorAI Proxy',
     status: 'ok',
+    allowUnknownModels: ALLOW_UNKNOWN_MODELS,
     endpoints: [
       '/health',
       '/v1/models',
@@ -708,14 +699,19 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     activeRequests,
-    maxConcurrentRequests: MAX_CONCURRENT_REQUESTS
+    maxConcurrentRequests: MAX_CONCURRENT_REQUESTS,
+    allowUnknownModels: ALLOW_UNKNOWN_MODELS
   });
 });
+
+// ============================================================
+// Models endpoint
+// ============================================================
 
 app.get('/v1/models', (req, res) => {
   const created = Math.floor(Date.now() / 1000);
 
-  const models = Object.entries(MODEL_PROFILES).map(
+  const data = Object.entries(MODEL_PROFILES).map(
     ([id, profile]) => ({
       id,
       object: 'model',
@@ -725,9 +721,8 @@ app.get('/v1/models', (req, res) => {
     })
   );
 
-  // Include the default model if it is not already listed.
-  if (!models.some((model) => model.id === DEFAULT_MODEL)) {
-    models.unshift({
+  if (!data.some((model) => model.id === DEFAULT_MODEL)) {
+    data.unshift({
       id: DEFAULT_MODEL,
       object: 'model',
       created,
@@ -738,28 +733,153 @@ app.get('/v1/models', (req, res) => {
 
   res.json({
     object: 'list',
-    data: models
+    data
   });
 });
 
+// ============================================================
+// SSE transformation
+// ============================================================
+
+// Processes complete Server-Sent Events, not arbitrary chunks.
+// This avoids corrupting JSON when NVIDIA splits a response
+// across multiple network packets.
+
+function transformSseEvent(eventText) {
+  if (!eventText) {
+    return '';
+  }
+
+  const lines = eventText.split(/\r?\n/);
+  const dataLines = [];
+  const otherLines = [];
+
+  for (const line of lines) {
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).replace(/^ /, ''));
+    } else {
+      otherLines.push(line);
+    }
+  }
+
+  // Preserve events that do not contain a data field.
+  if (dataLines.length === 0) {
+    return `${eventText}\n\n`;
+  }
+
+  const data = dataLines.join('\n');
+  const prefix = otherLines.length
+    ? `${otherLines.join('\n')}\n`
+    : '';
+
+  // The OpenAI-compatible stream terminator must be preserved.
+  if (data.trim() === '[DONE]') {
+    return `${prefix}data: [DONE]\n\n`;
+  }
+
+  let outputData = data;
+
+  if (STRIP_REASONING) {
+    try {
+      const parsed = JSON.parse(data);
+      outputData = JSON.stringify(stripReasoningFields(parsed));
+    } catch {
+      // Preserve unparseable data instead of corrupting it.
+      outputData = data;
+    }
+  }
+
+  return `${prefix}data: ${outputData}\n\n`;
+}
+
+// ============================================================
+// SSE backpressure
+// ============================================================
+
+// Wait until the response socket can accept more data.
+// This prevents buffering an entire long generation in RAM.
+
+function writeChunk(res, chunk) {
+  if (res.destroyed || res.writableEnded) {
+    return Promise.resolve(false);
+  }
+
+  if (res.write(chunk)) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      res.removeListener('drain', onDrain);
+      res.removeListener('close', onClose);
+    };
+
+    const onDrain = () => {
+      cleanup();
+      resolve(!res.destroyed && !res.writableEnded);
+    };
+
+    const onClose = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+
+    if (res.destroyed || res.writableEnded) {
+      onClose();
+    }
+  });
+}
+
+// ============================================================
+// SSE stream parser
+// ============================================================
+
+// Handles CRLF and LF separators and preserves incomplete events
+// until the rest of the event arrives.
+
+function extractSseEvents(buffer) {
+  const events = [];
+  let remaining = buffer;
+  let match;
+
+  while ((match = /\r?\n\r?\n/.exec(remaining)) !== null) {
+    const eventText = remaining.slice(0, match.index);
+
+    remaining = remaining.slice(
+      match.index + match[0].length
+    );
+
+    events.push(eventText);
+  }
+
+  return {
+    events,
+    remaining
+  };
+}
+
+ 
 // ============================================================
 // Chat completions
 // ============================================================
 
 app.post('/v1/chat/completions', async (req, res) => {
-  // Fall back to DEFAULT_MODEL only if the client omitted a model.
-  // A model explicitly supplied by JanitorAI takes precedence.
+  const requestBody = req.body;
 
+  // Use the default model only when the client omits one.
   if (
-    req.body &&
-    typeof req.body === 'object' &&
-    !Array.isArray(req.body) &&
-    !req.body.model
+    requestBody &&
+    typeof requestBody === 'object' &&
+    !Array.isArray(requestBody) &&
+    !requestBody.model
   ) {
-    req.body.model = DEFAULT_MODEL;
+    requestBody.model = DEFAULT_MODEL;
   }
 
-  const validationError = validateChatRequest(req.body);
+  const validationError = validateChatRequest(requestBody);
 
   if (validationError) {
     return jsonError(
@@ -770,24 +890,21 @@ app.post('/v1/chat/completions', async (req, res) => {
     );
   }
 
-  const requestedModel = req.body.model;
-  const resolved = getProfile(requestedModel);
+  const requestedModel = requestBody.model;
+  const profile = getProfile(requestedModel);
 
-  if (!resolved) {
+  if (!profile) {
     return jsonError(
       res,
       400,
-      `Unknown model "${requestedModel}". Check GET /v1/models.`,
+      `Unknown model "${requestedModel}".`,
       'invalid_request_error'
     );
   }
 
-  const { profile } = resolved;
-  const body = applyProfile(req.body, profile);
+  const body = applyProfile(requestBody, profile);
 
-  // Preserve the generation limit supplied by JanitorAI.
-  // Apply a fallback only when neither token-limit field exists.
-
+  // Preserve the client's token limits.
   if (
     body.max_tokens === undefined &&
     body.max_completion_tokens === undefined
@@ -795,12 +912,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     body.max_tokens = 8192;
   }
 
+  const streaming = body.stream === true;
   const controller = new AbortController();
 
   let clientDisconnected = false;
   let upstreamStream = null;
+  let timeout;
 
   const cancelUpstream = () => {
+    if (clientDisconnected) return;
+
     clientDisconnected = true;
     controller.abort();
 
@@ -809,217 +930,114 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   };
 
-  req.on('aborted', cancelUpstream);
+  const onRequestAborted = () => {
+    cancelUpstream();
+  };
 
-  res.on('close', () => {
+  const onResponseClose = () => {
     if (!res.writableEnded) {
       cancelUpstream();
     }
-  });
+  };
+
+  req.once('aborted', onRequestAborted);
+  res.once('close', onResponseClose);
+
+  timeout = setTimeout(() => {
+    if (clientDisconnected) return;
+
+    console.warn('NVIDIA request timed out:', {
+      model: requestedModel,
+      timeoutMs: REQUEST_TIMEOUT_MS
+    });
+
+    controller.abort(
+      Object.assign(new Error('UPSTREAM_TIMEOUT'), {
+        code: 'UPSTREAM_TIMEOUT'
+      })
+    );
+
+    if (upstreamStream && !upstreamStream.destroyed) {
+      upstreamStream.destroy(
+        Object.assign(new Error('UPSTREAM_TIMEOUT'), {
+          code: 'UPSTREAM_TIMEOUT'
+        })
+      );
+    }
+  }, REQUEST_TIMEOUT_MS);
 
   try {
-    // --------------------------------------------------------
-    // Streaming requests
-    // --------------------------------------------------------
+    const upstream = await axios.post(
+      `${NVIDIA_BASE_URL}/chat/completions`,
+      body,
+      {
+        headers: upstreamHeaders(streaming),
+        responseType: streaming ? 'stream' : 'json',
 
-    if (body.stream === true) {
-      const upstream = await axios.post(
-        `${NVIDIA_BASE_URL}/chat/completions`,
-        body,
-        {
-          headers: upstreamHeaders(true),
-          responseType: 'stream',
-          timeout: REQUEST_TIMEOUT_MS,
-          signal: controller.signal,
-          validateStatus: () => true
-        }
-      );
+        // Use our own overall deadline above.
+        // Axios's timeout is disabled to avoid interrupting
+        // a valid long-running generation due to inactivity.
+        timeout: 0,
 
-      upstreamStream = upstream.data;
-
-      if (upstream.status < 200 || upstream.status >= 300) {
-        const chunks = [];
-        let totalBytes = 0;
-
-        for await (const chunk of upstreamStream) {
-          const bufferChunk = Buffer.from(chunk);
-
-          chunks.push(bufferChunk);
-          totalBytes += bufferChunk.length;
-
-          if (totalBytes > 1024 * 1024) {
-            break;
-          }
-        }
-
-        if (clientDisconnected) return;
-
-        const rawError = Buffer.concat(chunks).toString('utf8');
-
-        return jsonError(
-          res,
-          upstream.status,
-          parseUpstreamError(rawError, upstream.status),
-          'upstream_error'
-        );
+        signal: controller.signal,
+        validateStatus: () => true,
+        maxRedirects: 0
       }
+    );
 
-      res.status(200);
-      res.setHeader(
-        'Content-Type',
-        'text/event-stream; charset=utf-8'
-      );
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-
-      res.flushHeaders?.();
-
-      const decoder = new StringDecoder('utf8');
-      let buffer = '';
-
-      function transformSseEvent(eventText) {
-        if (!eventText) return '';
-
-        const lines = eventText.split(/\r?\n/);
-        const dataLines = [];
-        const otherLines = [];
-
-        for (const line of lines) {
-          if (line.startsWith('data:')) {
-            dataLines.push(line.slice(5).replace(/^ /, ''));
-          } else {
-            otherLines.push(line);
-          }
-        }
-
-        if (dataLines.length === 0) {
-          return `${eventText}\n\n`;
-        }
-
-        const data = dataLines.join('\n');
-
-        if (data.trim() === '[DONE]') {
-          const prefix = otherLines.length
-            ? `${otherLines.join('\n')}\n`
-            : '';
-
-          return `${prefix}data: [DONE]\n\n`;
-        }
-
-        let transformedData = data;
-
-        if (STRIP_REASONING) {
-          try {
-            const parsed = JSON.parse(data);
-
-            transformedData = JSON.stringify(
-              stripReasoningFields(parsed)
-            );
-          } catch {
-            transformedData = cleanText(data);
-          }
-        }
-
-        const prefix = otherLines.length
-          ? `${otherLines.join('\n')}\n`
-          : '';
-
-        return `${prefix}data: ${transformedData}\n\n`;
+    if (clientDisconnected || res.destroyed) {
+      if (
+        streaming &&
+        upstream.data &&
+        !upstream.data.destroyed
+      ) {
+        upstream.data.destroy();
       }
-
-      upstreamStream.on('data', (chunk) => {
-        if (clientDisconnected || res.destroyed) return;
-
-        buffer += decoder.write(chunk);
-
-        let boundary;
-
-        while ((boundary = buffer.search(/\r?\n\r?\n/)) !== -1) {
-          const eventText = buffer.slice(0, boundary);
-
-          const separator = buffer
-            .slice(boundary)
-            .match(/^\r?\n\r?\n/)[0];
-
-          buffer = buffer.slice(boundary + separator.length);
-
-          const output = transformSseEvent(eventText);
-
-          if (output && !res.destroyed) {
-            res.write(output);
-          }
-        }
-      });
-
-      upstreamStream.on('end', () => {
-        if (clientDisconnected || res.destroyed) return;
-
-        buffer += decoder.end();
-
-        if (buffer.length > 0) {
-          res.write(transformSseEvent(buffer));
-        }
-
-        res.end();
-      });
-
-      upstreamStream.on('error', (error) => {
-        if (clientDisconnected || res.destroyed) return;
-
-        console.error('NVIDIA streaming error:', {
-          code: error?.code || 'UNKNOWN',
-          message: error?.message || 'Unknown streaming error',
-          model: requestedModel
-        });
-
-        if (!res.headersSent) {
-          jsonError(
-            res,
-            502,
-            'Streaming connection to NVIDIA failed.',
-            'upstream_error'
-          );
-        } else {
-          res.write(
-            `data: ${JSON.stringify({
-              error: {
-                message: 'Streaming connection to NVIDIA failed.',
-                type: 'upstream_error'
-              }
-            })}\n\n`
-          );
-
-          res.end();
-        }
-      });
 
       return;
     }
 
     // --------------------------------------------------------
-    // Non-streaming requests
+    // Upstream error responses
     // --------------------------------------------------------
 
-    const upstream = await axios.post(
-      `${NVIDIA_BASE_URL}/chat/completions`,
-      body,
-      {
-        headers: upstreamHeaders(false),
-        timeout: REQUEST_TIMEOUT_MS,
-        signal: controller.signal,
-        validateStatus: () => true
-      }
-    );
-
-    if (clientDisconnected) return;
-
     if (upstream.status < 200 || upstream.status >= 300) {
-      const message = getUpstreamErrorMessage({
-        response: { data: upstream.data }
-      });
+      let errorData = upstream.data;
 
-      console.error('NVIDIA returned an error:', {
+      if (streaming && upstream.data) {
+        upstreamStream = upstream.data;
+
+        const chunks = [];
+        let totalBytes = 0;
+        const maxErrorBytes = 64 * 1024;
+
+        for await (const chunk of upstreamStream) {
+          const part = Buffer.from(chunk);
+          const remaining = maxErrorBytes - totalBytes;
+
+          if (remaining <= 0) break;
+
+          const accepted = part.subarray(0, remaining);
+
+          chunks.push(accepted);
+          totalBytes += accepted.length;
+
+          if (totalBytes >= maxErrorBytes) break;
+        }
+
+        errorData = Buffer.concat(chunks).toString('utf8');
+      }
+
+      if (clientDisconnected || res.destroyed) {
+        return;
+      }
+
+      const message = upstreamErrorMessage(
+        errorData,
+        `NVIDIA returned HTTP ${upstream.status}`
+      );
+
+      console.error('NVIDIA API error:', {
         status: upstream.status,
         model: requestedModel,
         message
@@ -1033,23 +1051,183 @@ app.post('/v1/chat/completions', async (req, res) => {
       );
     }
 
+    // --------------------------------------------------------
+    // Streaming responses
+    // --------------------------------------------------------
+
+    if (streaming) {
+      upstreamStream = upstream.data;
+
+      res.status(200);
+      res.setHeader(
+        'Content-Type',
+        'text/event-stream; charset=utf-8'
+      );
+      res.setHeader(
+        'Cache-Control',
+        'no-cache, no-transform'
+      );
+      res.setHeader('X-Accel-Buffering', 'no');
+
+      res.flushHeaders?.();
+
+      const decoder = new StringDecoder('utf8');
+      let buffer = '';
+      let receivedDone = false;
+
+      try {
+        for await (const chunk of upstreamStream) {
+          if (clientDisconnected || res.destroyed) {
+            return;
+          }
+
+          buffer += decoder.write(chunk);
+
+          const parsed = extractSseEvents(buffer);
+          buffer = parsed.remaining;
+
+          for (const eventText of parsed.events) {
+            if (clientDisconnected || res.destroyed) {
+              return;
+            }
+
+            const output = transformSseEvent(eventText);
+
+            if (!output) continue;
+
+            if (
+              /(?:^|\n)data:\s*\[DONE\]\s*(?:\n|$)/.test(output)
+            ) {
+              receivedDone = true;
+            }
+
+            const writable = await writeChunk(res, output);
+
+            if (!writable) return;
+          }
+
+          // Once NVIDIA signals completion, finish the response.
+          if (receivedDone) {
+            if (
+              upstreamStream &&
+              !upstreamStream.destroyed
+            ) {
+              upstreamStream.destroy();
+            }
+
+            break;
+          }
+        }
+
+        if (clientDisconnected || res.destroyed) {
+          return;
+        }
+
+        // Flush any remaining decoded bytes.
+        buffer += decoder.end();
+
+        if (buffer.trim()) {
+          const finalText = buffer.replace(/(?:\r?\n)+$/, '');
+          const output = transformSseEvent(finalText);
+
+          if (output) {
+            const writable = await writeChunk(res, output);
+
+            if (!writable) return;
+          }
+        }
+
+        // Some compatible upstreams close the stream without
+        // emitting [DONE]. Terminate our HTTP response cleanly.
+        if (!res.destroyed && !res.writableEnded) {
+          res.end();
+        }
+      } catch (error) {
+        if (
+          clientDisconnected ||
+          res.destroyed ||
+          error?.code === 'ERR_CANCELED' ||
+          error?.code === 'ABORT_ERR'
+        ) {
+          return;
+        }
+
+        console.error('NVIDIA streaming failed:', {
+          code: error?.code || 'UNKNOWN',
+          message: error?.message || 'Unknown stream error',
+          model: requestedModel
+        });
+
+        if (!res.destroyed && !res.writableEnded) {
+          if (res.headersSent) {
+            const errorEvent =
+              `data: ${JSON.stringify({
+                error: {
+                  message: 'NVIDIA streaming connection failed.',
+                  type: 'upstream_error'
+                }
+              })}\n\n`;
+
+            await writeChunk(res, errorEvent);
+
+            if (!res.destroyed && !res.writableEnded) {
+              res.end();
+            }
+          } else {
+            jsonError(
+              res,
+              502,
+              'NVIDIA streaming connection failed.',
+              'upstream_error'
+            );
+          }
+        }
+      }
+
+      return;
+    }
+
+    // --------------------------------------------------------
+    // Non-streaming responses
+    // --------------------------------------------------------
+
     const responseData = STRIP_REASONING
       ? stripReasoningFields(upstream.data)
       : upstream.data;
 
     return res.status(upstream.status).json(responseData);
   } catch (error) {
+    if (clientDisconnected || res.destroyed) {
+      return;
+    }
+
+    const isTimeout =
+      error?.code === 'UPSTREAM_TIMEOUT' ||
+      error?.cause?.code === 'UPSTREAM_TIMEOUT' ||
+      controller.signal.reason?.code === 'UPSTREAM_TIMEOUT';
+
+    if (isTimeout) {
+      return jsonError(
+        res,
+        504,
+        'NVIDIA request timed out.',
+        'upstream_timeout'
+      );
+    }
+
     if (
-      clientDisconnected ||
-      error?.code === 'ERR_CANCELED'
+      error?.code === 'ERR_CANCELED' ||
+      controller.signal.aborted
     ) {
       return;
     }
 
     const status = error?.response?.status || 502;
-    const message = getUpstreamErrorMessage(error);
 
-    // Never log credentials or full conversation contents.
+    const message = upstreamErrorMessage(
+      error?.response?.data,
+      error?.message || 'Could not reach NVIDIA.'
+    );
 
     console.error('Proxy request failed:', {
       status,
@@ -1064,9 +1242,23 @@ app.post('/v1/chat/completions', async (req, res) => {
       message,
       'upstream_error'
     );
+  } finally {
+    clearTimeout(timeout);
+
+    req.removeListener('aborted', onRequestAborted);
+    res.removeListener('close', onResponseClose);
+
+    if (
+      upstreamStream &&
+      !upstreamStream.destroyed &&
+      !upstreamStream.readableEnded
+    ) {
+      upstreamStream.destroy();
+    }
   }
 });
 
+ 
 // ============================================================
 // Error handling
 // ============================================================
@@ -1085,7 +1277,10 @@ app.use((err, req, res, next) => {
     );
   }
 
-  if (err instanceof SyntaxError && 'body' in err) {
+  if (
+    err instanceof SyntaxError &&
+    Object.prototype.hasOwnProperty.call(err, 'body')
+  ) {
     return jsonError(
       res,
       400,
@@ -1094,7 +1289,10 @@ app.use((err, req, res, next) => {
     );
   }
 
-  console.error('Unhandled server error:', err?.message || err);
+  console.error(
+    'Unhandled server error:',
+    err?.message || 'Unknown error'
+  );
 
   return jsonError(
     res,
@@ -1108,11 +1306,44 @@ app.use((err, req, res, next) => {
 // Start server
 // ============================================================
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`NVIDIA NIM proxy listening on port ${PORT}`);
   console.log(`Default model: ${DEFAULT_MODEL}`);
   console.log(`NVIDIA base URL: ${NVIDIA_BASE_URL}`);
   console.log(`Reasoning stripping: ${STRIP_REASONING}`);
-  console.log(`Allow unknown models: ${ALLOW_UNKNOWN_MODELS}`);
-  console.log(`Concurrent request limit: ${MAX_CONCURRENT_REQUESTS}`);
+  console.log(`Unknown models enabled: ${ALLOW_UNKNOWN_MODELS}`);
+  console.log(`Maximum concurrent requests: ${MAX_CONCURRENT_REQUESTS}`);
+  console.log(
+    `Proxy authentication: ${PROXY_API_KEY ? 'enabled' : 'disabled'}`
+  );
 });
+
+// Do not let Node's incoming HTTP request timeout terminate
+// long-running model generations. REQUEST_TIMEOUT_MS controls
+// the upstream generation deadline instead.
+server.requestTimeout = 0;
+server.headersTimeout = 65000;
+server.keepAliveTimeout = 65000;
+
+// ============================================================
+// Graceful shutdown
+// ============================================================
+
+function shutdown(signal) {
+  console.log(`${signal} received. Closing server.`);
+
+  server.close(() => {
+    console.log('Server closed.');
+    process.exit(0);
+  });
+
+  const forceExit = setTimeout(() => {
+    console.error('Graceful shutdown timed out.');
+    process.exit(1);
+  }, 10000);
+
+  forceExit.unref();
+}
+
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
