@@ -1038,10 +1038,25 @@ app.post('/v1/chat/completions', async (req, res) => {
       );
 
       console.error('NVIDIA API error:', {
-        status: upstream.status,
-        model: requestedModel,
-        message
-      });
+  status: upstream.status,
+  model: requestedModel,
+  requestDetails: {
+    stream: body.stream === true,
+    messageCount: body.messages?.length,
+    messageRoles: body.messages?.map((m) => m.role),
+    messageContentTypes: body.messages?.map((m) =>
+      Array.isArray(m.content) ? 'array' : typeof m.content
+    ),
+    keys: Object.keys(body),
+    max_tokens: body.max_tokens,
+    max_completion_tokens: body.max_completion_tokens,
+    temperature: body.temperature,
+    top_p: body.top_p,
+    reasoning_effort: body.reasoning_effort,
+    chat_template_kwargs: body.chat_template_kwargs
+  },
+  message: message
+});
 
       return jsonError(
         res,
