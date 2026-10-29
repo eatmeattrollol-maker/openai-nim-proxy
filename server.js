@@ -7,41 +7,47 @@ const axios = require("axios");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const { StringDecoder } = require("string_decoder");
 
 const app = express();
 app.disable("x-powered-by");
+app.disable("etag");
 
-const PORT = Number(process.env.PORT) || 10000;
+const PORT = positiveNumber(process.env.PORT, 10000);
+const NODE_ENV = process.env.NODE_ENV || "development";
+const IS_PRODUCTION = NODE_ENV === "production";
 
-const NIM_API_BASE = (
-  process.env.NIM_API_BASE ||
-  "https://integrate.api.nvidia.com/v1"
+const NIM_API_BASE = String(
+  process.env.NIM_API_BASE || "https://integrate.api.nvidia.com/v1"
 ).replace(/\/+$/, "");
 
-const NIM_API_KEY =
-  process.env.NIM_API_KEY ||
-  process.env.NVIDIA_API_KEY ||
-  "";
+const NIM_API_KEY = String(
+  process.env.NIM_API_KEY || process.env.NVIDIA_API_KEY || ""
+);
 
 const PROXY_API_KEY = String(process.env.PROXY_API_KEY || "");
 
-const DEFAULT_MODEL =
-  process.env.DEFAULT_MODEL ||
-  "nvidia/nemotron-3-ultra-550b-a55b";
+const DEFAULT_MODEL = String(
+  process.env.DEFAULT_MODEL || "nvidia/nemotron-3-ultra-550b-a55b"
+).trim().toLowerCase();
 
 const DEBUG_PROXY = parseBoolean(process.env.DEBUG_PROXY, false);
-const ALLOW_UNKNOWN_MODELS = parseBoolean(
-  process.env.ALLOW_UNKNOWN_MODELS,
-  true
-);
 const STRIP_REASONING = parseBoolean(
   process.env.STRIP_REASONING_FROM_RESPONSE,
   true
 );
+const ALLOW_UNKNOWN_MODELS = parseBoolean(
+  process.env.ALLOW_UNKNOWN_MODELS,
+  false
+);
+const ENABLE_UNVERIFIED_MISTRAL_LARGE_4 = parseBoolean(
+  process.env.ENABLE_UNVERIFIED_MISTRAL_LARGE_4,
+  false
+);
 
 const NIM_TIMEOUT_MS = positiveNumber(
   process.env.NIM_TIMEOUT_MS,
-  900000
+  600000
 );
 const MODEL_CACHE_TTL_MS = positiveNumber(
   process.env.MODEL_CACHE_TTL_MS,
@@ -49,6 +55,10 @@ const MODEL_CACHE_TTL_MS = positiveNumber(
 );
 const DEFAULT_MAX_TOKENS = positiveNumber(
   process.env.DEFAULT_MAX_TOKENS,
+  8192
+);
+const HARD_MAX_OUTPUT_TOKENS = positiveNumber(
+  process.env.HARD_MAX_OUTPUT_TOKENS,
   16384
 );
 const DEFAULT_REASONING_EFFORT = String(
@@ -56,24 +66,43 @@ const DEFAULT_REASONING_EFFORT = String(
 ).trim().toLowerCase();
 const DEFAULT_REASONING_BUDGET = positiveNumber(
   process.env.DEFAULT_REASONING_BUDGET,
-  16384
+  8192
 );
 const DEFAULT_NEMOTRON_THINKING = parseBoolean(
   process.env.NEMOTRON_ENABLE_THINKING,
   true
 );
 
+const MAX_CONCURRENT_REQUESTS = positiveNumber(
+  process.env.MAX_CONCURRENT_REQUESTS,
+  4
+);
+const MAX_MESSAGES = positiveNumber(
+  process.env.MAX_MESSAGES,
+  200
+);
+const MAX_BODY_BYTES = process.env.JSON_BODY_LIMIT || "4mb";
+const MAX_UPSTREAM_ERROR_BYTES = 1024 * 1024;
+
+const CORS_ORIGINS = String(process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map(value => value.trim())
+  .filter(Boolean);
+
 const httpAgent = new http.Agent({
   keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16
+  maxSockets: 16,
+  maxFreeSockets: 4
 });
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16
+  maxSockets: 16,
+  maxFreeSockets: 4
 });
+
+let activeRequests = 0;
+let shuttingDown = false;
 
 /* ============================================================
    HELPERS
@@ -106,15 +135,16 @@ function isFiniteNumber(value) {
     Number.isFinite(Number(value));
 }
 
-function numberOrDefault(value, fallback) {
-  return isFiniteNumber(value) ? Number(value) : fallback;
-}
-
 function positiveNumber(value, fallback) {
   const number = Number(value);
+
   return Number.isFinite(number) && number > 0
     ? number
     : fallback;
+}
+
+function numberOrDefault(value, fallback) {
+  return isFiniteNumber(value) ? Number(value) : fallback;
 }
 
 function clamp(value, minimum, maximum) {
@@ -133,97 +163,109 @@ function safeJsonParse(value) {
   }
 }
 
+function debugLog(label, data = {}) {
+  if (!DEBUG_PROXY) return;
+
+  // Never log API keys, prompts, or generated text.
+  console.log(`[proxy:debug] ${label} ${JSON.stringify(data)}`);
+}
+
+function timingLog(stage, startedAt, metadata = {}) {
+  debugLog(stage, {
+    elapsed_ms: Date.now() - startedAt,
+    ...metadata
+  });
+}
+
 /* ============================================================
    MODEL CONFIGURATION
 
-   This configuration records the models configured in the
-   proxy. It does not guarantee continued NVIDIA endpoint
-   availability or free-tier access.
+   Catalog labels are metadata, not live availability checks.
+   Verify the exact endpoint in your own NVIDIA account.
 ============================================================ */
 
 const MODELS = {
   "nvidia/nemotron-3-ultra-550b-a55b": {
-    name: "NVIDIA Nemotron 3 Ultra 550B",
+    name: "Nemotron 3 Ultra 550B",
     provider: "NVIDIA",
-    endpointStatus: "free-endpoint",
-    maxOutputTokens: 16384,
+    endpointStatus: "downloadable-free-endpoint",
+    enabled: true,
     contextTokens: 1048576,
+    maxOutputTokens: 16384,
     adapter: "nemotron",
     reasoningType: "thinking-toggle"
   },
 
   "nvidia/nemotron-3-super-120b-a12b": {
-    name: "NVIDIA Nemotron 3 Super 120B - availability unverified",
+    name: "Nemotron 3 Super 120B",
     provider: "NVIDIA",
     endpointStatus: "unverified-legacy",
-    maxOutputTokens: 16384,
+    enabled: true,
     contextTokens: 1048576,
+    maxOutputTokens: 16384,
     adapter: "generic"
   },
 
   "nvidia/nemotron-3.5-super-vl-120b-a12b": {
-    name: "NVIDIA Nemotron 3.5 Super VL 120B",
+    name: "Nemotron 3.5 Super VL 120B",
     provider: "NVIDIA",
     endpointStatus: "free-endpoint",
+    enabled: true,
+    contextTokens: 262144,
     maxOutputTokens: 16384,
-    contextTokens: 1048576,
     adapter: "nemotron-vl",
     reasoningType: "thinking-toggle"
   },
 
   "nvidia/nemotron-3.5-bolt-e4b": {
-    name: "NVIDIA Nemotron 3.5 Bolt E4B",
+    name: "Nemotron 3.5 Bolt E4B",
     provider: "NVIDIA",
     endpointStatus: "free-endpoint",
+    enabled: true,
+    contextTokens: null,
+    maxOutputTokens: 8192,
     adapter: "generic"
   },
 
   "nvidia/nemotron-3.5-lightning-30b-a3b": {
-    name: "NVIDIA Nemotron 3.5 Lightning 30B A3B",
+    name: "Nemotron 3.5 Lightning 30B A3B",
     provider: "NVIDIA",
-    endpointStatus: "free-endpoint",
+    endpointStatus: "downloadable-free-endpoint",
+    enabled: true,
+    contextTokens: 1048576,
     maxOutputTokens: 16384,
-    contextTokens: 1048576,
     adapter: "generic"
-  },
-
-  "z-ai/glm-5.3": {
-    name: "GLM 5.3",
-    provider: "Z.ai",
-    endpointStatus: "deprecation-announced",
-    reasoningLevels: ["low", "high", "max"],
-    defaultReasoningEffort: "high",
-    maxOutputTokens: 32768,
-    contextTokens: 1048576,
-    adapter: "glm"
   },
 
   "z-ai/glm-5.3-flash": {
     name: "GLM 5.3 Flash",
     provider: "Z.ai",
     endpointStatus: "free-endpoint",
+    enabled: true,
+    contextTokens: 1048576,
+    maxOutputTokens: 32768,
     reasoningLevels: ["low", "high", "max"],
     defaultReasoningEffort: "max",
-    maxOutputTokens: 32768,
-    contextTokens: 1048576,
     adapter: "glm-flash"
   },
 
   "deepseek-ai/deepseek-v4.1-flash": {
     name: "DeepSeek V4.1 Flash",
     provider: "DeepSeek AI",
-    endpointStatus: "free-endpoint",
-    maxOutputTokens: 16384,
+    endpointStatus: "downloadable-free-endpoint",
+    enabled: true,
     contextTokens: 1048576,
+    maxOutputTokens: 16384,
     adapter: "generic"
   },
 
   "stepfun-ai/step-5-preview": {
     name: "Step 5 Preview",
     provider: "StepFun AI",
-    endpointStatus: "free-endpoint",
-    maxOutputTokens: 16384,
+    endpointStatus: "free-endpoint-preview",
+    enabled: true,
     contextTokens: 1048576,
+    maxOutputTokens: 16384,
     adapter: "generic"
   },
 
@@ -231,8 +273,9 @@ const MODELS = {
     name: "MiniMax M3.1 Flash",
     provider: "MiniMax AI",
     endpointStatus: "free-endpoint",
-    maxOutputTokens: 16384,
+    enabled: true,
     contextTokens: 1048576,
+    maxOutputTokens: 16384,
     reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
     defaultReasoningEffort: "high",
     adapter: "minimax"
@@ -242,17 +285,19 @@ const MODELS = {
     name: "Laguna XS 2.1",
     provider: "Poolside",
     endpointStatus: "free-endpoint",
-    maxOutputTokens: 8192,
+    enabled: true,
     contextTokens: 262144,
+    maxOutputTokens: 8192,
     adapter: "generic"
   },
 
   "openai/gpt-oss-20b": {
     name: "GPT-OSS 20B",
     provider: "OpenAI",
-    endpointStatus: "free-endpoint",
-    maxOutputTokens: 8192,
+    endpointStatus: "downloadable-free-endpoint",
+    enabled: true,
     contextTokens: 131072,
+    maxOutputTokens: 8192,
     adapter: "generic"
   },
 
@@ -260,8 +305,9 @@ const MODELS = {
     name: "Gemma 4 31B IT",
     provider: "Google",
     endpointStatus: "free-endpoint",
-    maxOutputTokens: 16384,
+    enabled: true,
     contextTokens: 262144,
+    maxOutputTokens: 16384,
     adapter: "generic"
   },
 
@@ -269,29 +315,57 @@ const MODELS = {
     name: "Muse Glimmer 30B",
     provider: "Meta / Muse",
     endpointStatus: "free-endpoint",
-    maxOutputTokens: 8192,
+    enabled: true,
     contextTokens: 131072,
+    maxOutputTokens: 8192,
     reasoningLevels: ["low", "medium", "high", "xhigh"],
     defaultReasoningEffort: "high",
     adapter: "muse-glimmer"
+  },
+
+  "mistralai/mistral-nemotron": {
+    name: "Mistral Nemotron",
+    provider: "Mistral AI",
+    endpointStatus: "free-endpoint",
+    enabled: true,
+    contextTokens: null,
+    maxOutputTokens: 4096,
+    adapter: "generic"
+  },
+
+  "mistralai/mistral-medium-3.5-128b": {
+    name: "Mistral Medium 3.5 128B",
+    provider: "Mistral AI",
+    endpointStatus: "availability-unverified",
+    enabled: true,
+    contextTokens: 262144,
+    maxOutputTokens: 16384,
+    adapter: "generic"
+  },
+
+  // Mistral Large 4 was released on October 29, 2026.
+  // I could not verify an NVIDIA NIM Free Endpoint for it.
+  // Keep it opt-in until NVIDIA exposes the matching endpoint
+  // to your account. Do not assume Mistral's own API ID works
+  // on NVIDIA's API.
+  "mistral-large-4": {
+    name: "Mistral Large 4 (NIM endpoint unverified)",
+    provider: "Mistral AI",
+    endpointStatus: "unverified-not-confirmed-on-nim",
+    enabled: false,
+    contextTokens: 1048576,
+    maxOutputTokens: 16384,
+    adapter: "generic"
   }
 };
 
 /* ============================================================
    PROFILE GENERATION
-
-   Each profile maps a selectable JanitorAI model ID to its
-   actual upstream model and documented reasoning control.
-
-   Profiles intentionally do not set temperature or top_p.
-   JanitorAI's values are passed through unchanged.
 ============================================================ */
 
 const PROFILES = {};
 
 function addEffortProfiles(modelId, levels) {
-  const config = MODELS[modelId];
-
   for (const level of levels) {
     PROFILES[`${modelId}-${level}`] = {
       baseModel: modelId,
@@ -339,17 +413,12 @@ for (const [modelId, config] of Object.entries(MODELS)) {
   }
 }
 
-addThinkingProfiles(
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  {
-    mediumEffort: true,
-    deepBudget: 32768
-  }
-);
+addThinkingProfiles("nvidia/nemotron-3-ultra-550b-a55b", {
+  mediumEffort: true,
+  deepBudget: 16384
+});
 
-addThinkingProfiles(
-  "nvidia/nemotron-3.5-super-vl-120b-a12b"
-);
+addThinkingProfiles("nvidia/nemotron-3.5-super-vl-120b-a12b");
 
 /* ============================================================
    MODEL RESOLUTION
@@ -358,22 +427,40 @@ addThinkingProfiles(
 function resolveModel(requestedModel) {
   const requested = normalizeModel(requestedModel);
   const profile = PROFILES[requested] || null;
+  const modelId = profile ? profile.baseModel : requested;
+  const config = MODELS[modelId] || null;
+
+  if (config && !config.enabled) {
+    if (
+      modelId === "mistral-large-4" &&
+      ENABLE_UNVERIFIED_MISTRAL_LARGE_4
+    ) {
+      // Explicit opt-in only; the upstream may still reject it.
+    } else {
+      return {
+        error: "model_disabled",
+        requestedModel: requested,
+        model: modelId,
+        config
+      };
+    }
+  }
 
   if (profile) {
     return {
       requestedModel: requested,
-      model: profile.baseModel,
+      model: modelId,
       profile,
-      config: MODELS[profile.baseModel] || null
+      config
     };
   }
 
-  if (MODELS[requested]) {
+  if (config) {
     return {
       requestedModel: requested,
-      model: requested,
+      model: modelId,
       profile: null,
-      config: MODELS[requested]
+      config
     };
   }
 
@@ -398,7 +485,7 @@ function normalizeEffort(value, config) {
 
   if (levels.includes(effort)) return effort;
 
-  if (["fast", "minimal", "minimum"].includes(effort)) {
+  if (["fast", "minimal", "minimum", "none"].includes(effort)) {
     if (levels.includes("low")) return "low";
     return levels[0] || DEFAULT_REASONING_EFFORT;
   }
@@ -447,14 +534,8 @@ function requestedEffort(body, resolution) {
     const budget = Number(body.reasoning_budget);
 
     if (Number.isFinite(budget)) {
-      if (budget <= 4096) {
-        return normalizeEffort("low", resolution.config);
-      }
-
-      if (budget <= 16384) {
-        return normalizeEffort("high", resolution.config);
-      }
-
+      if (budget <= 4096) return normalizeEffort("low", resolution.config);
+      if (budget <= 16384) return normalizeEffort("high", resolution.config);
       return normalizeEffort("max", resolution.config);
     }
   }
@@ -467,12 +548,61 @@ function requestedEffort(body, resolution) {
 }
 
 /* ============================================================
-   REQUEST CONSTRUCTION
-
-   Sampling controls are never invented by this proxy.
-   If JanitorAI sends temperature/top_p, they are forwarded.
-   If it omits them, they remain omitted.
+   REQUEST VALIDATION AND CONSTRUCTION
 ============================================================ */
+
+const STANDARD_PASSTHROUGH_FIELDS = [
+  "stop",
+  "seed",
+  "tools",
+  "tool_choice",
+  "response_format",
+  "logprobs",
+  "top_k",
+  "min_tokens",
+  "ignore_eos",
+  "logit_bias",
+  "user",
+  "parallel_tool_calls",
+  "stream_options",
+  "service_tier",
+  "modalities",
+  "audio",
+  "repetition_penalty",
+  "frequency_penalty",
+  "presence_penalty"
+];
+
+function validateMessages(messages) {
+  if (!Array.isArray(messages)) {
+    return "The messages field must be an array.";
+  }
+
+  if (messages.length === 0) {
+    return "At least one message is required.";
+  }
+
+  if (messages.length > MAX_MESSAGES) {
+    return `Too many messages. Maximum: ${MAX_MESSAGES}.`;
+  }
+
+  for (const message of messages) {
+    if (!isObject(message) || typeof message.role !== "string") {
+      return "Every message must be an object with a string role.";
+    }
+
+    if (
+      message.content !== undefined &&
+      typeof message.content !== "string" &&
+      !Array.isArray(message.content) &&
+      message.content !== null
+    ) {
+      return "Message content must be a string, array, or null.";
+    }
+  }
+
+  return null;
+}
 
 function buildBaseRequest(body, resolution) {
   const config = resolution.config;
@@ -483,82 +613,74 @@ function buildBaseRequest(body, resolution) {
       ? Math.floor(requestedMax)
       : config?.maxOutputTokens || DEFAULT_MAX_TOKENS;
 
+  maxTokens = Math.min(maxTokens, HARD_MAX_OUTPUT_TOKENS);
+
   if (Number.isFinite(config?.maxOutputTokens)) {
     maxTokens = Math.min(maxTokens, config.maxOutputTokens);
   }
 
   const request = {
     model: resolution.model,
-    messages: Array.isArray(body.messages)
-      ? body.messages.map(message =>
-          isObject(message) ? { ...message } : message
-        )
-      : [],
+    messages: body.messages.map(message => ({ ...message })),
     max_tokens: maxTokens,
-    stream: Boolean(body.stream)
+    stream: body.stream === true
   };
 
   if (body.temperature !== undefined) {
-    request.temperature = clamp(
-      numberOrDefault(body.temperature, 1),
-      0,
-      2
-    );
+    const temperature = Number(body.temperature);
+
+    if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+      throw new Error("temperature must be a number between 0 and 2.");
+    }
+
+    request.temperature = temperature;
   }
 
   if (body.top_p !== undefined) {
-    request.top_p = clamp(
-      numberOrDefault(body.top_p, 0.95),
-      0,
-      1
-    );
+    const topP = Number(body.top_p);
+
+    if (!Number.isFinite(topP) || topP < 0 || topP > 1) {
+      throw new Error("top_p must be a number between 0 and 1.");
+    }
+
+    request.top_p = topP;
   }
 
-  const passthrough = [
-    "repetition_penalty",
-    "frequency_penalty",
-    "presence_penalty",
-    "stop",
-    "seed",
-    "tools",
-    "tool_choice",
-    "response_format",
-    "logprobs",
-    "top_k",
-    "min_tokens",
-    "ignore_eos",
-    "logit_bias",
-    "user",
-    "parallel_tool_calls",
-    "stream_options",
-    "service_tier",
-    "modalities",
-    "audio",
-    "reasoning_effort",
-    "reasoning_budget",
-    "reasoning_mode",
-    "thinking_token_budget",
-    "enable_thinking",
-    "nvext"
-  ];
-
-  for (const key of passthrough) {
+  for (const key of STANDARD_PASSTHROUGH_FIELDS) {
     if (body[key] !== undefined) {
       request[key] = body[key];
     }
   }
 
+  // Only explicitly supported extension fields are accepted.
+  // Arbitrary extra_body fields cannot override model/messages/
+  // stream/max_tokens/temperature/top_p.
+  const extraBody = isObject(body.extra_body) ? body.extra_body : {};
+
   if (isObject(body.chat_template_kwargs)) {
+    request.chat_template_kwargs = { ...body.chat_template_kwargs };
+  }
+
+  if (isObject(extraBody.chat_template_kwargs)) {
     request.chat_template_kwargs = {
-      ...body.chat_template_kwargs
+      ...(request.chat_template_kwargs || {}),
+      ...extraBody.chat_template_kwargs
     };
   }
 
-  if (isObject(body.extra_body)) {
-    Object.assign(request, body.extra_body);
+  if (isObject(body.nvext)) {
+    request.nvext = { ...body.nvext };
+  } else if (isObject(extraBody.nvext)) {
+    request.nvext = { ...extraBody.nvext };
   }
 
-  // The selected model must always win over passthrough fields.
+  if (body.thinking_token_budget !== undefined) {
+    request.thinking_token_budget = body.thinking_token_budget;
+  } else if (extraBody.thinking_token_budget !== undefined) {
+    request.thinking_token_budget = extraBody.thinking_token_budget;
+  }
+
+  // The selected model always wins.
   request.model = resolution.model;
 
   return request;
@@ -570,12 +692,10 @@ function buildBaseRequest(body, resolution) {
 
 function buildNimRequest(body, resolution) {
   const request = buildBaseRequest(body, resolution);
-  const model = resolution.model;
-  const profile = resolution.profile;
   const adapter = resolution.config?.adapter || "generic";
+  const profile = resolution.profile;
 
-  // GLM 5.3 and GLM 5.3 Flash.
-  if (adapter === "glm" || adapter === "glm-flash") {
+  if (adapter === "glm-flash") {
     const effort = requestedEffort(body, resolution);
 
     request.reasoning_effort = effort;
@@ -585,8 +705,8 @@ function buildNimRequest(body, resolution) {
       clear_thinking: true
     };
 
-    delete request.reasoning_budget;
     delete request.reasoning_mode;
+    delete request.reasoning_budget;
     delete request.enable_thinking;
     delete request.thinking_token_budget;
     delete request.nvext;
@@ -594,8 +714,6 @@ function buildNimRequest(body, resolution) {
     return request;
   }
 
-  // MiniMax M3.1 Flash:
-  // NVIDIA documents reasoning_effort inside chat_template_kwargs.
   if (adapter === "minimax") {
     const effort = requestedEffort(body, resolution);
 
@@ -604,7 +722,6 @@ function buildNimRequest(body, resolution) {
       reasoning_effort: effort
     };
 
-    // Avoid sending the same control in a second, conflicting form.
     delete request.reasoning_effort;
     delete request.reasoning_mode;
     delete request.reasoning_budget;
@@ -615,12 +732,8 @@ function buildNimRequest(body, resolution) {
     return request;
   }
 
-  // Muse Glimmer:
-  // NVIDIA documents low/medium/high/xhigh reasoning strengths.
   if (adapter === "muse-glimmer") {
-    const effort = requestedEffort(body, resolution);
-
-    request.reasoning_effort = effort;
+    request.reasoning_effort = requestedEffort(body, resolution);
 
     delete request.reasoning_mode;
     delete request.reasoning_budget;
@@ -631,8 +744,7 @@ function buildNimRequest(body, resolution) {
     return request;
   }
 
-  // NVIDIA Nemotron 3 Ultra.
-  if (adapter === "nemotron") {
+  if (adapter === "nemotron" || adapter === "nemotron-vl") {
     let thinking = profile?.thinking;
 
     if (
@@ -647,87 +759,13 @@ function buildNimRequest(body, resolution) {
 
     if (
       thinking === undefined &&
-      typeof body.chat_template_kwargs?.enable_thinking === "boolean"
+      typeof request.chat_template_kwargs?.enable_thinking === "boolean"
     ) {
-      thinking = body.chat_template_kwargs.enable_thinking;
+      thinking = request.chat_template_kwargs.enable_thinking;
     }
 
-    if (thinking === undefined) {
+    if (thinking === undefined && adapter === "nemotron") {
       thinking = DEFAULT_NEMOTRON_THINKING;
-    }
-
-    const template = isObject(request.chat_template_kwargs)
-      ? { ...request.chat_template_kwargs }
-      : {};
-
-    for (const key of [
-      "reasoning_effort",
-      "reasoning_budget",
-      "thinking_token_budget",
-      "enable_thinking",
-      "nvext",
-      "medium_effort",
-      "force_nonempty_content"
-    ]) {
-      delete template[key];
-    }
-
-    template.enable_thinking = Boolean(thinking);
-
-    const mediumEffort =
-      profile?.mediumEffort ??
-      body.chat_template_kwargs?.medium_effort ??
-      false;
-
-    if (thinking && mediumEffort) {
-      template.medium_effort = true;
-    }
-
-    request.chat_template_kwargs = template;
-
-    const budgetInput =
-      profile?.thinkingTokenBudget ??
-      body.thinking_token_budget ??
-      body.reasoning_budget;
-
-    const budget = Number(budgetInput);
-
-    if (thinking && Number.isFinite(budget) && budget > 0) {
-      request.thinking_token_budget = clamp(
-        Math.floor(budget),
-        1,
-        32768
-      );
-    } else {
-      delete request.thinking_token_budget;
-    }
-
-    delete request.reasoning_effort;
-    delete request.reasoning_budget;
-    delete request.reasoning_mode;
-    delete request.enable_thinking;
-    delete request.nvext;
-
-    return request;
-  }
-
-  // Nemotron 3.5 Super VL:
-  // NVIDIA documents configurable thinking via chat_template_kwargs.
-  if (adapter === "nemotron-vl") {
-    let thinking = profile?.thinking;
-
-    if (
-      thinking === undefined &&
-      body.enable_thinking !== undefined
-    ) {
-      thinking = parseBoolean(body.enable_thinking, true);
-    }
-
-    if (
-      thinking === undefined &&
-      typeof body.chat_template_kwargs?.enable_thinking === "boolean"
-    ) {
-      thinking = body.chat_template_kwargs.enable_thinking;
     }
 
     if (thinking !== undefined) {
@@ -737,18 +775,80 @@ function buildNimRequest(body, resolution) {
       };
     }
 
-    delete request.enable_thinking;
+    if (adapter === "nemotron") {
+      const template = { ...(request.chat_template_kwargs || {}) };
+
+      for (const key of [
+        "reasoning_effort",
+        "reasoning_budget",
+        "thinking_token_budget",
+        "enable_thinking",
+        "medium_effort",
+        "force_nonempty_content"
+      ]) {
+        if (key !== "enable_thinking") delete template[key];
+      }
+
+      template.enable_thinking = Boolean(thinking);
+
+      const mediumEffort =
+        profile?.mediumEffort ??
+        body.chat_template_kwargs?.medium_effort ??
+        false;
+
+      if (thinking && mediumEffort) {
+        template.medium_effort = true;
+      } else {
+        delete template.medium_effort;
+      }
+
+      request.chat_template_kwargs = template;
+
+      const budgetInput =
+        profile?.thinkingTokenBudget ??
+        body.thinking_token_budget ??
+        body.reasoning_budget ??
+        DEFAULT_REASONING_BUDGET;
+
+      const budget = Number(budgetInput);
+
+      if (thinking && Number.isFinite(budget) && budget > 0) {
+        request.thinking_token_budget = clamp(
+          Math.floor(budget),
+          1,
+          32768
+        );
+      } else {
+        delete request.thinking_token_budget;
+      }
+
+      delete request.reasoning_effort;
+      delete request.reasoning_budget;
+      delete request.reasoning_mode;
+      delete request.enable_thinking;
+      delete request.nvext;
+    } else {
+      delete request.enable_thinking;
+      delete request.reasoning_mode;
+      delete request.reasoning_budget;
+      delete request.nvext;
+    }
 
     return request;
   }
 
-  // Other models receive standard OpenAI-compatible parameters.
-  // Their vendor-specific reasoning controls are not guessed here.
+  // Generic models receive standard OpenAI-compatible fields.
+  // Do not guess undocumented vendor-specific reasoning fields.
+  delete request.reasoning_mode;
+  delete request.reasoning_budget;
+  delete request.enable_thinking;
+  delete request.thinking_token_budget;
+
   return request;
 }
 
 /* ============================================================
-   HEADERS AND LOGGING
+   HEADERS AND UPSTREAM HELPERS
 ============================================================ */
 
 function buildHeaders(streaming) {
@@ -764,69 +864,13 @@ function buildHeaders(streaming) {
   return headers;
 }
 
-function debugLog(label, data) {
-  if (!DEBUG_PROXY) return;
-
-  // Never log prompts, generated text, authorization headers or keys.
-  console.log(`[proxy:debug] ${label} ${JSON.stringify(data)}`);
-}
-
-function timingLog(stage, startedAt, metadata = {}) {
-  debugLog("ttft", {
-    stage,
-    elapsed_ms: Date.now() - startedAt,
-    ...metadata
-  });
-}
-
-/* ============================================================
-   RESPONSE CLEANUP
-============================================================ */
-
-function stripThinkTags(text) {
-  return String(text || "")
-    .replace(
-      /<think(?:ing)?\b[^>]*>[\s\S]*?<\/(?:think|thinking)>/gi,
-      ""
-    )
-    .replace(/<\/?(?:think|thinking)\b[^>]*>/gi, "");
-}
-
-function stripReasoningObject(data) {
-  if (!data || typeof data !== "object") return data;
-
-  if (Array.isArray(data)) {
-    return data.map(stripReasoningObject);
-  }
-
-  delete data.reasoning_content;
-  delete data.reasoning;
-  delete data.thinking;
-
-  if (typeof data.content === "string") {
-    data.content = stripThinkTags(data.content);
-  }
-
-  for (const [key, value] of Object.entries(data)) {
-    if (value && typeof value === "object") {
-      data[key] = stripReasoningObject(value);
-    }
-  }
-
-  return data;
-}
-
-/* ============================================================
-   ERROR HANDLING
-============================================================ */
-
 function extractErrorBody(data) {
-  if (Buffer.isBuffer(data)) {
-    data = data.toString("utf8");
-  }
+  if (Buffer.isBuffer(data)) data = data.toString("utf8");
 
   if (typeof data === "string") {
-    return safeJsonParse(data) || { message: data.slice(0, 4000) };
+    return safeJsonParse(data) || {
+      message: data.slice(0, 4000)
+    };
   }
 
   if (isObject(data)) return data;
@@ -846,7 +890,7 @@ function makeProxyError(error, resolution, elapsedMs) {
 
   return {
     error: {
-      message: String(message),
+      message: String(message).slice(0, 4000),
       type: "upstream_error",
       code: status,
       model: resolution?.model || null,
@@ -856,21 +900,248 @@ function makeProxyError(error, resolution, elapsedMs) {
   };
 }
 
+async function readStreamLimited(stream, maxBytes = MAX_UPSTREAM_ERROR_BYTES) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+
+    stream.on("data", chunk => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buffer.length;
+
+      if (total > maxBytes) {
+        stream.destroy();
+        reject(new Error("Upstream error body exceeded size limit."));
+        return;
+      }
+
+      chunks.push(buffer);
+    });
+
+    stream.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+
+    stream.on("error", reject);
+  });
+}
+
 /* ============================================================
-   MODEL LIST
+   RESPONSE CLEANUP
+============================================================ */
+
+function stripThinkTags(text) {
+  return String(text || "")
+    .replace(
+      /<think(?:ing)?\b[^>]*>[\s\S]*?<\/(?:think|thinking)>/gi,
+      ""
+    )
+    .replace(/<\/?(?:think|thinking)\b[^>]*>/gi, "");
+}
+
+function stripReasoningObject(data) {
+  if (Array.isArray(data)) {
+    return data.map(stripReasoningObject);
+  }
+
+  if (!isObject(data)) return data;
+
+  const result = {};
+
+  for (const [key, value] of Object.entries(data)) {
+    if (["reasoning_content", "reasoning", "thinking"].includes(key)) {
+      continue;
+    }
+
+    if (key === "content" && typeof value === "string") {
+      result[key] = stripThinkTags(value);
+    } else {
+      result[key] = stripReasoningObject(value);
+    }
+  }
+
+  return result;
+}
+
+/* ============================================================
+   SSE PARSING AND FORWARDING
+============================================================ */
+
+function writeSSEEvent(res, eventText) {
+  const lines = eventText.split(/\r?\n/);
+  const dataLines = [];
+  const otherLines = [];
+
+  for (const line of lines) {
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).replace(/^ /, ""));
+    } else if (
+      line.startsWith("event:") ||
+      line.startsWith("id:") ||
+      line.startsWith("retry:") ||
+      line.startsWith(":")
+    ) {
+      otherLines.push(line);
+    }
+  }
+
+  if (dataLines.length === 0) {
+    res.write(`${otherLines.join("\n")}\n\n`);
+    return;
+  }
+
+  const raw = dataLines.join("\n");
+
+  if (raw === "[DONE]") {
+    res.write(`${otherLines.join("\n")}${otherLines.length ? "\n" : ""}data: [DONE]\n\n`);
+    return;
+  }
+
+  const parsed = safeJsonParse(raw);
+
+  if (parsed === null) {
+    res.write(`${otherLines.join("\n")}${otherLines.length ? "\n" : ""}`);
+    for (const line of dataLines) res.write(`data: ${line}\n`);
+    res.write("\n");
+    return;
+  }
+
+  const cleaned = STRIP_REASONING
+    ? stripReasoningObject(parsed)
+    : parsed;
+
+  res.write(`${otherLines.join("\n")}${otherLines.length ? "\n" : ""}`);
+  res.write(`data: ${JSON.stringify(cleaned)}\n\n`);
+}
+
+function createSSEParser(onEvent) {
+  let buffer = "";
+
+  return {
+    push(chunk) {
+      buffer += chunk;
+
+      while (true) {
+        const match = /\r?\n\r?\n/.exec(buffer);
+        if (!match) break;
+
+        const event = buffer.slice(0, match.index);
+        buffer = buffer.slice(match.index + match[0].length);
+
+        if (event.trim()) onEvent(event);
+      }
+    },
+
+    end() {
+      if (buffer.trim()) onEvent(buffer);
+      buffer = "";
+    }
+  };
+}
+
+/* ============================================================
+   AUTHENTICATION AND CONCURRENCY
+============================================================ */
+
+function proxyAuth(req, res, next) {
+  if (!PROXY_API_KEY) {
+    if (IS_PRODUCTION) {
+      return res.status(503).json({
+        error: {
+          message: "Proxy authentication is not configured.",
+          type: "configuration_error"
+        }
+      });
+    }
+
+    return next();
+  }
+
+  const authorization = String(req.get("authorization") || "");
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  if (!match) {
+    return res.status(401).json({
+      error: {
+        message: "Missing or invalid proxy API key.",
+        type: "authentication_error"
+      }
+    });
+  }
+
+  const supplied = Buffer.from(match[1], "utf8");
+  const expected = Buffer.from(PROXY_API_KEY, "utf8");
+
+  if (
+    supplied.length !== expected.length ||
+    !crypto.timingSafeEqual(supplied, expected)
+  ) {
+    return res.status(401).json({
+      error: {
+        message: "Missing or invalid proxy API key.",
+        type: "authentication_error"
+      }
+    });
+  }
+
+  return next();
+}
+
+function concurrencyLimit(req, res, next) {
+  if (shuttingDown) {
+    return res.status(503).json({
+      error: {
+        message: "Proxy is shutting down.",
+        type: "server_unavailable"
+      }
+    });
+  }
+
+  if (activeRequests >= MAX_CONCURRENT_REQUESTS) {
+    res.setHeader("Retry-After", "5");
+
+    return res.status(429).json({
+      error: {
+        message: "Too many concurrent requests. Try again shortly.",
+        type: "rate_limit_error"
+      }
+    });
+  }
+
+  activeRequests++;
+  let released = false;
+
+  function release() {
+    if (released) return;
+    released = true;
+    activeRequests = Math.max(0, activeRequests - 1);
+  }
+
+  res.once("finish", release);
+  res.once("close", release);
+
+  next();
+}
+
+/* ============================================================
+   MODEL LIST AND CACHE
 ============================================================ */
 
 function localModelList() {
   const created = Math.floor(Date.now() / 1000);
+  const data = [];
 
-  const data = Object.entries(MODELS).map(([id, config]) => ({
-    id,
-    object: "model",
-    created,
-    owned_by: config.provider,
-    name: config.name,
-    endpoint_status: config.endpointStatus
-  }));
+  for (const [id, config] of Object.entries(MODELS)) {
+    data.push({
+      id,
+      object: "model",
+      created,
+      owned_by: config.provider,
+      name: config.name,
+      endpoint_status: config.endpointStatus,
+      enabled: config.enabled
+    });
+  }
 
   for (const [id, profile] of Object.entries(PROFILES)) {
     const config = MODELS[profile.baseModel];
@@ -881,7 +1152,8 @@ function localModelList() {
       created,
       owned_by: config?.provider || "proxy",
       name: `${config?.name || profile.baseModel} - ${profile.label}`,
-      base_model: profile.baseModel
+      base_model: profile.baseModel,
+      enabled: config?.enabled === true
     });
   }
 
@@ -893,8 +1165,9 @@ let modelCache = {
   data: null
 };
 
-async function fetchRemoteModels() {
+async function fetchRemoteModels(force = false) {
   if (
+    !force &&
     modelCache.data &&
     Date.now() - modelCache.timestamp < MODEL_CACHE_TTL_MS
   ) {
@@ -913,7 +1186,8 @@ async function fetchRemoteModels() {
     if (
       response.status >= 200 &&
       response.status < 300 &&
-      isObject(response.data)
+      isObject(response.data) &&
+      Array.isArray(response.data.data)
     ) {
       modelCache = {
         timestamp: Date.now(),
@@ -922,6 +1196,10 @@ async function fetchRemoteModels() {
 
       return response.data;
     }
+
+    debugLog("model_list_unavailable", {
+      status: response.status
+    });
   } catch (error) {
     debugLog("model_list_fetch_failed", {
       message: error.message
@@ -931,115 +1209,23 @@ async function fetchRemoteModels() {
   return null;
 }
 
-/* ============================================================
-   OPTIONAL PROXY AUTHENTICATION
-============================================================ */
+function combineModelLists(remote) {
+  const local = localModelList();
 
-function proxyAuth(req, res, next) {
-  if (!PROXY_API_KEY) return next();
-
-  const authorization = String(req.get("authorization") || "");
-  const match = authorization.match(/^Bearer\s+(.+)$/i);
-
-  if (!match) {
-    return res.status(401).json({
-      error: {
-        message: "Missing or invalid proxy API key",
-        type: "authentication_error"
-      }
-    });
+  if (!Array.isArray(remote?.data)) {
+    return { object: "list", data: local };
   }
 
-  const supplied = Buffer.from(match[1], "utf8");
-  const expected = Buffer.from(PROXY_API_KEY, "utf8");
-
-  if (
-    supplied.length !== expected.length ||
-    !crypto.timingSafeEqual(supplied, expected)
-  ) {
-    return res.status(401).json({
-      error: {
-        message: "Missing or invalid proxy API key",
-        type: "authentication_error"
-      }
-    });
-  }
-
-  return next();
-}
-
-/* ============================================================
-   SERVER-SENT EVENTS
-============================================================ */
-
-function writeSSEEvent(res, eventText) {
-  const lines = eventText.split(/\r?\n/);
-  const dataLines = [];
-  let eventName = null;
-  let eventId = null;
-
-  for (const line of lines) {
-    if (line.startsWith("event:")) {
-      eventName = line.slice(6).trim();
-    } else if (line.startsWith("id:")) {
-      eventId = line.slice(3).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  }
-
-  if (eventName) res.write(`event: ${eventName}\n`);
-  if (eventId) res.write(`id: ${eventId}\n`);
-
-  if (dataLines.length === 0) {
-    res.write("\n");
-    return;
-  }
-
-  const raw = dataLines.join("\n");
-
-  if (raw === "[DONE]") {
-    res.write("data: [DONE]\n\n");
-    return;
-  }
-
-  const parsed = safeJsonParse(raw);
-
-  if (!parsed) {
-    for (const line of dataLines) res.write(`data: ${line}\n`);
-    res.write("\n");
-    return;
-  }
-
-  const cleaned = STRIP_REASONING
-    ? stripReasoningObject(parsed)
-    : parsed;
-
-  res.write(`data: ${JSON.stringify(cleaned)}\n\n`);
-}
-
-function createSSEParser(onEvent) {
-  let buffer = "";
+  const seen = new Set(
+    remote.data.filter(isObject).map(model => model.id)
+  );
 
   return {
-    push(chunk) {
-      buffer += chunk;
-
-      let match;
-
-      while ((match = /\r?\n\r?\n/.exec(buffer)) !== null) {
-        const event = buffer.slice(0, match.index);
-
-        buffer = buffer.slice(match.index + match[0].length);
-
-        if (event.trim()) onEvent(event);
-      }
-    },
-
-    end() {
-      if (buffer.trim()) onEvent(buffer);
-      buffer = "";
-    }
+    object: "list",
+    data: [
+      ...remote.data,
+      ...local.filter(model => !seen.has(model.id))
+    ]
   };
 }
 
@@ -1047,13 +1233,31 @@ function createSSEParser(onEvent) {
    EXPRESS MIDDLEWARE
 ============================================================ */
 
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
+const corsOptions = {
+  origin(origin, callback) {
+    // Requests without an Origin header include server-to-server calls.
+    if (!origin) return callback(null, true);
+
+    if (CORS_ORIGINS.includes("*")) {
+      return callback(null, true);
+    }
+
+    if (CORS_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(null, false);
+  },
+  credentials: false,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Authorization", "Content-Type"]
+};
+
+app.use(cors(corsOptions));
 
 app.use(express.json({
-  limit: process.env.JSON_BODY_LIMIT || "10mb"
+  limit: MAX_BODY_BYTES,
+  strict: true
 }));
 
 app.use("/v1", proxyAuth);
@@ -1065,20 +1269,19 @@ app.use("/v1", proxyAuth);
 app.get("/", (req, res) => {
   res.json({
     name: "NVIDIA NIM OpenAI-Compatible Proxy",
-    status: "ok",
+    status: shuttingDown ? "shutting_down" : "ok",
     default_model: DEFAULT_MODEL,
-    upstream: NIM_API_BASE,
     profile_count: Object.keys(PROFILES).length
   });
 });
 
 app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    upstream: NIM_API_BASE,
-    default_model: DEFAULT_MODEL,
+  res.status(shuttingDown ? 503 : 200).json({
+    status: shuttingDown ? "shutting_down" : "ok",
     api_key_configured: Boolean(NIM_API_KEY),
-    proxy_auth_enabled: Boolean(PROXY_API_KEY)
+    proxy_auth_enabled: Boolean(PROXY_API_KEY),
+    active_requests: activeRequests,
+    max_concurrent_requests: MAX_CONCURRENT_REQUESTS
   });
 });
 
@@ -1088,349 +1291,324 @@ app.get("/health", (req, res) => {
 
 app.get("/v1/models", async (req, res) => {
   const remote = await fetchRemoteModels();
-  const local = localModelList();
-
-  if (Array.isArray(remote?.data)) {
-    const seen = new Set(
-      remote.data.filter(isObject).map(model => model.id)
-    );
-
-    return res.json({
-      object: "list",
-      data: [
-        ...remote.data,
-        ...local.filter(model => !seen.has(model.id))
-      ]
-    });
-  }
-
-  return res.json({
-    object: "list",
-    data: local
-  });
+  return res.json(combineModelLists(remote));
 });
 
 app.post("/v1/models/refresh", async (req, res) => {
-  modelCache = {
-    timestamp: 0,
-    data: null
-  };
-
-  const remote = await fetchRemoteModels();
-  const local = localModelList();
-
-  if (Array.isArray(remote?.data)) {
-    const seen = new Set(
-      remote.data.filter(isObject).map(model => model.id)
-    );
-
-    return res.json({
-      object: "list",
-      data: [
-        ...remote.data,
-        ...local.filter(model => !seen.has(model.id))
-      ]
-    });
-  }
-
-  return res.json({
-    object: "list",
-    data: local
-  });
+  const remote = await fetchRemoteModels(true);
+  return res.json(combineModelLists(remote));
 });
 
 /* ============================================================
    CHAT COMPLETIONS
 ============================================================ */
 
-app.post("/v1/chat/completions", async (req, res) => {
-  const startedAt = Date.now();
+app.post(
+  "/v1/chat/completions",
+  concurrencyLimit,
+  async (req, res) => {
+    const startedAt = Date.now();
+    const body = isObject(req.body) ? req.body : {};
 
-  const body = isObject(req.body) ? req.body : {};
-  const requestedModel = normalizeModel(body.model || DEFAULT_MODEL);
-  const resolution = resolveModel(requestedModel);
+    const requestedModel = normalizeModel(body.model || DEFAULT_MODEL);
+    const resolution = resolveModel(requestedModel);
 
-  if (!resolution) {
-    return res.status(400).json({
-      error: {
-        message: `Unknown model: ${requestedModel}`,
-        type: "invalid_request_error",
-        code: "unknown_model"
-      }
-    });
-  }
-
-  const diagnosticMetadata = {
-    model: resolution.model,
-    requested_model: requestedModel,
-    profile: resolution.profile?.label || null,
-    reasoning_effort: resolution.profile?.reasoningEffort || null,
-    thinking: resolution.profile?.thinking ?? null,
-    stream: Boolean(body.stream)
-  };
-
-  timingLog("request_received", startedAt, diagnosticMetadata);
-
-  if (!Array.isArray(body.messages)) {
-    return res.status(400).json({
-      error: {
-        message: "The messages field must be an array",
-        type: "invalid_request_error"
-      }
-    });
-  }
-
-  const upstreamBody = buildNimRequest(body, resolution);
-  const streaming = Boolean(upstreamBody.stream);
-
-  let firstUpstreamChunkLogged = false;
-  let firstSSEEventLogged = false;
-  let firstOutputLogged = false;
-
-  debugLog("request", {
-    model: resolution.model,
-    requested_model: requestedModel,
-    profile: resolution.profile?.label || null,
-    reasoning_effort:
-      upstreamBody.reasoning_effort ||
-      upstreamBody.chat_template_kwargs?.reasoning_effort ||
-      null,
-    thinking_enabled:
-      upstreamBody.chat_template_kwargs?.enable_thinking ?? null,
-    stream: streaming,
-    message_count: body.messages.length,
-    max_tokens: upstreamBody.max_tokens,
-    temperature: upstreamBody.temperature ?? null,
-    top_p: upstreamBody.top_p ?? null,
-    adapter: resolution.config?.adapter || "generic"
-  });
-
-  timingLog("upstream_request_started", startedAt, {
-    ...diagnosticMetadata,
-    message_count: body.messages.length,
-    max_tokens: upstreamBody.max_tokens
-  });
-
-  let upstream;
-
-  try {
-    upstream = await axios.post(
-      `${NIM_API_BASE}/chat/completions`,
-      upstreamBody,
-      {
-        headers: buildHeaders(streaming),
-        timeout: NIM_TIMEOUT_MS,
-        httpAgent,
-        httpsAgent,
-        responseType: streaming ? "stream" : "json",
-        validateStatus: () => true,
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity
-      }
-    );
-  } catch (error) {
-    const elapsedMs = Date.now() - startedAt;
-
-    timingLog("upstream_request_failed", startedAt, {
-      ...diagnosticMetadata,
-      elapsed_ms: elapsedMs,
-      error_code: error?.code || null,
-      error_message: error?.message || "unknown error"
-    });
-
-    console.error(
-      `[proxy] request failed for ${resolution.model}: ` +
-      `${error?.message || "unknown error"}`
-    );
-
-    if (res.headersSent) return res.end();
-
-    return res
-      .status(Number(error?.response?.status) || 502)
-      .json(makeProxyError(error, resolution, elapsedMs));
-  }
-
-  timingLog("upstream_headers_received", startedAt, {
-    ...diagnosticMetadata,
-    upstream_status: upstream.status,
-    content_type: upstream.headers?.["content-type"] || null
-  });
-
-  if (upstream.status < 200 || upstream.status >= 300) {
-    let data = upstream.data;
-
-    if (data && typeof data.pipe === "function") {
-      try {
-        data = await new Promise((resolve, reject) => {
-          const chunks = [];
-
-          data.on("data", chunk => chunks.push(chunk));
-          data.on("end", () => {
-            resolve(Buffer.concat(chunks).toString("utf8"));
-          });
-          data.on("error", reject);
-        });
-      } catch {
-        data = "NVIDIA NIM returned an unreadable error response";
-      }
+    if (!resolution) {
+      return res.status(400).json({
+        error: {
+          message: `Unknown model: ${requestedModel}`,
+          type: "invalid_request_error",
+          code: "unknown_model"
+        }
+      });
     }
 
-    const errorObject = makeProxyError(
-      {
-        response: {
-          status: upstream.status,
-          data
+    if (resolution.error === "model_disabled") {
+      return res.status(400).json({
+        error: {
+          message:
+            "This model is configured but disabled because its NVIDIA NIM endpoint has not been verified.",
+          type: "invalid_request_error",
+          code: "model_disabled",
+          model: resolution.model
         }
-      },
-      resolution,
-      Date.now() - startedAt
-    );
+      });
+    }
 
-    console.error(
-      `[proxy] NIM ${upstream.status} for ${resolution.model} ` +
-      `profile=${resolution.profile?.label || "default"}`
-    );
+    const messageError = validateMessages(body.messages);
 
-    debugLog("upstream_error", {
-      status: upstream.status,
+    if (messageError) {
+      return res.status(400).json({
+        error: {
+          message: messageError,
+          type: "invalid_request_error"
+        }
+      });
+    }
+
+    let upstreamBody;
+
+    try {
+      upstreamBody = buildNimRequest(body, resolution);
+    } catch (error) {
+      return res.status(400).json({
+        error: {
+          message: error.message,
+          type: "invalid_request_error"
+        }
+      });
+    }
+
+    const streaming = upstreamBody.stream === true;
+    const diagnosticMetadata = {
       model: resolution.model,
+      requested_model: requestedModel,
       profile: resolution.profile?.label || null,
-      message: errorObject.error.message
+      stream: streaming
+    };
+
+    timingLog("request_received", startedAt, diagnosticMetadata);
+
+    debugLog("request", {
+      ...diagnosticMetadata,
+      adapter: resolution.config?.adapter || "generic",
+      message_count: body.messages.length,
+      max_tokens: upstreamBody.max_tokens,
+      temperature: upstreamBody.temperature ?? null,
+      top_p: upstreamBody.top_p ?? null,
+      reasoning_effort:
+        upstreamBody.reasoning_effort ||
+        upstreamBody.chat_template_kwargs?.reasoning_effort ||
+        null,
+      thinking_enabled:
+        upstreamBody.chat_template_kwargs?.enable_thinking ?? null
     });
 
-    return res.status(upstream.status).json(errorObject);
-  }
+    const controller = new AbortController();
+    let upstreamStream = null;
+    let clientDisconnected = false;
 
-  if (!streaming) {
-    const data = STRIP_REASONING
-      ? stripReasoningObject(upstream.data)
-      : upstream.data;
+    const abortRequest = () => {
+      if (clientDisconnected) return;
+      clientDisconnected = true;
+      controller.abort();
 
-    timingLog("nonstream_response_forwarded", startedAt, {
+      if (
+        upstreamStream &&
+        typeof upstreamStream.destroy === "function"
+      ) {
+        upstreamStream.destroy();
+      }
+    };
+
+    req.once("aborted", abortRequest);
+
+    res.once("close", () => {
+      if (!res.writableEnded) {
+        abortRequest();
+
+        timingLog("client_disconnected", startedAt, diagnosticMetadata);
+      }
+    });
+
+    let upstream;
+
+    try {
+      upstream = await axios.post(
+        `${NIM_API_BASE}/chat/completions`,
+        upstreamBody,
+        {
+          headers: buildHeaders(streaming),
+          timeout: NIM_TIMEOUT_MS,
+          signal: controller.signal,
+          httpAgent,
+          httpsAgent,
+          responseType: streaming ? "stream" : "json",
+          validateStatus: () => true,
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        }
+      );
+    } catch (error) {
+      if (clientDisconnected || res.destroyed) return;
+
+      timingLog("upstream_request_failed", startedAt, {
+        ...diagnosticMetadata,
+        error_code: error?.code || null,
+        error_message: error?.message || "unknown error"
+      });
+
+      if (res.headersSent) return res.end();
+
+      const status = error?.code === "ECONNABORTED" ? 504 : 502;
+
+      return res.status(status).json(
+        makeProxyError(error, resolution, Date.now() - startedAt)
+      );
+    }
+
+    upstreamStream =
+      streaming && upstream.data && typeof upstream.data.on === "function"
+        ? upstream.data
+        : null;
+
+    timingLog("upstream_headers_received", startedAt, {
       ...diagnosticMetadata,
       upstream_status: upstream.status
     });
 
-    return res.status(upstream.status).json(data);
-  }
+    if (upstream.status < 200 || upstream.status >= 300) {
+      let data = upstream.data;
 
-  res.status(upstream.status);
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
+      if (upstreamStream) {
+        try {
+          data = await readStreamLimited(upstreamStream);
+        } catch {
+          data = "Unable to read upstream error response.";
+        }
+      }
 
-  if (typeof res.flushHeaders === "function") {
-    res.flushHeaders();
-  }
+      if (clientDisconnected || res.destroyed) return;
 
-  const stream = upstream.data;
+      const proxyError = makeProxyError(
+        {
+          response: {
+            status: upstream.status,
+            data
+          }
+        },
+        resolution,
+        Date.now() - startedAt
+      );
 
-  const parser = createSSEParser(event => {
-    if (res.writableEnded) return;
+      debugLog("upstream_error", {
+        status: upstream.status,
+        model: resolution.model,
+        message: proxyError.error.message
+      });
 
-    if (!firstSSEEventLogged) {
-      firstSSEEventLogged = true;
+      // Preserve common API status codes; map unexpected upstream
+      // server errors to 502.
+      const status = upstream.status >= 400 && upstream.status < 500
+        ? upstream.status
+        : 502;
 
-      timingLog("first_sse_event", startedAt, {
-        ...diagnosticMetadata,
-        event_chars: event.length
+      return res.status(status).json(proxyError);
+    }
+
+    if (!streaming) {
+      const data = STRIP_REASONING
+        ? stripReasoningObject(upstream.data)
+        : upstream.data;
+
+      timingLog("nonstream_response_forwarded", startedAt, {
+        ...diagnosticMetadata
+      });
+
+      return res.status(upstream.status).json(data);
+    }
+
+    if (!upstreamStream) {
+      return res.status(502).json({
+        error: {
+          message: "Upstream did not return a readable stream.",
+          type: "upstream_error"
+        }
       });
     }
 
-    if (!STRIP_REASONING) {
-      res.write(`${event}\n\n`);
+    res.status(upstream.status);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("X-Accel-Buffering", "no");
+
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+
+    let firstChunkLogged = false;
+    let firstEventLogged = false;
+    let firstOutputLogged = false;
+
+    const decoder = new StringDecoder("utf8");
+
+    const parser = createSSEParser(event => {
+      if (res.writableEnded || res.destroyed) return;
+
+      if (!firstEventLogged) {
+        firstEventLogged = true;
+
+        timingLog("first_sse_event", startedAt, {
+          ...diagnosticMetadata,
+          event_chars: event.length
+        });
+      }
+
+      if (STRIP_REASONING) {
+        writeSSEEvent(res, event);
+      } else {
+        res.write(`${event}\n\n`);
+      }
 
       if (!firstOutputLogged) {
         firstOutputLogged = true;
 
         timingLog("first_output_forwarded", startedAt, {
+          ...diagnosticMetadata
+        });
+      }
+    });
+
+    upstreamStream.on("data", chunk => {
+      if (res.writableEnded || res.destroyed) return;
+
+      if (!firstChunkLogged) {
+        firstChunkLogged = true;
+
+        timingLog("first_upstream_chunk", startedAt, {
           ...diagnosticMetadata,
-          output_mode: "raw_sse"
+          chunk_bytes: Buffer.isBuffer(chunk)
+            ? chunk.length
+            : Buffer.byteLength(String(chunk))
         });
       }
 
-      return;
-    }
+      parser.push(decoder.write(chunk));
+    });
 
-    writeSSEEvent(res, event);
+    upstreamStream.on("end", () => {
+      if (res.writableEnded || res.destroyed) return;
 
-    if (!firstOutputLogged) {
-      firstOutputLogged = true;
-
-      timingLog("first_output_forwarded", startedAt, {
-        ...diagnosticMetadata,
-        output_mode: "processed_sse"
-      });
-    }
-  });
-
-  stream.on("data", chunk => {
-    if (!firstUpstreamChunkLogged) {
-      firstUpstreamChunkLogged = true;
-
-      timingLog("first_upstream_chunk", startedAt, {
-        ...diagnosticMetadata,
-        chunk_bytes: Buffer.isBuffer(chunk)
-          ? chunk.length
-          : Buffer.byteLength(String(chunk))
-      });
-    }
-
-    if (!res.writableEnded) {
-      parser.push(chunk.toString("utf8"));
-    }
-  });
-
-  stream.on("end", () => {
-    if (!res.writableEnded) {
+      parser.push(decoder.end());
       parser.end();
       res.end();
 
       timingLog("upstream_stream_ended", startedAt, {
         ...diagnosticMetadata,
-        received_chunk: firstUpstreamChunkLogged,
-        received_sse_event: firstSSEEventLogged,
+        received_chunk: firstChunkLogged,
+        received_event: firstEventLogged,
         forwarded_output: firstOutputLogged
       });
-    }
-  });
-
-  stream.on("error", error => {
-    timingLog("upstream_stream_error", startedAt, {
-      ...diagnosticMetadata,
-      error_code: error?.code || null,
-      error_message: error?.message || "unknown error"
     });
 
-    console.error(
-      `[proxy] upstream stream error for ${resolution.model}: ` +
-      `${error?.message || "unknown error"}`
-    );
+    upstreamStream.on("error", error => {
+      if (clientDisconnected || res.destroyed || res.writableEnded) return;
 
-    if (!res.writableEnded) res.end();
-  });
-
-  res.on("close", () => {
-    if (
-      !res.writableEnded &&
-      stream &&
-      typeof stream.destroy === "function"
-    ) {
-      timingLog("client_disconnected", startedAt, {
+      timingLog("upstream_stream_error", startedAt, {
         ...diagnosticMetadata,
-        received_chunk: firstUpstreamChunkLogged,
-        received_sse_event: firstSSEEventLogged,
-        forwarded_output: firstOutputLogged
+        error_code: error?.code || null,
+        error_message: error?.message || "unknown error"
       });
 
-      stream.destroy();
-    }
-  });
-});
+      // Once SSE headers have been sent, a JSON error response is
+      // no longer possible. End the stream cleanly.
+      res.end();
+    });
+  }
+);
 
 /* ============================================================
-   404 AND GLOBAL ERROR HANDLING
+   404 AND ERROR HANDLING
 ============================================================ */
 
 app.use((req, res) => {
@@ -1443,36 +1621,75 @@ app.use((req, res) => {
 });
 
 app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+
+  if (error?.type === "entity.too.large") {
+    return res.status(413).json({
+      error: {
+        message: "Request body is too large.",
+        type: "invalid_request_error"
+      }
+    });
+  }
+
+  if (
+    error instanceof SyntaxError &&
+    error.status === 400 &&
+    Object.prototype.hasOwnProperty.call(error, "body")
+  ) {
+    return res.status(400).json({
+      error: {
+        message: "Malformed JSON request body.",
+        type: "invalid_request_error"
+      }
+    });
+  }
+
   console.error(
     `[proxy] unhandled error: ${error?.message || "unknown error"}`
   );
 
-  if (res.headersSent) return next(error);
-
   return res.status(500).json({
     error: {
-      message: error?.message || "Internal proxy error",
+      message: "Internal proxy error.",
       type: "internal_error"
     }
   });
 });
 
 /* ============================================================
-   START SERVER
+   START AND SHUTDOWN
 ============================================================ */
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[proxy] listening on port ${PORT}`);
-  console.log(`[proxy] upstream=${NIM_API_BASE}`);
   console.log(`[proxy] default_model=${DEFAULT_MODEL}`);
   console.log(`[proxy] NVIDIA API key configured=${Boolean(NIM_API_KEY)}`);
-  console.log(`[proxy] proxy authentication enabled=${Boolean(PROXY_API_KEY)}`);
+  console.log(`[proxy] proxy authentication configured=${Boolean(PROXY_API_KEY)}`);
+  console.log(`[proxy] production=${IS_PRODUCTION}`);
   console.log(`[proxy] reasoning stripping=${STRIP_REASONING}`);
-  console.log(`[proxy] model profiles=${Object.keys(PROFILES).length}`);
-  console.log(`[proxy] diagnostic timing enabled=${DEBUG_PROXY}`);
+  console.log(`[proxy] concurrent request limit=${MAX_CONCURRENT_REQUESTS}`);
+  console.log(`[proxy] profile count=${Object.keys(PROFILES).length}`);
+
+  if (!NIM_API_KEY) {
+    console.warn("[proxy] WARNING: NVIDIA API key is not configured.");
+  }
+
+  if (IS_PRODUCTION && !PROXY_API_KEY) {
+    console.error(
+      "[proxy] WARNING: /v1 requests will be rejected until PROXY_API_KEY is set."
+    );
+  }
 });
 
+server.requestTimeout = 0;
+server.headersTimeout = 30000;
+server.keepAliveTimeout = 5000;
+
 function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   console.log(`[proxy] received ${signal}; shutting down`);
 
   server.close(() => {
@@ -1481,9 +1698,14 @@ function shutdown(signal) {
     process.exit(0);
   });
 
-  setTimeout(() => {
+  // Close active sockets after a short grace period.
+  const forceExit = setTimeout(() => {
+    httpAgent.destroy();
+    httpsAgent.destroy();
     process.exit(1);
-  }, 10000).unref();
+  }, 10000);
+
+  forceExit.unref();
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
