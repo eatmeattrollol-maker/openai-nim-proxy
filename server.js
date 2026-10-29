@@ -96,9 +96,7 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: MAX_BODY_BYTES }));
 
-// Optional CORS support for browser-based clients.
-// JanitorAI server-to-server requests do not normally need CORS.
-
+// CORS support for browser-based clients.
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin) => origin.trim())
@@ -106,17 +104,35 @@ const allowedOrigins = (process.env.CORS_ORIGINS || '')
 
 app.use((req, res, next) => {
   const origin = req.get('origin');
+  const allowAll = allowedOrigins.includes('*');
+  const originAllowed =
+    origin && (allowAll || allowedOrigins.includes(origin));
 
-  if (origin && allowedOrigins.includes(origin)) {
+  // Log preflight diagnostics without exposing keys or prompts.
+  if (req.method === 'OPTIONS') {
+    console.log('CORS preflight:', {
+      origin: origin || '(no Origin header)',
+      requestedMethod:
+        req.get('access-control-request-method') || '(not specified)',
+      requestedHeaders:
+        req.get('access-control-request-headers') || '(not specified)',
+      originAllowed: Boolean(originAllowed)
+    });
+  }
+
+  if (originAllowed) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader(
-      'Access-Control-Allow-Headers',
-      'Authorization, Content-Type'
-    );
-    res.setHeader(
       'Access-Control-Allow-Methods',
       'GET, POST, OPTIONS'
+    );
+
+    // Allow the headers the browser actually requests.
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      req.get('access-control-request-headers') ||
+        'Authorization, Content-Type'
     );
   }
 
