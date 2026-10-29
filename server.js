@@ -548,7 +548,7 @@ function normalizeMistralMessages(messages) {
       role = 'system';
     }
 
-    if (!MISTRAL_ROLES.has(role)) {
+    if (!['system', 'user', 'assistant', 'tool'].includes(role)) {
       throw new Error(
         `Mistral message ${index + 1} has unsupported role "${role}".`
       );
@@ -572,63 +572,38 @@ function normalizeMistralMessages(messages) {
       output.content = content;
     }
 
-    if (
-      typeof message.name === 'string' &&
-      message.name.length > 0
-    ) {
+    if (typeof message.name === 'string' && message.name.length > 0) {
       output.name = message.name;
     }
 
-    // NVIDIA explicitly supports reasoning_content in historical
-    // assistant messages. Preserve it rather than deleting history.
-    if (
-      role === 'assistant' &&
-      (
+    if (role === 'assistant') {
+      if (
         typeof message.reasoning_content === 'string' ||
         message.reasoning_content === null
-      )
-    ) {
-      if ('reasoning_content' in message) {
+      ) {
         output.reasoning_content = message.reasoning_content;
       }
-    }
 
-    if (role === 'assistant' && Array.isArray(message.tool_calls)) {
-      output.tool_calls = message.tool_calls.map((call) => {
-        if (!call || typeof call !== 'object') return call;
+      if (Array.isArray(message.tool_calls)) {
+        output.tool_calls = message.tool_calls;
+      }
 
-        const cleanCall = {};
+      // Preserve an explicitly supplied prefix flag.
+      if (typeof message.prefix === 'boolean') {
+        output.prefix = message.prefix;
+      }
 
-        if (typeof call.id === 'string') {
-          cleanCall.id = call.id;
-        }
-
-        if (typeof call.type === 'string') {
-          cleanCall.type = call.type;
-        }
-
-        if (call.function && typeof call.function === 'object') {
-          cleanCall.function = {};
-
-          if (typeof call.function.name === 'string') {
-            cleanCall.function.name = call.function.name;
-          }
-
-          if (typeof call.function.arguments === 'string') {
-            cleanCall.function.arguments = call.function.arguments;
-          }
-        }
-
-        return cleanCall;
-      });
+      // Mistral supports marking a final assistant message
+      // as a continuation prefix.
+      if (index === messages.length - 1) {
+        output.prefix = true;
+      }
     }
 
     if (role === 'tool') {
       if (typeof message.tool_call_id === 'string') {
         output.tool_call_id = message.tool_call_id;
-      }
-
-      if (!output.tool_call_id) {
+      } else {
         throw new Error(
           `Mistral tool message ${index + 1} is missing tool_call_id.`
         );
