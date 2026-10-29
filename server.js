@@ -934,7 +934,7 @@ if (body.messages.length === 0) {
     body.max_tokens === undefined &&
     body.max_completion_tokens === undefined
   ) {
-    body.max_tokens = 8192;
+    body.max_tokens = 16384;
   }
 
   const streaming = body.stream === true;
