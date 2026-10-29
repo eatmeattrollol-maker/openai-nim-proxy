@@ -12,7 +12,7 @@ services:
       - key: NODE_ENV
         value: production
 
-      - key: NIM_API_KEY
+      - key: NVIDIA_API_KEY
         sync: false
 
       - key: DEFAULT_MODEL
