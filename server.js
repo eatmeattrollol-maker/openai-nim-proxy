@@ -13,6 +13,7 @@ const app = express();
 // ============================================================
 
 const PORT = Number(process.env.PORT || 3000);
+
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 const NVIDIA_BASE_URL = (
@@ -60,24 +61,26 @@ const ALLOWED_ORIGINS = (
 // ============================================================
 // ROLEPLAY CONTINUITY
 //
-// This adds instructions only.
-// It does NOT store conversation memory.
-//
-// No conversation IDs are guessed.
-// No character-based memory is created.
-// No retry creates persistent state.
+// Instruction-only. No persistent memory is created.
+// No chat is identified by character name.
+// No retry creates or saves conversation history.
 // ============================================================
 
 const RP_CONTINUITY_PROMPT =
   process.env.RP_CONTINUITY_PROMPT || [
     'ROLEPLAY CONTINUITY INSTRUCTIONS:',
-    'Treat the supplied conversation as one chronological story, not as a list of separate prompts.',
+    'Treat the supplied conversation as one chronological story, not a list of independent prompts.',
     'All earlier user messages and assistant replies are established history and events that have already happened.',
-    'Continue from the current end of the supplied transcript. Do not answer, replay, or independently act on earlier user messages again.',
+    'Earlier user messages that already have assistant replies are not new requests. Do not answer them again or replay them.',
+    'Continue from the current end of the supplied transcript.',
     'Maintain established facts, chronology, character identities, personalities, knowledge, motives, relationships, locations, injuries, possessions, promises, and consequences.',
-    'Do not reset the scene, repeat completed events, resurrect resolved conflicts, or make characters know information they have not learned.',
-    'Respond to the newest user contribution in the context of everything that has already happened.',
-    'Respect the roleplay character and scenario instructions already supplied. Do not take control of the user character, or invent their thoughts, dialogue, or actions, unless the existing instructions explicitly permit it.'
+    'Characters must retain only information they have actually learned.',
+    'Do not reset scenes, repeat completed events, resurrect resolved conflicts, or contradict established events.',
+    'Treat character actions and dialogue from earlier assistant responses as events that have already happened.',
+    'Respond to the newest user contribution in the context of the entire supplied history.',
+    'Allow NPCs and the surrounding world to behave naturally and independently rather than existing only to answer the player.',
+    'Respect the existing character definitions, scenario instructions, and roleplay boundaries.',
+    'Do not take control of the user character or invent their thoughts, dialogue, decisions, or actions unless the existing instructions explicitly permit it.'
   ].join('\n');
 
 // ============================================================
@@ -146,10 +149,8 @@ function addModel(id, label, upstream, settings = {}) {
 // ------------------------------------------------------------
 // MISTRAL LARGE 4
 //
-// Uses NVIDIA's hosted API model ID.
-//
-// reasoning_effort:
-// low | medium | high
+// High reasoning and no-reasoning profiles.
+// Automatic fallback is available for HTTP 400.
 // ------------------------------------------------------------
 
 const MISTRAL4 =
@@ -176,22 +177,12 @@ addModel(
 );
 
 addModel(
-  `${MISTRAL4}-low`,
-  'Mistral Large 4 - Low Reasoning',
+  `${MISTRAL4}-no-thinking`,
+  'Mistral Large 4 - No Reasoning',
   MISTRAL4,
   {
     adapter: 'mistral4',
-    effort: 'low'
-  }
-);
-
-addModel(
-  `${MISTRAL4}-medium`,
-  'Mistral Large 4 - Medium Reasoning',
-  MISTRAL4,
-  {
-    adapter: 'mistral4',
-    effort: 'medium'
+    effort: 'none'
   }
 );
 
@@ -365,6 +356,10 @@ addModel(
   'nvidia/nemotron-3.5-bolt-e4b'
 );
 
+// ============================================================
+// DEFAULT MODEL VALIDATION
+// ============================================================
+
 if (
   !Object.prototype.hasOwnProperty.call(
     MODEL_PROFILES,
@@ -378,7 +373,7 @@ if (
 
 // ============================================================
 // REQUEST LOGGING
-// Never log prompts or API keys.
+// Never log prompts, message content, or API keys.
 // ============================================================
 
 app.use((req, res, next) => {
@@ -418,11 +413,7 @@ app.use((req, res, next) => {
     ALLOWED_ORIGINS.includes(origin);
 
   if (rawOrigin && allowed) {
-    res.setHeader(
-      'Access-Control-Allow-Origin',
-      rawOrigin
-    );
-
+    res.setHeader('Access-Control-Allow-Origin', rawOrigin);
     res.setHeader('Vary', 'Origin');
 
     res.setHeader(
@@ -474,10 +465,7 @@ app.use(express.json({
 // ============================================================
 
 if (PROXY_API_KEY) {
-  const expectedKey = Buffer.from(
-    PROXY_API_KEY,
-    'utf8'
-  );
+  const expectedKey = Buffer.from(PROXY_API_KEY, 'utf8');
 
   app.use('/v1', (req, res, next) => {
     const match = (req.get('authorization') || '')
@@ -490,10 +478,7 @@ if (PROXY_API_KEY) {
 
     const valid =
       suppliedKey.length === expectedKey.length &&
-      crypto.timingSafeEqual(
-        suppliedKey,
-        expectedKey
-      );
+      crypto.timingSafeEqual(suppliedKey, expectedKey);
 
     if (!valid) {
       return res.status(401).json({
@@ -571,9 +556,7 @@ function jsonError(
 
   return res.status(status).json({
     error: {
-      message: String(
-        message || 'Unknown error'
-      ).slice(0, 4000),
+      message: String(message || 'Unknown error').slice(0, 4000),
       type
     }
   });
@@ -804,7 +787,9 @@ const MISTRAL_ROLES = new Set([
 ]);
 
 function normalizeMistralMessages(messages) {
-  return messages.map((message, index) => {
+  const normalized = [];
+
+  messages.forEach((message, index) => {
     let role = message.role;
 
     if (
@@ -820,25 +805,39 @@ function normalizeMistralMessages(messages) {
       );
     }
 
+    const content = message.content;
+
+    // Remove only whitespace-only user/assistant messages.
+    // Do not discard actual narrative turns.
+    if (
+      (role === 'user' || role === 'assistant') &&
+      typeof content === 'string' &&
+      content.trim().length === 0
+    ) {
+      return;
+    }
+
     const output = { role };
 
     if (
-      Object.prototype.hasOwnProperty.call(
-        message,
-        'content'
-      )
+      Object.prototype.hasOwnProperty.call(message, 'content')
     ) {
-      output.content = message.content;
+      output.content = content;
     }
 
-    // Preserve documented assistant reasoning/tool fields.
+    if (
+      typeof message.name === 'string' &&
+      message.name.length > 0
+    ) {
+      output.name = message.name;
+    }
+
     if (role === 'assistant') {
       if (
-        typeof message.reasoning_content === 'string' ||
-        message.reasoning_content === null
+        typeof message.reasoning_content === 'string' &&
+        message.reasoning_content.length > 0
       ) {
-        output.reasoning_content =
-          message.reasoning_content;
+        output.reasoning_content = message.reasoning_content;
       }
 
       if (Array.isArray(message.tool_calls)) {
@@ -859,20 +858,23 @@ function normalizeMistralMessages(messages) {
       output.tool_call_id = message.tool_call_id;
     }
 
-    // Do not forward undocumented prefix flags.
-    // Do not fabricate prefix=true on the final assistant message.
-    return output;
+    normalized.push(output);
   });
+
+  if (normalized.length === 0) {
+    throw new Error(
+      'Mistral request contains no usable messages.'
+    );
+  }
+
+  return normalized;
 }
 
 // ============================================================
-// MERGE CONTINUITY INTO THE EXISTING SYSTEM MESSAGE
+// CONTINUITY INSTRUCTION INJECTION
 //
-// IMPORTANT:
-// We no longer create a second system message.
-//
-// JanitorAI's original system prompt remains intact.
-// The continuity supplement is appended to that same message.
+// The instruction is appended to the existing first system
+// message instead of creating another system message.
 // ============================================================
 
 function addRpContinuityInstruction(messages) {
@@ -884,7 +886,6 @@ function addRpContinuityInstruction(messages) {
   }
 
   const marker = 'ROLEPLAY CONTINUITY INSTRUCTIONS:';
-
   const result = messages.slice();
 
   const firstSystemIndex = result.findIndex(
@@ -942,7 +943,7 @@ function addRpContinuityInstruction(messages) {
 
 // ============================================================
 // SAFE MESSAGE DIAGNOSTICS
-// Never print message contents.
+// Never log prompts or message contents.
 // ============================================================
 
 function describeContent(content) {
@@ -992,8 +993,30 @@ function summarizeMessages(messages) {
   }));
 }
 
+function countWhitespaceOnlyMessages(messages) {
+  return messages.filter(message =>
+    message &&
+    (message.role === 'user' || message.role === 'assistant') &&
+    typeof message.content === 'string' &&
+    message.content.length > 0 &&
+    message.content.trim().length === 0
+  ).length;
+}
+
+function countNullReasoningFields(messages) {
+  return messages.filter(message =>
+    message &&
+    message.role === 'assistant' &&
+    Object.prototype.hasOwnProperty.call(
+      message,
+      'reasoning_content'
+    ) &&
+    message.reasoning_content === null
+  ).length;
+}
+
 // ============================================================
-// UPSTREAM REQUEST ALLOWLISTS
+// REQUEST ALLOWLISTS
 // ============================================================
 
 const MISTRAL_ALLOWED_FIELDS = new Set([
@@ -1050,6 +1073,52 @@ function copyAllowedFields(source, allowedFields) {
 }
 
 // ============================================================
+// MISTRAL FALLBACK REQUEST
+//
+// First: core parameters + high reasoning.
+// Second: core parameters + no explicit reasoning,
+// with reasoning_effort=none.
+//
+// Both attempts retain the same conversation history.
+// ============================================================
+
+function buildMistralFallbackBody(
+  body,
+  reasoningEffort
+) {
+  const fallback = {
+    model: body.model,
+    messages: body.messages,
+    max_tokens: body.max_tokens,
+    stream: body.stream === true
+  };
+
+  if (reasoningEffort) {
+    fallback.reasoning_effort = reasoningEffort;
+  }
+
+  return fallback;
+}
+
+function findOneCharacterMessages(messages) {
+  return messages
+    .map((message, index) => ({
+      message,
+      index
+    }))
+    .filter(item =>
+      typeof item.message.content === 'string' &&
+      item.message.content.length === 1
+    )
+    .map(item => ({
+      index: item.index,
+      role: item.message.role,
+      isWhitespace: /^\s$/.test(item.message.content),
+      codePoint: item.message.content.codePointAt(0)
+    }));
+}
+
+// ============================================================
 // MODEL-SPECIFIC REQUEST ADAPTERS
 // ============================================================
 
@@ -1082,9 +1151,8 @@ function applyProfile(requestBody, profile) {
         normalizeMistralMessages(body.messages)
       );
 
-      // NVIDIA recommends not overriding temperature and top_p
-      // simultaneously. Keep temperature and omit top_p when both
-      // are supplied by JanitorAI.
+      // Avoid sending both temperature and top_p.
+      // Preserve JanitorAI temperature if supplied.
       if (
         filtered.temperature !== undefined &&
         filtered.top_p !== undefined
@@ -1116,13 +1184,11 @@ function applyProfile(requestBody, profile) {
       break;
     }
 
-    case 'step': {
+    case 'step':
       break;
-    }
 
-    default: {
+    default:
       break;
-    }
   }
 
   if (
@@ -1185,7 +1251,35 @@ function upstreamHeaders(streaming) {
   };
 }
 
-async function readStreamText(stream, maxBytes = 65536) {
+async function postNvidiaChat(
+  body,
+  streaming,
+  signal
+) {
+  return axios.post(
+    `${NVIDIA_BASE_URL}/chat/completions`,
+    body,
+    {
+      headers: upstreamHeaders(streaming),
+
+      responseType: streaming
+        ? 'stream'
+        : 'json',
+
+      timeout: 0,
+      signal,
+      validateStatus: () => true,
+      maxRedirects: 0,
+      maxContentLength: 100 * 1024 * 1024,
+      maxBodyLength: 100 * 1024 * 1024
+    }
+  );
+}
+
+async function readStreamText(
+  stream,
+  maxBytes = 65536
+) {
   const chunks = [];
   let total = 0;
 
@@ -1253,7 +1347,6 @@ function sleep(ms, signal) {
 
     function onAbort() {
       cleanup();
-
       reject(
         signal.reason || new Error('Request aborted.')
       );
@@ -1691,6 +1784,11 @@ app.post(
       );
     }
 
+    const originalMistralMessages =
+      profile.adapter === 'mistral4'
+        ? requestBody.messages
+        : [];
+
     const controller = new AbortController();
 
     let upstreamStream = null;
@@ -1746,25 +1844,125 @@ app.post(
       }
     }, REQUEST_TIMEOUT_MS);
 
+    // --------------------------------------------------------
+    // MISTRAL FALLBACK DIAGNOSTIC STATE
+    // --------------------------------------------------------
+
+    let mistralFallbackAttempted = false;
+    let mistralFallbackStage = 0;
+    let mistralFirstError = null;
+    let mistralSecondError = null;
+
     try {
-      let upstream = await axios.post(
-        `${NVIDIA_BASE_URL}/chat/completions`,
+      // ------------------------------------------------------
+      // INITIAL UPSTREAM REQUEST
+      // ------------------------------------------------------
+
+      let upstream = await postNvidiaChat(
         body,
-        {
-          headers: upstreamHeaders(streaming),
-
-          responseType: streaming
-            ? 'stream'
-            : 'json',
-
-          timeout: 0,
-          signal: controller.signal,
-          validateStatus: () => true,
-          maxRedirects: 0,
-          maxContentLength: 100 * 1024 * 1024,
-          maxBodyLength: 100 * 1024 * 1024
-        }
+        streaming,
+        controller.signal
       );
+
+      // ------------------------------------------------------
+      // AUTOMATIC MISTRAL HTTP 400 FALLBACK
+      //
+      // Retry 1:
+      // Core fields, high reasoning.
+      //
+      // Retry 2:
+      // Core fields, none reasoning.
+      //
+      // Original history is retained in both requests.
+      // ------------------------------------------------------
+
+      if (
+        profile.adapter === 'mistral4' &&
+        upstream.status === 400 &&
+        !clientDisconnected
+      ) {
+        let firstErrorData = upstream.data;
+
+        if (streaming && upstream.data) {
+          firstErrorData = parseJsonOrText(
+            await readStreamText(
+              upstream.data,
+              65536
+            )
+          );
+        }
+
+        mistralFirstError =
+          safeErrorForLog(firstErrorData);
+
+        mistralFallbackAttempted = true;
+        mistralFallbackStage = 1;
+
+        let fallbackBody =
+          buildMistralFallbackBody(body, 'high');
+
+        console.warn(
+          'Mistral HTTP 400. Retrying with core fields and high reasoning.',
+          JSON.stringify({
+            requestId: req.proxyRequestId,
+            preservedMessageCount: fallbackBody.messages.length,
+            removedOptionalFields: Object.keys(body).filter(
+              key =>
+                !Object.prototype.hasOwnProperty.call(
+                  fallbackBody,
+                  key
+                )
+            )
+          })
+        );
+
+        upstream = await postNvidiaChat(
+          fallbackBody,
+          streaming,
+          controller.signal
+        );
+
+        if (
+          upstream.status === 400 &&
+          !clientDisconnected
+        ) {
+          let secondErrorData = upstream.data;
+
+          if (streaming && upstream.data) {
+            secondErrorData = parseJsonOrText(
+              await readStreamText(
+                upstream.data,
+                65536
+              )
+            );
+          }
+
+          mistralSecondError =
+            safeErrorForLog(secondErrorData);
+
+          mistralFallbackStage = 2;
+
+          fallbackBody =
+            buildMistralFallbackBody(body, 'none');
+
+          console.warn(
+            'Mistral core request still returned HTTP 400. Retrying with reasoning_effort=none.',
+            JSON.stringify({
+              requestId: req.proxyRequestId,
+              preservedMessageCount: fallbackBody.messages.length
+            })
+          );
+
+          upstream = await postNvidiaChat(
+            fallbackBody,
+            streaming,
+            controller.signal
+          );
+        }
+
+        // Keep the final attempted request for diagnostics.
+        body = fallbackBody;
+      }
 
       if (clientDisconnected || res.destroyed) {
         if (
@@ -1778,11 +1976,11 @@ app.post(
         return;
       }
 
-      let completedByPolling = false;
+      // ------------------------------------------------------
+      // NVIDIA ASYNC 202 RESPONSES
+      // ------------------------------------------------------
 
-      // ------------------------------------------------------
-      // HANDLE NVIDIA ASYNC 202 RESPONSES
-      // ------------------------------------------------------
+      let completedByPolling = false;
 
       if (upstream.status === 202) {
         let pendingData = upstream.data;
@@ -1833,7 +2031,7 @@ app.post(
       }
 
       // ------------------------------------------------------
-      // HANDLE UPSTREAM ERRORS
+      // UPSTREAM ERRORS
       // ------------------------------------------------------
 
       if (
@@ -1880,7 +2078,7 @@ app.post(
             summarizeMessages(body.messages);
 
           diagnostic.inputMessageCount =
-            requestBody.messages.length;
+            originalMistralMessages.length;
 
           diagnostic.outputMessageCount =
             body.messages.length;
@@ -1900,6 +2098,39 @@ app.post(
 
           diagnostic.temperature = body.temperature;
           diagnostic.topP = body.top_p;
+
+          diagnostic.fallbackAttempted =
+            mistralFallbackAttempted;
+
+          diagnostic.fallbackStage =
+            mistralFallbackStage;
+
+          diagnostic.firstAttemptError =
+            mistralFirstError;
+
+          diagnostic.secondAttemptError =
+            mistralSecondError;
+
+          diagnostic.whitespaceOnlyMessagesInOriginal =
+            countWhitespaceOnlyMessages(
+              originalMistralMessages
+            );
+
+          diagnostic.nullReasoningFieldsInOriginal =
+            countNullReasoningFields(
+              originalMistralMessages
+            );
+
+          diagnostic.requestBodyBytes =
+            Buffer.byteLength(
+              JSON.stringify(body),
+              'utf8'
+            );
+
+          diagnostic.oneCharacterMessages =
+            findOneCharacterMessages(
+              body.messages
+            );
         }
 
         console.error(
@@ -1915,6 +2146,26 @@ app.post(
             `NVIDIA returned HTTP ${upstream.status}.`
           ),
           'upstream_error'
+        );
+      }
+
+      // ------------------------------------------------------
+      // FALLBACK SUCCESS LOG
+      // ------------------------------------------------------
+
+      if (
+        profile.adapter === 'mistral4' &&
+        mistralFallbackAttempted
+      ) {
+        console.warn(
+          'Mistral core-request fallback succeeded.',
+          JSON.stringify({
+            requestId: req.proxyRequestId,
+            model: profile.upstream,
+            status: upstream.status,
+            successfulFallbackStage:
+              mistralFallbackStage
+          })
         );
       }
 
@@ -1976,6 +2227,7 @@ app.post(
               );
 
               if (!writable) return;
+
               if (receivedDone) break;
             }
 
