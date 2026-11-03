@@ -4,8 +4,8 @@
  * JANITORAI MULTI-PROVIDER PROXY
  * NVIDIA NIM + Google Gemini
  *
- * Requirements: Node.js 20+
- * Dependencies: none
+ * Node.js 20+
+ * No external dependencies.
  *
  * Endpoints:
  *   GET  /
@@ -13,10 +13,20 @@
  *   GET  /v1/models
  *   POST /v1/chat/completions
  *
- * No automatic system prompts.
- * No roleplay continuity prompts.
- * No synthetic user messages.
- * No conversation rewriting.
+ * FEATURES:
+ * - Accepts arbitrary NVIDIA model IDs.
+ * - Accepts arbitrary Gemini model IDs.
+ * - Dynamically retrieves provider model catalogs.
+ * - Supports streaming and non-streaming responses.
+ * - Supports concurrency queues.
+ * - Supports optional proxy authentication.
+ * - Supports CORS.
+ *
+ * IMPORTANT:
+ * - No server-generated system prompts.
+ * - No synthetic user messages.
+ * - No conversation rewriting.
+ * - No model allow-list.
  */
 
 const http = require('node:http');
@@ -40,17 +50,13 @@ function number(name, fallback, min = 1) {
   return value;
 }
 
-function list(name, defaults) {
-  if (!env[name]) return defaults;
+function csv(name, fallback = []) {
+  if (!env[name]) return fallback;
 
-  return [
-    ...new Set(
-      env[name]
-        .split(',')
-        .map(value => value.trim())
-        .filter(Boolean)
-    )
-  ];
+  return env[name]
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
 }
 
 const PORT = number('PORT', 3000);
@@ -72,6 +78,8 @@ const GEMINI_URL = (
   'https://generativelanguage.googleapis.com/v1beta/openai'
 ).replace(/\/+$/, '');
 
+const DEFAULT_MODEL = env.DEFAULT_MODEL || '';
+
 const DEFAULT_MAX_TOKENS = number(
   'DEFAULT_MAX_TOKENS',
   8192
@@ -82,11 +90,26 @@ const MAX_BODY = number(
   20 * 1024 * 1024
 );
 
+const MAX_RESPONSE = number(
+  'MAX_RESPONSE_BYTES',
+  32 * 1024 * 1024
+);
+
 const TIMEOUT = number(
   'REQUEST_TIMEOUT_MS',
   600000,
   1000
 );
+
+const MODEL_LIST_TIMEOUT = number(
+  'MODEL_LIST_TIMEOUT_MS',
+  15000
+);
+
+const MODEL_CACHE_TIME = number(
+  'MODEL_CACHE_SECONDS',
+  60
+) * 1000;
 
 const NVIDIA_CONCURRENCY = number(
   'NVIDIA_MAX_CONCURRENT_REQUESTS',
@@ -110,7 +133,6 @@ const QUEUE_TIMEOUT = number(
 );
 
 const STRIP_REASONING = env.STRIP_REASONING === 'true';
-const ALLOW_CUSTOM_MODELS = env.ALLOW_CUSTOM_MODELS === 'true';
 
 const PROXY_KEY = env.PROXY_API_KEY || '';
 
@@ -126,107 +148,81 @@ for (const providerUrl of [NVIDIA_URL, GEMINI_URL]) {
   }
 }
 
-// ============================================================
-// MODEL CATALOG
-// ============================================================
+// Optional manually added model IDs.
+// These only supplement the dynamic model list.
+// They NEVER restrict which models can be requested.
 
-// These are configurable catalog entries.
-// Availability depends on your provider account.
-
-const NVIDIA_MODELS = list('NVIDIA_MODELS', [
-  'mistralai/mistral-large-4-1t-a52b',
-  'nvidia/nemotron-3.5-bolt-e4b',
-  'minimaxai/minimax-m3.1-flash',
-  'nvidia/nemotron-3.5-super-vl-120b-a12b',
-  'nvidia/ising-calibration-1.5-31b',
-  'stepfun-ai/step-5-preview',
-  'z-ai/glm-5.3-flash',
-  'poolside/laguna-xs-2.1'
-]);
-
-const GEMINI_MODELS = list('GEMINI_MODELS', [
-  'gemini-3.8-flash',
-  'gemini-3.6-flash',
-  'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite',
-  'gemini-2.5-pro',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite'
-]);
-
-const DEFAULT_MODEL = env.DEFAULT_MODEL || (
-  NVIDIA_KEY
-    ? NVIDIA_MODELS[0]
-    : `google/${GEMINI_MODELS[0]}`
-);
+const EXTRA_NVIDIA_MODELS = csv('EXTRA_NVIDIA_MODELS');
+const EXTRA_GEMINI_MODELS = csv('EXTRA_GEMINI_MODELS');
 
 // ============================================================
-// MODEL RESOLUTION
+// MODEL ROUTING
 // ============================================================
 
 function resolveModel(requested) {
-  if (!requested) {
-    requested = DEFAULT_MODEL;
-  }
-
-  if (typeof requested !== 'string') {
+  if (typeof requested !== 'string' || !requested.trim()) {
     return null;
   }
 
-  // Gemini format: google/gemini-model
-  if (requested.startsWith('google/')) {
-    const id = requested.slice(7);
+  const original = requested.trim();
 
-    if (!GEMINI_KEY) return null;
-
-    if (
-      !ALLOW_CUSTOM_MODELS &&
-      !GEMINI_MODELS.includes(id)
-    ) {
-      return null;
-    }
-
+  // Explicit Gemini prefix.
+  if (original.startsWith('gemini/')) {
     return {
       provider: 'gemini',
-      model: id,
-      id: requested
+      model: original.slice(7),
+      id: original
     };
   }
 
-  // Alternative Gemini format: gemini/gemini-model
-  if (requested.startsWith('gemini/')) {
-    const id = requested.slice(7);
+  // Backward compatibility with google/gemini-model.
+  //
+  // NVIDIA also has models with IDs beginning google/.
+  // Therefore, only route google/ IDs containing Gemini
+  // model names to Google. Other google/ IDs go to NVIDIA.
 
-    if (!GEMINI_KEY) return null;
+  if (original.startsWith('google/')) {
+    const id = original.slice(7);
 
     if (
-      !ALLOW_CUSTOM_MODELS &&
-      !GEMINI_MODELS.includes(id)
+      id.startsWith('gemini-') ||
+      id.startsWith('models/gemini-')
     ) {
-      return null;
+      return {
+        provider: 'gemini',
+        model: id,
+        id: original
+      };
     }
-
-    return {
-      provider: 'gemini',
-      model: id,
-      id: requested
-    };
   }
 
-  // NVIDIA models use their regular model IDs.
-  if (!NVIDIA_KEY) return null;
-
-  if (
-    !ALLOW_CUSTOM_MODELS &&
-    !NVIDIA_MODELS.includes(requested)
-  ) {
-    return null;
-  }
+  // Anything else is an NVIDIA model ID.
+  // The original ID is passed through unchanged.
 
   return {
     provider: 'nvidia',
-    model: requested,
-    id: requested
+    model: original,
+    id: original
+  };
+}
+
+// ============================================================
+// PROVIDER CONFIGURATION
+// ============================================================
+
+function providerDetails(provider) {
+  if (provider === 'gemini') {
+    return {
+      name: 'Gemini',
+      url: GEMINI_URL,
+      key: GEMINI_KEY
+    };
+  }
+
+  return {
+    name: 'NVIDIA',
+    url: NVIDIA_URL,
+    key: NVIDIA_KEY
   };
 }
 
@@ -269,8 +265,7 @@ class Queue {
       const entry = {
         settled: false,
         timer: null,
-        abort: null,
-        grant: null
+        abort: null
       };
 
       const remove = () => {
@@ -284,20 +279,20 @@ class Queue {
       const cleanup = () => {
         clearTimeout(entry.timer);
 
-        if (entry.abort) {
-          signal.removeEventListener(
-            'abort',
-            entry.abort
-          );
-        }
+        signal.removeEventListener(
+          'abort',
+          entry.abort
+        );
       };
 
       const rejectEntry = error => {
         if (entry.settled) return;
 
         entry.settled = true;
+
         remove();
         cleanup();
+
         reject(error);
       };
 
@@ -322,6 +317,7 @@ class Queue {
         );
 
         error.status = 503;
+
         rejectEntry(error);
       }, this.timeout);
 
@@ -335,7 +331,6 @@ class Queue {
 
       this.waiting.push(entry);
 
-      // Handle a signal that was aborted while registering.
       if (signal.aborted) {
         entry.abort();
       }
@@ -349,7 +344,11 @@ class Queue {
       if (released) return;
 
       released = true;
-      this.active = Math.max(0, this.active - 1);
+
+      this.active = Math.max(
+        0,
+        this.active - 1
+      );
 
       this.dispatch();
     };
@@ -367,6 +366,7 @@ class Queue {
       }
 
       this.active++;
+
       entry.grant();
     }
   }
@@ -421,6 +421,7 @@ function errorResponse(
 
 async function readBody(req) {
   const chunks = [];
+
   let size = 0;
   let tooLarge = false;
 
@@ -439,8 +440,12 @@ async function readBody(req) {
   }
 
   if (tooLarge) {
-    const error = new Error('Request body too large.');
+    const error = new Error(
+      'Request body too large.'
+    );
+
     error.status = 413;
+
     throw error;
   }
 
@@ -449,9 +454,67 @@ async function readBody(req) {
       Buffer.concat(chunks).toString('utf8')
     );
   } catch {
-    const error = new Error('Invalid JSON body.');
+    const error = new Error(
+      'Invalid JSON body.'
+    );
+
     error.status = 400;
+
     throw error;
+  }
+}
+
+async function readLimited(
+  response,
+  limit = MAX_RESPONSE
+) {
+  if (!response.body) {
+    return {
+      text: '',
+      truncated: false
+    };
+  }
+
+  const chunks = [];
+
+  let total = 0;
+  let truncated = false;
+
+  for await (const chunk of response.body) {
+    const buffer = Buffer.from(chunk);
+    const remaining = limit - total;
+
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+
+    if (buffer.length > remaining) {
+      chunks.push(
+        buffer.subarray(0, remaining)
+      );
+
+      total += remaining;
+      truncated = true;
+
+      break;
+    }
+
+    chunks.push(buffer);
+    total += buffer.length;
+  }
+
+  return {
+    text: Buffer.concat(chunks).toString('utf8'),
+    truncated
+  };
+}
+
+function parseResponse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
 }
 
@@ -460,19 +523,24 @@ async function readBody(req) {
 // ============================================================
 
 function authenticate(req, res) {
-  // Proxy authentication is optional.
   if (!PROXY_KEY) return true;
 
   const match = String(
     req.headers.authorization || ''
   ).match(/^Bearer\s+(.+)$/i);
 
-  const supplied = Buffer.from(match?.[1] || '');
+  const supplied = Buffer.from(
+    match?.[1] || ''
+  );
+
   const expected = Buffer.from(PROXY_KEY);
 
   const valid =
     supplied.length === expected.length &&
-    crypto.timingSafeEqual(supplied, expected);
+    crypto.timingSafeEqual(
+      supplied,
+      expected
+    );
 
   if (!valid) {
     errorResponse(
@@ -489,45 +557,246 @@ function authenticate(req, res) {
 }
 
 // ============================================================
-// PROVIDER CONFIGURATION
+// DYNAMIC MODEL DISCOVERY
 // ============================================================
 
-function providerDetails(provider) {
-  if (provider === 'gemini') {
-    return {
-      url: GEMINI_URL,
-      key: GEMINI_KEY
-    };
+// Fetch real models directly from each provider.
+//
+// NVIDIA:
+//   GET {NVIDIA_BASE_URL}/models
+//
+// Gemini:
+//   GET {GEMINI_BASE_URL}/models
+//
+// Gemini models are prefixed with gemini/ in our response
+// so the proxy can distinguish them from NVIDIA model IDs.
+//
+// No hard-coded allow-list is used.
+
+let modelCache = null;
+let modelCacheTime = 0;
+let modelFetchPromise = null;
+
+async function fetchProviderModels(providerName) {
+  const provider = providerDetails(providerName);
+
+  if (!provider.key) {
+    return [];
+  }
+
+  const controller = new AbortController();
+
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, MODEL_LIST_TIMEOUT);
+
+  timer.unref?.();
+
+  try {
+    const response = await fetch(
+      `${provider.url}/models`,
+      {
+        method: 'GET',
+
+        headers: {
+          Authorization: `Bearer ${provider.key}`,
+          Accept: 'application/json'
+        },
+
+        signal: controller.signal
+      }
+    );
+
+    const result = await readLimited(
+      response,
+      5 * 1024 * 1024
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `${provider.name} model listing returned HTTP ${response.status}: ` +
+        result.text.slice(0, 1000)
+      );
+    }
+
+    if (result.truncated) {
+      throw new Error(
+        `${provider.name} model list exceeded the size limit.`
+      );
+    }
+
+    const parsed = parseResponse(result.text);
+
+    if (!Array.isArray(parsed?.data)) {
+      throw new Error(
+        `${provider.name} returned an unexpected model-list response.`
+      );
+    }
+
+    const models = [];
+
+    for (const item of parsed.data) {
+      if (
+        !item ||
+        typeof item.id !== 'string' ||
+        !item.id.trim()
+      ) {
+        continue;
+      }
+
+      const id = item.id.trim();
+
+      if (providerName === 'gemini') {
+        models.push({
+          ...item,
+          id: id.startsWith('gemini/')
+            ? id
+            : `gemini/${id}`,
+          owned_by: 'google'
+        });
+      } else {
+        models.push({
+          ...item,
+          id,
+          owned_by: item.owned_by || 'nvidia'
+        });
+      }
+    }
+
+    return models;
+
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function buildModelList() {
+  const providers = [];
+
+  if (NVIDIA_KEY) {
+    providers.push('nvidia');
+  }
+
+  if (GEMINI_KEY) {
+    providers.push('gemini');
+  }
+
+  const results = await Promise.allSettled(
+    providers.map(fetchProviderModels)
+  );
+
+  const models = [];
+  const errors = [];
+
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const provider = providers[i];
+
+    if (result.status === 'fulfilled') {
+      models.push(...result.value);
+    } else {
+      errors.push(
+        `${provider}: ${result.reason?.message || 'Model listing failed.'}`
+      );
+
+      console.error(
+        '[MODEL DISCOVERY ERROR]',
+        provider,
+        result.reason?.message
+      );
+    }
+  }
+
+  // Optional manually supplied IDs supplement discovered models.
+  for (const id of EXTRA_NVIDIA_MODELS) {
+    models.push({
+      id,
+      object: 'model',
+      owned_by: 'nvidia'
+    });
+  }
+
+  for (const id of EXTRA_GEMINI_MODELS) {
+    models.push({
+      id: id.startsWith('gemini/')
+        ? id
+        : `gemini/${id}`,
+      object: 'model',
+      owned_by: 'google'
+    });
+  }
+
+  // Remove duplicate model IDs.
+  const unique = new Map();
+
+  for (const model of models) {
+    unique.set(model.id, model);
+  }
+
+  if (providers.length > 0 && errors.length === providers.length) {
+    throw new Error(
+      `Unable to retrieve models from configured providers: ${errors.join(' | ')}`
+    );
   }
 
   return {
-    url: NVIDIA_URL,
-    key: NVIDIA_KEY
+    object: 'list',
+    data: [...unique.values()]
   };
 }
 
+async function getModelList(forceRefresh = false) {
+  const now = Date.now();
+
+  if (
+    !forceRefresh &&
+    modelCache &&
+    now - modelCacheTime < MODEL_CACHE_TIME
+  ) {
+    return modelCache;
+  }
+
+  if (modelFetchPromise) {
+    return modelFetchPromise;
+  }
+
+  modelFetchPromise = buildModelList();
+
+  try {
+    const result = await modelFetchPromise;
+
+    modelCache = result;
+    modelCacheTime = Date.now();
+
+    return result;
+
+  } finally {
+    modelFetchPromise = null;
+  }
+}
+
 // ============================================================
-// JANITORAI MESSAGE HANDLING
+// JANITORAI MESSAGES
 // ============================================================
 
-// Do not add, remove, summarize, reorder, or rewrite messages.
-// JanitorAI supplies the conversation and selected prompt.
+// Preserve the actual messages JanitorAI provides.
+// No messages are inserted, deleted, summarized, or reordered.
 
 function preserveMessages(messages) {
   return messages;
 }
 
 // ============================================================
-// PROVIDER REQUEST ADAPTER
+// REQUEST PREPARATION
 // ============================================================
 
 function prepareRequest(input, profile) {
   const body = { ...input };
 
-  // Translate the proxy model name into the provider model ID.
+  // Only translate the provider routing prefix.
   body.model = profile.model;
 
-  // Support both OpenAI token parameter names.
+  // Handle OpenAI token parameter compatibility.
   if (
     body.max_tokens === undefined &&
     body.max_completion_tokens !== undefined
@@ -541,17 +810,15 @@ function prepareRequest(input, profile) {
     body.max_tokens = DEFAULT_MAX_TOKENS;
   }
 
-  // Keep JanitorAI's messages exactly as supplied.
   body.messages = preserveMessages(input.messages);
 
-  // Other request parameters remain unchanged.
-  // No server-generated prompts or prefill messages.
+  // Everything else supplied by JanitorAI remains untouched.
 
   return body;
 }
 
 // ============================================================
-// RESPONSE HELPERS
+// REASONING FILTER
 // ============================================================
 
 function removeReasoning(value) {
@@ -581,76 +848,26 @@ function removeReasoning(value) {
   return result;
 }
 
-async function readLimited(
-  response,
-  limit = 32 * 1024 * 1024
-) {
-  if (!response.body) {
-    return {
-      text: '',
-      truncated: false
-    };
-  }
-
-  const chunks = [];
-  let total = 0;
-  let truncated = false;
-
-  for await (const chunk of response.body) {
-    const buffer = Buffer.from(chunk);
-    const remaining = limit - total;
-
-    if (remaining <= 0) {
-      truncated = true;
-      break;
-    }
-
-    if (buffer.length > remaining) {
-      chunks.push(buffer.subarray(0, remaining));
-      total += remaining;
-      truncated = true;
-      break;
-    }
-
-    chunks.push(buffer);
-    total += buffer.length;
-  }
-
-  return {
-    text: Buffer.concat(chunks).toString('utf8'),
-    truncated
-  };
-}
-
-function parseResponse(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
 // ============================================================
-// STREAMING HELPERS
+// STREAMING
 // ============================================================
 
 function transformSSEFrame(frame) {
   const lines = frame.split(/\r?\n/);
 
-  const dataIndexes = [];
+  const indexes = [];
 
   for (let i = 0; i < lines.length; i++) {
-    if (/^data:/.test(lines[i])) {
-      dataIndexes.push(i);
+    if (lines[i].startsWith('data:')) {
+      indexes.push(i);
     }
   }
 
-  // Standard OpenAI-compatible streaming uses one data line.
-  if (dataIndexes.length !== 1) {
+  if (indexes.length !== 1) {
     return frame;
   }
 
-  const index = dataIndexes[0];
+  const index = indexes[0];
 
   const raw = lines[index]
     .slice(5)
@@ -662,11 +879,14 @@ function transformSSEFrame(frame) {
 
   try {
     const parsed = JSON.parse(raw);
-    const cleaned = removeReasoning(parsed);
 
-    lines[index] = `data: ${JSON.stringify(cleaned)}`;
+    lines[index] = (
+      'data: ' +
+      JSON.stringify(removeReasoning(parsed))
+    );
 
     return lines.join('\n');
+
   } catch {
     return frame;
   }
@@ -686,12 +906,12 @@ function waitForDrain(res, signal) {
       );
     };
 
-    const done = result => {
+    const done = value => {
       if (finished) return;
 
       finished = true;
       cleanup();
-      resolve(result);
+      resolve(value);
     };
 
     const onDrain = () => done(true);
@@ -713,11 +933,7 @@ function waitForDrain(res, signal) {
   });
 }
 
-async function writeStreamChunk(
-  res,
-  chunk,
-  signal
-) {
+async function writeStreamChunk(res, chunk, signal) {
   if (res.destroyed || signal.aborted) {
     return false;
   }
@@ -729,15 +945,7 @@ async function writeStreamChunk(
   return waitForDrain(res, signal);
 }
 
-// ============================================================
-// STREAMING RESPONSE
-// ============================================================
-
-async function streamResponse(
-  upstream,
-  res,
-  signal
-) {
+async function streamResponse(upstream, res, signal) {
   res.writeHead(upstream.status, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
@@ -753,7 +961,7 @@ async function streamResponse(
   }
 
   try {
-    // Normal streaming: forward provider chunks unchanged.
+    // Default: forward the provider stream without modification.
     if (!STRIP_REASONING) {
       for await (const chunk of upstream.body) {
         if (signal.aborted || res.destroyed) {
@@ -769,10 +977,9 @@ async function streamResponse(
         if (!written) return;
       }
     } else {
-      // Reasoning filtering uses a buffer so SSE frames
-      // split across network chunks are not corrupted.
-
+      // Buffer complete SSE frames before filtering.
       const decoder = new TextDecoder();
+
       let buffer = '';
 
       for await (const chunk of upstream.body) {
@@ -789,18 +996,22 @@ async function streamResponse(
 
           if (!match) break;
 
-          const frame = buffer.slice(0, match.index);
+          const frame = buffer.slice(
+            0,
+            match.index
+          );
+
           const separator = match[0];
 
           buffer = buffer.slice(
             match.index + separator.length
           );
 
-          const transformed = transformSSEFrame(frame);
+          const output = transformSSEFrame(frame);
 
           const written = await writeStreamChunk(
             res,
-            Buffer.from(transformed + separator),
+            Buffer.from(output + separator),
             signal
           );
 
@@ -811,11 +1022,11 @@ async function streamResponse(
       buffer += decoder.decode();
 
       if (buffer.length > 0) {
-        const transformed = transformSSEFrame(buffer);
+        const output = transformSSEFrame(buffer);
 
         const written = await writeStreamChunk(
           res,
-          Buffer.from(transformed),
+          Buffer.from(output),
           signal
         );
 
@@ -826,6 +1037,7 @@ async function streamResponse(
     if (!res.destroyed && !res.writableEnded) {
       res.end();
     }
+
   } catch (error) {
     console.error(
       '[STREAM ERROR]',
@@ -842,11 +1054,7 @@ async function streamResponse(
 // CHAT COMPLETIONS
 // ============================================================
 
-async function chatCompletions(
-  req,
-  res,
-  requestId
-) {
+async function chatCompletions(req, res, requestId) {
   const started = Date.now();
 
   const controller = new AbortController();
@@ -905,40 +1113,61 @@ async function chatCompletions(
       );
     }
 
+    const requestedModel = (
+      input.model || DEFAULT_MODEL
+    );
+
     if (
-      input.model !== undefined &&
-      (
-        typeof input.model !== 'string' ||
-        !input.model.trim()
-      )
+      typeof requestedModel !== 'string' ||
+      !requestedModel.trim()
     ) {
       return errorResponse(
         res,
         400,
-        'Invalid model.',
+        'No model was specified. Set DEFAULT_MODEL or send a model in the request.',
         'invalid_request_error'
       );
     }
 
-    const profile = resolveModel(
-      input.model || DEFAULT_MODEL
-    );
+    // Resolve provider without checking a model allow-list.
+    const profile = resolveModel(requestedModel);
 
-    if (!profile) {
+    if (!profile || !profile.model) {
       return errorResponse(
         res,
         400,
-        `Unknown or unavailable model: ${
-          input.model || DEFAULT_MODEL
-        }`,
+        'Invalid model identifier.',
         'invalid_request_error'
       );
     }
 
-    const body = prepareRequest(input, profile);
-    const provider = providerDetails(profile.provider);
+    const provider = providerDetails(
+      profile.provider
+    );
 
-    // Wait for the provider concurrency slot.
+    if (!provider.key) {
+      return errorResponse(
+        res,
+        503,
+        `${provider.name} is not configured. Add its API key to the server environment.`,
+        'provider_not_configured'
+      );
+    }
+
+    const body = prepareRequest(
+      input,
+      profile
+    );
+
+    console.log(JSON.stringify({
+      type: 'generation_started',
+      requestId,
+      provider: profile.provider,
+      model: profile.model,
+      streaming: Boolean(body.stream)
+    }));
+
+    // Acquire concurrency slot.
     release = await queues[profile.provider].acquire(
       controller.signal
     );
@@ -946,14 +1175,6 @@ async function chatCompletions(
     if (controller.signal.aborted) {
       return;
     }
-
-    console.log(JSON.stringify({
-      type: 'provider_request',
-      requestId,
-      provider: profile.provider,
-      model: profile.model,
-      stream: Boolean(body.stream)
-    }));
 
     const upstream = await fetch(
       `${provider.url}/chat/completions`,
@@ -978,25 +1199,25 @@ async function chatCompletions(
       return;
     }
 
-    // Provider returned an error.
+    // Upstream error.
     if (!upstream.ok) {
       const result = await readLimited(
         upstream,
         1024 * 1024
       );
 
-      const data = result.truncated
+      const parsed = result.truncated
         ? null
         : parseResponse(result.text);
 
       const message =
-        data?.error?.message ||
-        data?.message ||
+        parsed?.error?.message ||
+        parsed?.message ||
         result.text.slice(0, 3000) ||
         `Provider returned HTTP ${upstream.status}.`;
 
       console.error(JSON.stringify({
-        type: 'provider_error',
+        type: 'generation_failed',
         requestId,
         provider: profile.provider,
         model: profile.model,
@@ -1020,6 +1241,14 @@ async function chatCompletions(
         controller.signal
       );
 
+      console.log(JSON.stringify({
+        type: 'generation_finished',
+        requestId,
+        provider: profile.provider,
+        model: profile.model,
+        duration: Date.now() - started
+      }));
+
       return;
     }
 
@@ -1030,7 +1259,7 @@ async function chatCompletions(
       return errorResponse(
         res,
         502,
-        'Provider response exceeded the response size limit.',
+        'Provider response exceeded the configured size limit.',
         'upstream_error'
       );
     }
@@ -1053,7 +1282,7 @@ async function chatCompletions(
     json(res, upstream.status, data);
 
     console.log(JSON.stringify({
-      type: 'provider_success',
+      type: 'generation_finished',
       requestId,
       provider: profile.provider,
       model: profile.model,
@@ -1075,11 +1304,11 @@ async function chatCompletions(
     }
 
     if (timedOut) {
-      console.error(JSON.stringify({
-        type: 'provider_timeout',
+      console.error(
+        '[TIMEOUT]',
         requestId,
-        duration: Date.now() - started
-      }));
+        profileSafeModel(requestId),
+      );
 
       return errorResponse(
         res,
@@ -1120,43 +1349,8 @@ async function chatCompletions(
   }
 }
 
-// ============================================================
-// MODEL LIST
-// ============================================================
-
-function modelList() {
-  const models = [];
-
-  const created = Math.floor(
-    Date.now() / 1000
-  );
-
-  if (NVIDIA_KEY) {
-    for (const id of NVIDIA_MODELS) {
-      models.push({
-        id,
-        object: 'model',
-        created,
-        owned_by: 'nvidia'
-      });
-    }
-  }
-
-  if (GEMINI_KEY) {
-    for (const id of GEMINI_MODELS) {
-      models.push({
-        id: `google/${id}`,
-        object: 'model',
-        created,
-        owned_by: 'google'
-      });
-    }
-  }
-
-  return {
-    object: 'list',
-    data: models
-  };
+function profileSafeModel(requestId) {
+  return requestId;
 }
 
 // ============================================================
@@ -1205,7 +1399,7 @@ const server = http.createServer(async (req, res) => {
   const requestId = crypto.randomUUID();
   const started = Date.now();
 
-  let path = '/';
+  let path;
 
   try {
     path = new URL(
@@ -1224,14 +1418,14 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('X-Request-ID', requestId);
   res.setHeader('X-Content-Type-Options', 'nosniff');
 
-  // CORS headers must be added before handling routes.
   applyCors(req, res);
 
-  // Log every request, without logging prompts or API keys.
+  // Log requests without exposing prompts or credentials.
   let logged = false;
 
   const logRequest = () => {
     if (logged) return;
+
     logged = true;
 
     console.log(JSON.stringify({
@@ -1247,13 +1441,13 @@ const server = http.createServer(async (req, res) => {
   res.once('finish', logRequest);
   res.once('close', logRequest);
 
-  // Browser preflight must not require proxy authentication.
+  // Always allow CORS preflight.
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
   }
 
-  // Authenticate API routes if PROXY_API_KEY is configured.
+  // Authenticate API routes if configured.
   if (
     path.startsWith('/v1/') &&
     !authenticate(req, res)
@@ -1261,7 +1455,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Root endpoint.
+  // Root.
   if (
     req.method === 'GET' &&
     path === '/'
@@ -1275,11 +1469,12 @@ const server = http.createServer(async (req, res) => {
         gemini: Boolean(GEMINI_KEY)
       },
 
-      default_model: DEFAULT_MODEL
+      default_model: DEFAULT_MODEL || null,
+      model_restrictions: false
     });
   }
 
-  // Health endpoint.
+  // Health.
   if (
     req.method === 'GET' &&
     path === '/health'
@@ -1307,12 +1502,35 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // Model listing.
+  // Dynamic model catalog.
   if (
     req.method === 'GET' &&
     path === '/v1/models'
   ) {
-    return json(res, 200, modelList());
+    try {
+      const forceRefresh =
+        new URL(req.url, 'http://localhost')
+          .searchParams.get('refresh') === 'true';
+
+      const models = await getModelList(
+        forceRefresh
+      );
+
+      return json(res, 200, models);
+
+    } catch (error) {
+      console.error(
+        '[MODEL LIST ERROR]',
+        error.message
+      );
+
+      return errorResponse(
+        res,
+        502,
+        error.message,
+        'model_discovery_error'
+      );
+    }
   }
 
   // Chat completions.
@@ -1359,24 +1577,27 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(' JANITORAI MULTI-PROVIDER PROXY');
   console.log('==========================================');
 
-  console.log(`Port:               ${PORT}`);
-  console.log(`NVIDIA:             ${Boolean(NVIDIA_KEY)}`);
-  console.log(`Gemini:              ${Boolean(GEMINI_KEY)}`);
-  console.log(`Default model:       ${DEFAULT_MODEL}`);
+  console.log(`Port:                ${PORT}`);
+  console.log(`NVIDIA:              ${Boolean(NVIDIA_KEY)}`);
+  console.log(`Gemini:               ${Boolean(GEMINI_KEY)}`);
 
-  console.log(`NVIDIA models:       ${NVIDIA_MODELS.length}`);
-  console.log(`Gemini models:       ${GEMINI_MODELS.length}`);
+  console.log(
+    `Default model:        ${DEFAULT_MODEL || 'Request must specify model'}`
+  );
 
-  console.log(`NVIDIA concurrency:  ${NVIDIA_CONCURRENCY}`);
-  console.log(`Gemini concurrency:  ${GEMINI_CONCURRENCY}`);
+  console.log(`Model restrictions:   DISABLED`);
+  console.log(`Dynamic model list:   ENABLED`);
 
-  console.log(`Queue limit:         ${QUEUE_LIMIT}`);
-  console.log(`Request timeout:     ${TIMEOUT}ms`);
+  console.log(`NVIDIA concurrency:   ${NVIDIA_CONCURRENCY}`);
+  console.log(`Gemini concurrency:    ${GEMINI_CONCURRENCY}`);
 
-  console.log(`Strip reasoning:     ${STRIP_REASONING}`);
+  console.log(`Queue limit:          ${QUEUE_LIMIT}`);
+  console.log(`Request timeout:      ${TIMEOUT}ms`);
+
+  console.log(`Strip reasoning:      ${STRIP_REASONING}`);
   console.log(`Proxy authentication: ${Boolean(PROXY_KEY)}`);
 
-  console.log('Prompt injection:    DISABLED');
+  console.log('Prompt injection:     DISABLED');
   console.log('==========================================');
   console.log('');
 });
