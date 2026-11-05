@@ -885,11 +885,11 @@ addProfile(
 );
 
 addProfile(
-  `${MISTRAL4}-high`,
-  'Mistral Large 4 - High Reasoning',
+  `${MISTRAL4}-low`,
+  'Mistral Large 4 - Low Reasoning',
   MISTRAL4,
   'mistral4',
-  'high'
+  'low'
 );
 
 addProfile(
