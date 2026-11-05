@@ -877,11 +877,11 @@ addProfile(
 );
 
 addProfile(
-  `${MISTRAL4}-thinking`,
-  'Mistral Large 4 - High Reasoning',
+  `${MISTRAL4}-medium`,
+  'Mistral Large 4 - Medium Reasoning',
   MISTRAL4,
   'mistral4',
-  'high'
+  'medium'
 );
 
 addProfile(
