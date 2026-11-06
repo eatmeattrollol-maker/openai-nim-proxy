@@ -1,18 +1,22 @@
-
 {
-  "name": "nvidia-nim-janitorai-proxy",
-  "version": "3.0.0",
-  "private": true,
-  "description": "Personal NVIDIA NIM proxy for JanitorAI roleplay",
+  "name": "janitorai-rp-proxy",
+  "version": "2.0.0",
+  "description": "Personal multi-provider OpenAI-compatible proxy optimized for long-term uncensored narrative roleplay on JanitorAI. Free-tier friendly for Render.",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
   "engines": {
     "node": ">=20"
   },
-  "dependencies": {
-    "axios": "^1.8.4",
-    "express": "^4.21.2"
-  }
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "janitorai",
+    "proxy",
+    "roleplay",
+    "nvidia-nim",
+    "gemini"
+  ],
+  "license": "MIT",
+  "private": true
 }
