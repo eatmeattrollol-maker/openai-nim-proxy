@@ -1,22 +1,45 @@
+# Render Blueprint — free tier friendly
+# Docs: https://render.com/docs/blueprint-spec
+
 services:
   - type: web
-    name: janitorai-nvidia-nim-proxy
+    name: janitorai-rp-proxy
     runtime: node
-
-    buildCommand: npm ci
-    startCommand: npm start
-
+    plan: free
+    region: oregon          # change if you prefer
+    buildCommand: "echo 'No build step — pure Node'"
+    startCommand: "node server.js"
     healthCheckPath: /health
-
     envVars:
-      - key: NODE_ENV
-        value: production
-
+      - key: NODE_VERSION
+        value: "20"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PORT
+        value: "10000"      # Render injects PORT; this is a fallback
       - key: NVIDIA_API_KEY
+        sync: false         # set in Render dashboard
+      - key: GEMINI_API_KEY
         sync: false
-
+      - key: PROXY_API_KEY
+        sync: false         # strongly recommended — generate a long random string
+      - key: DEFAULT_MODEL
+        value: ""           # leave empty so every request must specify a model
+      - key: NVIDIA_MAX_CONCURRENT_REQUESTS
+        value: "3"
+      - key: GEMINI_MAX_CONCURRENT_REQUESTS
+        value: "1"
+      - key: REQUEST_QUEUE_LIMIT
+        value: "4"
+      - key: REQUEST_TIMEOUT_MS
+        value: "600000"
+      - key: STRIP_REASONING
+        value: "true"
+      - key: RP_CONTINUITY_MODE
+        value: "true"
       - key: ALLOW_UNKNOWN_MODELS
         value: "true"
-
-      - key: NODE_VERSION
-        value: "22"
+      - key: MISTRAL_ASSISTANT_PREFIX_MODE
+        value: "translate"
+      - key: CORS_ORIGINS
+        value: "https://janitorai.com,https://www.janitorai.com"
